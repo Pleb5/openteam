@@ -1,0 +1,129 @@
+{
+  "runtimeRoot": "./runtime",
+  "opencode": {
+    "binary": "opencode",
+    "model": "",
+    "agent": "build"
+  },
+  "browser": {
+    "headless": false,
+    "mcp": {
+      "name": "playwright",
+      "command": [],
+      "environment": {}
+    }
+  },
+  "providers": {
+    "github": {
+      "host": "github.com",
+      "token": "$OPENTEAM_GITHUB_TOKEN"
+    },
+    "gitlab": {
+      "host": "gitlab.com",
+      "token": "$OPENTEAM_GITLAB_TOKEN"
+    }
+  },
+  "repos": {
+    "app": {
+      "root": "$OPENTEAM_APP_ROOT",
+      "baseBranch": "dev",
+      "devCommand": [
+        "bun",
+        "run",
+        "dev",
+        "--",
+        "--config",
+        "{viteConfig}",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "{port}"
+      ],
+      "healthUrl": "http://127.0.0.1:{port}",
+      "worktreeRoot": "./runtime/worktrees/app",
+      "sharedPaths": ["node_modules"]
+    }
+  },
+  "reporting": {
+    "allowFrom": [],
+    "reportTo": [],
+    "pollIntervalMs": 5000
+  },
+  "agents": {
+    "triager-01": {
+      "role": "triager",
+      "soul": "triager",
+      "repo": "app",
+      "portStart": 18472,
+      "reporting": {
+        "dmRelays": [],
+        "outboxRelays": [],
+        "relayListBootstrapRelays": [],
+        "appDataRelays": [],
+        "signerRelays": [],
+        "reportTo": [],
+        "allowFrom": []
+      },
+      "identity": {
+        "npub": "",
+        "sec": "",
+        "bunkerProfile": "triager-01",
+        "nakClientKey": "$NOSTR_CLIENT_KEY"
+      },
+      "nostr_git": {
+        "graspServers": [],
+        "gitDataRelays": []
+      }
+    },
+    "builder-01": {
+      "role": "builder",
+      "soul": "builder",
+      "repo": "app",
+      "portStart": 18471,
+      "reporting": {
+        "dmRelays": [],
+        "outboxRelays": [],
+        "relayListBootstrapRelays": [],
+        "appDataRelays": [],
+        "signerRelays": [],
+        "reportTo": [],
+        "allowFrom": []
+      },
+      "identity": {
+        "npub": "",
+        "sec": "",
+        "bunkerProfile": "builder-01",
+        "nakClientKey": "$NOSTR_CLIENT_KEY"
+      },
+      "nostr_git": {
+        "graspServers": [],
+        "gitDataRelays": []
+      }
+    },
+    "qa-01": {
+      "role": "qa",
+      "soul": "qa",
+      "repo": "app",
+      "portStart": 18473,
+      "reporting": {
+        "dmRelays": [],
+        "outboxRelays": [],
+        "relayListBootstrapRelays": [],
+        "appDataRelays": [],
+        "signerRelays": [],
+        "reportTo": [],
+        "allowFrom": []
+      },
+      "identity": {
+        "npub": "",
+        "sec": "",
+        "bunkerProfile": "qa-01",
+        "nakClientKey": "$NOSTR_CLIENT_KEY"
+      },
+      "nostr_git": {
+        "graspServers": [],
+        "gitDataRelays": []
+      }
+    }
+  }
+}

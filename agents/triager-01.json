@@ -1,0 +1,13 @@
+{
+  "id": "triager-01",
+  "role": "triager",
+  "soul": "triager",
+  "repo": "app",
+  "description": "Primary triage worker.",
+  "capabilities": [
+    "code",
+    "browser",
+    "nostr-reporting",
+    "profile-sync"
+  ]
+}

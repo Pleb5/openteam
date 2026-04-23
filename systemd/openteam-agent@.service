@@ -1,0 +1,17 @@
+[Unit]
+Description=openteam agent %i
+After=network-online.target
+Wants=network-online.target
+PartOf=openteam.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Work/openteam
+Environment=PATH=%h/.nix-profile/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/Work/openteam/scripts/launch-agent %i
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

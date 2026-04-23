@@ -1,0 +1,13 @@
+{
+  "id": "builder-01",
+  "role": "builder",
+  "soul": "builder",
+  "repo": "app",
+  "description": "Primary implementation worker.",
+  "capabilities": [
+    "code",
+    "browser",
+    "nostr-reporting",
+    "profile-sync"
+  ]
+}

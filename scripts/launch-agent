@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+BUN_BIN="${BUN:-}"
+if [[ -z "$BUN_BIN" ]]; then
+  if [[ -x "$HOME/.nix-profile/bin/bun" ]]; then
+    BUN_BIN="$HOME/.nix-profile/bin/bun"
+  else
+    BUN_BIN="bun"
+  fi
+fi
+
+AGENT_ID="${1:-}"
+if [[ -z "$AGENT_ID" ]]; then
+  printf 'usage: launch-agent <agent-id>\n' >&2
+  exit 1
+fi
+
+exec "$BUN_BIN" run src/cli.ts serve "$AGENT_ID"

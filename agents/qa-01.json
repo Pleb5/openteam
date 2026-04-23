@@ -1,0 +1,13 @@
+{
+  "id": "qa-01",
+  "role": "qa",
+  "soul": "qa",
+  "repo": "app",
+  "description": "Primary live QA worker.",
+  "capabilities": [
+    "code",
+    "browser",
+    "nostr-reporting",
+    "profile-sync"
+  ]
+}

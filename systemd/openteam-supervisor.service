@@ -1,0 +1,12 @@
+[Unit]
+Description=openteam supervisor
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Work/openteam
+ExecStart=%h/Work/openteam/scripts/openteam doctor
+Restart=no
+
+[Install]
+WantedBy=default.target

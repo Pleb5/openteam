@@ -1,0 +1,23 @@
+{
+  "name": "openteam",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "openteam": "./dist/cli.js"
+  },
+  "scripts": {
+    "dev": "bun run src/cli.ts",
+    "test": "bun test tests/**/*.test.ts",
+    "test:coverage": "bun test --coverage tests/**/*.test.ts",
+    "check": "tsc --noEmit",
+    "build": "bun build ./src/cli.ts --target bun --outfile ./dist/cli.js"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.19.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3"
+  }
+}

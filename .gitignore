@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.DS_Store
+.idea/
+.vscode/
+config/openteam.local.json
+config/openteam.secrets.env
+runtime/
