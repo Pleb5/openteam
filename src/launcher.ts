@@ -9,6 +9,7 @@ import process from "node:process"
 import {startBunker, type RunningBunker} from "./bunker.js"
 import {prepareAgent} from "./config.js"
 import {pollInboundTasks, subscribeInboundTasks} from "./dm.js"
+import {KIND_GIT_ISSUE} from "./events.js"
 import {dispatchOperatorRequest} from "./orchestrator.js"
 import {writeRepoPublishContext} from "./repo-publish.js"
 import {releaseRepoContext, resolveRepoAnnouncementTarget, resolveRepoRelayPolicy, resolveRepoTarget, type RepoRelayPolicy} from "./repo.js"
@@ -1216,7 +1217,7 @@ const pollRepoWatch = async (app: AppCfg, agent: PreparedAgent, watch: RepoWatch
   } catch {}
 
   const events = (await queryEvents(watch.relays, {
-    kinds: [1621],
+    kinds: [KIND_GIT_ISSUE],
     since,
   }, sk).catch(() => []))
     .filter(event => !seenIds.has(event.id))

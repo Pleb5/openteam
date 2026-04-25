@@ -2,6 +2,19 @@ import {existsSync} from "node:fs"
 import {mkdir, readFile, writeFile} from "node:fs/promises"
 import path from "node:path"
 import {prepareAgent} from "./config.js"
+import {
+  KIND_GIT_COMMENT,
+  KIND_GIT_ISSUE,
+  KIND_GIT_LABEL,
+  KIND_GIT_PULL_REQUEST,
+  KIND_GIT_PULL_REQUEST_UPDATE,
+  KIND_GIT_STATUS_APPLIED,
+  KIND_GIT_STATUS_CLOSED,
+  KIND_GIT_STATUS_DRAFT,
+  KIND_GIT_STATUS_OPEN,
+  REPO_EVENT_KINDS,
+  TAG_NAMESPACE_GIT_ROLE,
+} from "./events.js"
 import {publishEventDetailed, secretKey, type PublishSummary} from "./nostr.js"
 import {
   resolveRepoAnnouncementTarget,
@@ -10,18 +23,19 @@ import {
 } from "./repo.js"
 import type {AppCfg, PreparedAgent, RepoIdentity, ResolvedRepoTarget} from "./types.js"
 
-export const KIND_GIT_ISSUE = 1621
-export const KIND_GIT_COMMENT = 1111
-export const KIND_GIT_PULL_REQUEST = 1618
-export const KIND_GIT_PULL_REQUEST_UPDATE = 1619
-export const KIND_GIT_LABEL = 1985
-export const KIND_GIT_STATUS_OPEN = 1630
-export const KIND_GIT_STATUS_APPLIED = 1631
-export const KIND_GIT_STATUS_CLOSED = 1632
-export const KIND_GIT_STATUS_DRAFT = 1633
+export {
+  KIND_GIT_COMMENT,
+  KIND_GIT_ISSUE,
+  KIND_GIT_LABEL,
+  KIND_GIT_PULL_REQUEST,
+  KIND_GIT_PULL_REQUEST_UPDATE,
+  KIND_GIT_STATUS_APPLIED,
+  KIND_GIT_STATUS_CLOSED,
+  KIND_GIT_STATUS_DRAFT,
+  KIND_GIT_STATUS_OPEN,
+}
 
 const CONTEXT_VERSION = 1
-const ROLE_NAMESPACE = "org.nostr.git.role"
 
 type UnsignedRepoEvent = {
   kind: number
@@ -296,17 +310,7 @@ const appendRepoScope = (event: UnsignedRepoEvent, identity: RepoIdentity): Prep
   return {...normalized, tags}
 }
 
-const allowedRepoEventKinds = new Set([
-  KIND_GIT_ISSUE,
-  KIND_GIT_COMMENT,
-  KIND_GIT_PULL_REQUEST,
-  KIND_GIT_PULL_REQUEST_UPDATE,
-  KIND_GIT_LABEL,
-  KIND_GIT_STATUS_OPEN,
-  KIND_GIT_STATUS_APPLIED,
-  KIND_GIT_STATUS_CLOSED,
-  KIND_GIT_STATUS_DRAFT,
-])
+const allowedRepoEventKinds = new Set<number>(REPO_EVENT_KINDS)
 
 export const publishRepoEvent = async (
   app: AppCfg,
@@ -430,7 +434,7 @@ export const buildRoleLabelEvent = ({
   rootId,
   role,
   pubkeys,
-  namespace = ROLE_NAMESPACE,
+  namespace = TAG_NAMESPACE_GIT_ROLE,
   content = "",
 }: BuildRoleLabelInput): UnsignedRepoEvent =>
   buildLabelEvent({

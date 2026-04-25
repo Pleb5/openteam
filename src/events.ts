@@ -1,0 +1,32 @@
+export const KIND_REPO_ANNOUNCEMENT = 30617
+export const KIND_DM = 4444
+export const KIND_OUTBOX_RELAYS = 10002
+export const KIND_DM_RELAYS = 10050
+export const KIND_APP_DATA = 30078
+export const KIND_GRASP_SERVERS = 30002
+
+export const KIND_GIT_ISSUE = 1621
+export const KIND_GIT_COMMENT = 1111
+export const KIND_GIT_PULL_REQUEST = 1618
+export const KIND_GIT_PULL_REQUEST_UPDATE = 1619
+export const KIND_GIT_LABEL = 1985
+export const KIND_GIT_STATUS_OPEN = 1630
+export const KIND_GIT_STATUS_APPLIED = 1631
+export const KIND_GIT_STATUS_CLOSED = 1632
+export const KIND_GIT_STATUS_DRAFT = 1633
+
+export const D_TAG_PROFILE_TOKENS = "app/nostr-git/tokens"
+export const D_TAG_GRASP_SERVERS = "grasp-servers"
+export const TAG_NAMESPACE_GIT_ROLE = "org.nostr.git.role"
+
+export const REPO_EVENT_KINDS = [
+  KIND_GIT_ISSUE,
+  KIND_GIT_COMMENT,
+  KIND_GIT_PULL_REQUEST,
+  KIND_GIT_PULL_REQUEST_UPDATE,
+  KIND_GIT_LABEL,
+  KIND_GIT_STATUS_OPEN,
+  KIND_GIT_STATUS_APPLIED,
+  KIND_GIT_STATUS_CLOSED,
+  KIND_GIT_STATUS_DRAFT,
+] as const

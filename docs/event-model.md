@@ -4,6 +4,8 @@ This document records the current Nostr event model used by `openteam` runtime b
 
 It focuses on runtime-owned events and the event families agents are expected to understand.
 
+Canonical event kind and tag constants live in `src/events.ts`. Runtime code should import those names rather than reintroducing numeric kind literals.
+
 ## Runtime-owned events
 
 These events are handled by `openteam` itself, not by ad hoc agent improvisation.

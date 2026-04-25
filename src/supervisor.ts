@@ -3,6 +3,7 @@ import {mkdir, open, readFile, writeFile} from "node:fs/promises"
 import {spawn} from "node:child_process"
 import path from "node:path"
 import {prepareAgent} from "./config.js"
+import {assertAppConfigValid} from "./config-validate.js"
 import {PROFILE_SYNC_DELAY_MS, sleep, syncGraspServers, syncOwnDmRelays, syncOwnOutboxRelays, syncProfileTokens} from "./nostr.js"
 import type {AppCfg, TaskMode} from "./types.js"
 
@@ -114,6 +115,7 @@ export const startWorker = async (
     name?: string
   },
 ) => {
+  assertAppConfigValid(app, {capability: "serve", agentId: args.agentId, mode: args.mode ?? app.config.repos[app.config.agents[args.agentId]?.repo || ""]?.mode})
   const logsDir = path.join(app.config.runtimeRoot, "logs")
   await mkdir(logsDir, {recursive: true})
 
@@ -175,6 +177,7 @@ export const startJob = async (
     parallel?: boolean
   },
 ) => {
+  assertAppConfigValid(app, {capability: "launch", agentId: args.agentId, mode: args.mode ?? app.config.repos[app.config.agents[args.agentId]?.repo || ""]?.mode ?? "web"})
   const logsDir = path.join(app.config.runtimeRoot, "logs")
   await mkdir(logsDir, {recursive: true})
 

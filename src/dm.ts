@@ -1,4 +1,5 @@
 import type {InboundDm, PreparedAgent} from "./types.js"
+import {KIND_DM} from "./events.js"
 import {allowFrom, decodeNpub, decryptFrom, dmRelays, encodeNpub, getSelfPubkey, queryEvents, secretKey, subscribeEvents} from "./nostr.js"
 
 type Evt = {
@@ -52,7 +53,7 @@ export const pollInboundTasks = async (
   const selfHex = getSelfPubkey(agent)
   const events = sortAsc(
     await queryEvents(relays, {
-      kinds: [4444],
+      kinds: [KIND_DM],
       "#p": [selfHex],
       since: Math.max(0, since),
     }, secretKey(agent)),
@@ -89,7 +90,7 @@ export const subscribeInboundTasks = async (
   return subscribeEvents(
     relays,
     {
-      kinds: [4444],
+      kinds: [KIND_DM],
       "#p": [selfHex],
       since: Math.max(0, since),
     },

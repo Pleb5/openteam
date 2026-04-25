@@ -1,14 +1,19 @@
 import {finalizeEvent, getPublicKey, nip19, nip44, SimplePool} from "nostr-tools"
 import type {Event, Filter} from "nostr-tools"
+import {
+  D_TAG_GRASP_SERVERS,
+  D_TAG_PROFILE_TOKENS,
+  KIND_APP_DATA,
+  KIND_DM,
+  KIND_DM_RELAYS,
+  KIND_GRASP_SERVERS,
+  KIND_OUTBOX_RELAYS,
+} from "./events.js"
 import type {PreparedAgent, ProviderCfg, NostrGitCfg, ReportingCfg} from "./types.js"
 
 const pool = new SimplePool({enableReconnect: true})
-const KIND_DM_RELAYS = 10050
-const KIND_OUTBOX_RELAYS = 10002
 const DIRECTORY_RELAYS = ["wss://nos.lol", "wss://relay.damus.io", "wss://purplepag.es"]
 const recipientRelayCache = new Map<string, { relays: string[]; expiresAt: number }>()
-const GRASP_SET_KIND = 30002
-const DEFAULT_GRASP_SET_ID = "grasp-servers"
 export const PROFILE_SYNC_DELAY_MS = 2000
 
 const uniq = (items: string[]) => Array.from(new Set(items.filter(Boolean)))
@@ -347,7 +352,7 @@ export const resolveRecipientDmRelays = async (agent: PreparedAgent, recipientPu
   }
 
   recipientRelayCache.delete(recipientPubkey)
-  throw new Error(`recipient ${recipientPubkey} kind 10050 inbox relays not found`)
+  throw new Error(`recipient ${recipientPubkey} kind ${KIND_DM_RELAYS} inbox relays not found`)
 }
 
 export const syncOwnOutboxRelays = async (agent: PreparedAgent) => {
@@ -442,9 +447,9 @@ export const syncProfileTokens = async (agent: PreparedAgent) => {
   const publish = await publishEventDetailed(
     relays,
     {
-      kind: 30078,
+      kind: KIND_APP_DATA,
       created_at: nowSec(),
-      tags: [["d", "app/nostr-git/tokens"]],
+      tags: [["d", D_TAG_PROFILE_TOKENS]],
       content,
     },
     secretKey(agent),
@@ -487,9 +492,9 @@ export const syncGraspServers = async (agent: PreparedAgent) => {
   const publish = await publishEventDetailed(
     relays,
     {
-      kind: GRASP_SET_KIND,
+      kind: KIND_GRASP_SERVERS,
       created_at: nowSec(),
-      tags: [["d", DEFAULT_GRASP_SET_ID]],
+      tags: [["d", D_TAG_GRASP_SERVERS]],
       content: JSON.stringify({urls}),
     },
     secretKey(agent),
@@ -533,7 +538,7 @@ export const sendDm = async (agent: PreparedAgent, body: string, recipients?: st
     await publishEvent(
       publishRelays,
       {
-        kind: 4444,
+        kind: KIND_DM,
         created_at: nowSec(),
         tags: [["p", target]],
         content: encryptFor(agent, target, body),

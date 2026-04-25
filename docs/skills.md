@@ -28,6 +28,8 @@ Skills provide:
 - command selection guidance
 - workflow discipline
 
+Canonical event-kind names are maintained in `src/events.ts`; skills should describe protocol intent in those terms and avoid inventing new numeric-kind mappings.
+
 The goal is to see how far the agents can go with a solid runtime foundation plus well-designed skills.
 
 ## Where Skills Live

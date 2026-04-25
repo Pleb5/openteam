@@ -4,6 +4,7 @@ import {spawnSync} from "node:child_process"
 import path from "node:path"
 import {nip19} from "nostr-tools"
 import {prepareAgent} from "./config.js"
+import {KIND_OUTBOX_RELAYS, KIND_REPO_ANNOUNCEMENT} from "./events.js"
 import {decodeNpub, encodeNpub, getSelfNpub, getSelfPubkey, publishEventDetailed, queryEvents, secretKey} from "./nostr.js"
 import type {
   AppCfg,
@@ -20,8 +21,6 @@ import type {
   WorkerLease,
 } from "./types.js"
 
-const KIND_REPO_ANNOUNCEMENT = 30617
-const KIND_OUTBOX_RELAYS = 10002
 const DEFAULT_REPO_DISCOVERY_RELAYS = ["wss://nos.lol", "wss://relay.damus.io", "wss://purplepag.es"]
 
 type RepoAnnouncementEvent = {
@@ -272,7 +271,7 @@ const parseDirectRepoRef = (value: string): DirectRepoRef | undefined => {
     return parseNaddr(value)
   }
 
-  const canonical = value.match(/^30617:([^:]+):(.+)$/)
+  const canonical = value.match(new RegExp(`^${KIND_REPO_ANNOUNCEMENT}:([^:]+):(.+)$`))
   if (canonical) {
     const owner = canonical[1].startsWith("npub1") ? decodeNpub(canonical[1]) : canonical[1]
     return {
@@ -1208,12 +1207,12 @@ const discoverByHint = async (app: AppCfg, registry: RepoRegistry, hint: string)
   const cached = cachedByHint(registry, hint)
   if (cached.length === 1) return cached[0]
   if (cached.length > 1) {
-    throw new Error(`target ${hint} matches multiple cached Nostr repo announcements; use 30617:<owner>:<d>`)
+    throw new Error(`target ${hint} matches multiple cached Nostr repo announcements; use ${KIND_REPO_ANNOUNCEMENT}:<owner>:<d>`)
   }
 
   const relays = repoDiscoveryRelays(app)
   if (relays.length === 0) {
-    throw new Error(`target ${hint} is only a hint; configure nostr_git.repoAnnouncementRelays to resolve kind 30617 repo announcements`)
+    throw new Error(`target ${hint} is only a hint; configure nostr_git.repoAnnouncementRelays to resolve kind ${KIND_REPO_ANNOUNCEMENT} repo announcements`)
   }
 
   const events = await queryEvents(relays, {
@@ -1239,7 +1238,7 @@ const discoverByHint = async (app: AppCfg, registry: RepoRegistry, hint: string)
     throw new Error(`target ${hint} did not resolve to a Nostr repo announcement; announce the repository first with your Nostr-git client`)
   }
   if (unique.length > 1) {
-    throw new Error(`target ${hint} matches multiple Nostr repo announcements; use 30617:<owner>:<d>`)
+    throw new Error(`target ${hint} matches multiple Nostr repo announcements; use ${KIND_REPO_ANNOUNCEMENT}:<owner>:<d>`)
   }
 
   return unique[0].identity
@@ -1280,7 +1279,7 @@ const cloneSources = (identity: RepoIdentity, hint?: string) => {
   const hints = hint ? localHintValues(hint).filter(value => isUrl(value) || existsSync(value)) : []
   const sources = uniq([...hints, ...identity.cloneUrls]).filter(value => isUrl(value) || existsSync(value))
   if (sources.length === 0) {
-    throw new Error(`repo ${identity.key} has no usable clone URL; add a clone/url tag to its 30617 announcement`)
+    throw new Error(`repo ${identity.key} has no usable clone URL; add a clone/url tag to its ${KIND_REPO_ANNOUNCEMENT} announcement`)
   }
   return sources
 }

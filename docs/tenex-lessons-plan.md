@@ -46,6 +46,8 @@ The rule going forward:
 
 ## Phase 1: Extract CLI Logic
 
+Status: implemented.
+
 Problem:
 
 - `src/cli.ts` currently contains command parsing, run diagnosis, browser inspection, repo publish commands, profile sync, relay sync, console prompt generation, and status rendering.
@@ -68,6 +70,8 @@ Acceptance checks:
 - `openteam status`, `runs list`, `runs show`, `browser status`, and `runs cleanup-stale --dry-run` keep working
 
 ## Phase 2: Centralize Event Constants
+
+Status: implemented.
 
 Problem:
 
@@ -95,6 +99,8 @@ Acceptance checks:
 - tests continue to assert exact numeric values
 
 ## Phase 3: Lightweight Config Validation
+
+Status: implemented as a manual, capability-scoped validation pass.
 
 Problem:
 
