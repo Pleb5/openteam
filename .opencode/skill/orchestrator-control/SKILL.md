@@ -21,7 +21,7 @@ It should:
 Hard rule:
 
 - do not directly implement repository changes yourself
-- do not directly act as builder, triager, or QA
+- do not directly act as researcher, builder, triager, or QA
 - when the operator asks for work to be done, launch or manage a worker to do it
 - remain in the control-plane role
 
@@ -54,11 +54,15 @@ Hard rule:
 
 Use:
 
+- `researcher` for read-only investigation, planning briefs, upstream/reference research, architecture comparison, and unclear fix direction
 - `builder` for implementation and bug fixing
 - `triager` for issue intake, reproduction, and classification
 - `qa` for browser-first validation and real-flow testing
 
 Prefer one-off workers by default.
+
+Researcher includes planning.
+Do not create a separate planner role; use researcher tasks for both investigation and planning.
 
 Use long-running workers only when continuous watch/monitor behavior is actually needed.
 
@@ -71,12 +75,16 @@ Useful commands:
 ```bash
 openteam launch builder --target 30617:<owner-pubkey>:<repo-d-tag> --mode web --task "..."
 openteam launch builder --target 30617:<owner-pubkey>:<repo-d-tag> --mode web --parallel --task "..."
+openteam launch researcher --target 30617:<owner-pubkey>:<repo-d-tag> --mode code --task "Research the safest implementation plan for ..."
 openteam enqueue builder --target <repo-hint-or-alias> --mode code --task "..."
 openteam worker start triager --target <repo-hint-or-alias> --mode code --name triager-repo-a
 openteam worker stop triager-repo-a
 openteam worker list
 openteam runs list --limit 10
 openteam runs show <run-id>
+openteam runs diagnose <run-id>
+openteam runs cleanup-stale --dry-run
+openteam runs stop <run-id>
 openteam browser attach <agent-or-role>
 ```
 
@@ -86,6 +94,8 @@ Preferred operator-facing request verbs:
 - `stop <worker-name>`
 - `start <role> on <target>`
 - `watch <target> as <role>`
+- `research <target> and <question>`
+- `plan <target> and <goal>`
 - `work on <target> [as <role>] [in <mode> mode] [with model <model>] [in parallel] and do <task>`
 
 Prefer these verbs over vague control-plane phrasing when possible.
@@ -97,13 +107,29 @@ Guidance:
 - use `worker start` only when a long-running watcher or pinned repo worker is actually needed
 - use `worker list` before starting another persistent worker for the same role/target
 - same-repo work is serialized by default; use `in parallel` only when the operator intentionally wants a separate context for concurrent work on the same Nostr repo
-- current one-off job concurrency limits are intentionally small: builder 2, qa 1, triager 1
-- use `runs list` / `runs show` for completed task metrics, phase timings, and log paths
+- current one-off job concurrency limits are intentionally small: builder 2, researcher 2, qa 1, triager 1
+- use `runs list` / `runs show` for completed task metrics, phase timings, log paths, and live-signal effective state
+- treat `state: "stale"` as authoritative even when `storedState: "running"` appears; `storedState` is only the raw run-file flag
+- use `runs diagnose` for detailed evidence when a run is stale, logs are idle, process evidence is missing, or the dev URL is unreachable
+- use `runs cleanup-stale --dry-run` to confirm stale records before cleanup; cleanup marks stale records terminal and releases repo leases without deleting checkouts
 - use `browser attach` for live web-task observation details instead of guessing profile or artifact paths
+- do not claim a web task URL is live unless `browser attach`, `browser status`, or `runs diagnose` reports the dev URL reachable
 - if you are tempted to inspect or edit product code directly, stop and delegate to a worker instead
 - workers should receive a ready-state managed repo context, not a raw unprovisioned checkout
 - for outside-owned upstreams, that context should be the orchestrator-owned fork with upstream added as a remote
 - workers should not receive instructions by DM; orchestrator-created local job envelopes are the instruction boundary
+- researcher output should be a handoff brief; it should not submit PRs or make implementation changes
+
+## Provisioning boundary
+
+Provisioning sessions must prepare the managed repo context and then stop.
+
+Hard rules:
+
+- do not run `openteam launch`, `openteam enqueue`, `openteam serve`, or `openteam worker ...` from a provisioning session
+- do not recursively hand off to another worker from provisioning
+- if provisioning completes, return control to the launcher instead of acting as orchestrator
+- if provisioning cannot prove readiness, fail clearly and leave the local repo context for operator inspection
 
 ## Launch parameters
 

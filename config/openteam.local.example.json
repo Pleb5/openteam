@@ -94,6 +94,14 @@
         "nakClientKey": "$NOSTR_CLIENT_KEY"
       }
     },
+    "researcher-01": {
+      "identity": {
+        "npub": "npub1researcher...",
+        "sec": "$OPENTEAM_RESEARCHER_01_SEC",
+        "bunkerProfile": "researcher-01",
+        "nakClientKey": "$NOSTR_CLIENT_KEY"
+      }
+    },
     "qa-01": {
       "identity": {
         "npub": "npub1qa...",

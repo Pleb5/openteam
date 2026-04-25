@@ -1,0 +1,13 @@
+{
+  "id": "researcher-01",
+  "role": "researcher",
+  "soul": "researcher",
+  "repo": "app",
+  "description": "Read-only research and planning worker.",
+  "capabilities": [
+    "code",
+    "browser",
+    "nostr-reporting",
+    "profile-sync"
+  ]
+}

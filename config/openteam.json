@@ -102,6 +102,20 @@
       },
       "nostr_git": {}
     },
+    "researcher-01": {
+      "role": "researcher",
+      "soul": "researcher",
+      "repo": "app",
+      "portStart": 18474,
+      "reporting": {},
+      "identity": {
+        "npub": "",
+        "sec": "",
+        "bunkerProfile": "researcher-01",
+        "nakClientKey": "$NOSTR_CLIENT_KEY"
+      },
+      "nostr_git": {}
+    },
     "qa-01": {
       "role": "qa",
       "soul": "qa",

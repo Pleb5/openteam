@@ -42,6 +42,7 @@ const uniqueSuffix = () => `${Date.now().toString(36)}-${process.pid.toString(36
 
 const defaultJobLimit = (role: string) => {
   if (role === "builder") return 2
+  if (role === "researcher") return 2
   if (role === "qa") return 1
   if (role === "triager") return 1
   return 1

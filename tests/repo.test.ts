@@ -1,4 +1,7 @@
 import {describe, expect, test} from "bun:test"
+import {mkdtemp, mkdir, readFile, writeFile} from "node:fs/promises"
+import {tmpdir} from "node:os"
+import path from "node:path"
 import {getPublicKey, nip19} from "nostr-tools"
 import {
   configuredForkProviderKinds,
@@ -7,9 +10,10 @@ import {
   forkEventTags,
   parseRepoReference,
   repoIdentityFromAnnouncement,
+  releaseRepoContext,
   resolveRepoRelayPolicy,
 } from "../src/repo.js"
-import type {AppCfg, ProviderCfg, RepoIdentity} from "../src/types.js"
+import type {AppCfg, ProviderCfg, RepoIdentity, RepoRegistry} from "../src/types.js"
 
 const pubkey = getPublicKey(new Uint8Array(Buffer.from("2222222222222222222222222222222222222222222222222222222222222222", "hex")))
 const npub = nip19.npubEncode(pubkey)
@@ -199,6 +203,56 @@ describe("repo relay policy", () => {
       taggedRelays: ["wss://repo-relay.example"],
       isGrasp: false,
     })
+  })
+})
+
+describe("repo context leases", () => {
+  test("releases a context only when the expected lease matches", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const testApp = app()
+    testApp.config.runtimeRoot = runtimeRoot
+    const registryFile = path.join(runtimeRoot, "repos", "registry.json")
+    const registry: RepoRegistry = {
+      version: 1,
+      repos: {},
+      forks: {},
+      contexts: {
+        ctx1: {
+          id: "ctx1",
+          repoKey: identity.key,
+          path: "/tmp/context",
+          checkout: "/tmp/context/checkout",
+          mirror: "/tmp/mirror",
+          mode: "code",
+          baseRef: "HEAD",
+          baseCommit: "abc123",
+          branch: "openteam/test",
+          state: "leased",
+          lease: {
+            workerId: "builder-01",
+            role: "builder",
+            jobId: "task-a",
+            mode: "code",
+            leasedAt: "2026-04-25T00:00:00.000Z",
+          },
+          createdAt: "2026-04-25T00:00:00.000Z",
+          updatedAt: "2026-04-25T00:00:00.000Z",
+        },
+      },
+    }
+
+    await mkdir(path.dirname(registryFile), {recursive: true})
+    await writeFile(registryFile, `${JSON.stringify(registry, null, 2)}\n`)
+
+    expect(await releaseRepoContext(testApp, "ctx1", {workerId: "builder-02", jobId: "task-a"})).toBe(false)
+    const stillLeased = JSON.parse(await readFile(registryFile, "utf8")) as RepoRegistry
+    expect(stillLeased.contexts.ctx1?.state).toBe("leased")
+    expect(stillLeased.contexts.ctx1?.lease?.workerId).toBe("builder-01")
+
+    expect(await releaseRepoContext(testApp, "ctx1", {workerId: "builder-01", jobId: "task-a"})).toBe(true)
+    const released = JSON.parse(await readFile(registryFile, "utf8")) as RepoRegistry
+    expect(released.contexts.ctx1?.state).toBe("idle")
+    expect(released.contexts.ctx1?.lease).toBeUndefined()
   })
 })
 

@@ -17,6 +17,7 @@ import type {
   ResolvedRepoTarget,
   TaskItem,
   TaskMode,
+  WorkerLease,
 } from "./types.js"
 
 const KIND_REPO_ANNOUNCEMENT = 30617
@@ -1505,12 +1506,19 @@ export const resolveRepoTarget = async (
   })
 }
 
-export const releaseRepoContext = async (app: AppCfg, contextId?: string) => {
-  if (!contextId) return
+const leaseMatches = (lease: WorkerLease | undefined, expected: Partial<WorkerLease>) => {
+  if (!lease) return false
+  return Object.entries(expected).every(([key, value]) => value === undefined || lease[key as keyof WorkerLease] === value)
+}
+
+export const releaseRepoContext = async (app: AppCfg, contextId?: string, expectedLease?: Partial<WorkerLease>) => {
+  if (!contextId) return false
+  let released = false
   await withRepoRegistryLock(app, async () => {
     const registry = await loadRepoRegistry(app)
     const context = registry.contexts[contextId]
     if (!context) return
+    if (expectedLease && !leaseMatches(context.lease, expectedLease)) return
     registry.contexts[contextId] = {
       ...context,
       state: "idle",
@@ -1518,5 +1526,7 @@ export const releaseRepoContext = async (app: AppCfg, contextId?: string) => {
       updatedAt: now(),
     }
     await saveRepoRegistry(app, registry)
+    released = true
   })
+  return released
 }

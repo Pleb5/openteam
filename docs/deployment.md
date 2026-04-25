@@ -155,6 +155,9 @@ bun run src/cli.ts profile sync triager-01
 bun run src/cli.ts relay sync builder-01
 bun run src/cli.ts profile sync builder-01
 
+bun run src/cli.ts relay sync researcher-01
+bun run src/cli.ts profile sync researcher-01
+
 bun run src/cli.ts relay sync qa-01
 bun run src/cli.ts profile sync qa-01
 

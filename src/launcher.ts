@@ -177,11 +177,13 @@ const bootstrapPrompt = (agent: PreparedAgent, task: string) => {
   return [
     `You are ${agent.id}, a ${agent.meta.role} worker in openteam.`,
     `Read the attached bootstrap files first and follow them.`,
+    `You are running in provisioning mode, not orchestration mode.`,
     `Before any worker is allowed to begin product work, you must make sure this repository environment is capable of fulfilling the requested task.`,
     `Inspect project documentation, lockfiles, workspace files, submodule configuration, and development instructions before choosing commands.`,
     `Provision the environment if needed: initialize submodules, install dependencies, and run the minimum setup needed to make the repository workable.`,
     `Do not assume any specific framework or package manager. Detect what the repository actually uses.`,
     `Do not attempt browser verification until the environment is ready for it.`,
+    `Do not launch, enqueue, start, stop, or watch worker agents. Do not call openteam launch, openteam enqueue, openteam serve, or openteam worker.`,
     `Worker handoff target task: ${task}`,
     `When provisioning is complete, leave the managed repo context ready for the worker handoff. If blocked, stop with a concrete blocker.`,
   ].join("\n")
@@ -358,6 +360,8 @@ const runOpencodeSession = async (
   prompt: string,
   logFile: string,
   model?: string,
+  onStart?: (pid: number | undefined) => Promise<void> | void,
+  env: Record<string, string> = {},
 ) => {
   const files = attachFiles(agent)
   const args = ["run", "--dir", checkout, "--agent", agent.app.config.opencode.agent, "--title", title]
@@ -373,8 +377,9 @@ const runOpencodeSession = async (
 
   args.push("--", prompt)
 
-  const child = spawnLogged(agent.app.config.opencode.binary, args, agent.app.root, logFile)
-  return wait(child)
+  const child = spawnLogged(agent.app.config.opencode.binary, args, agent.app.root, logFile, env)
+  await onStart?.(child.pid)
+  return {code: await wait(child), pid: child.pid}
 }
 
 const runProvisioningPhase = async (
@@ -383,12 +388,22 @@ const runProvisioningPhase = async (
   checkout: string,
   task: string,
   model?: string,
+  onStart?: (pid: number | undefined) => Promise<void> | void,
 ) => {
   const orchestrator = await prepareAgent(app, "orchestrator-01")
   const control: PreparedAgent = {...orchestrator, repo}
   const logFile = path.join(control.paths.artifacts, `${path.basename(path.dirname(checkout))}-provision-opencode.log`)
-  const code = await runOpencodeSession(control, checkout, `${path.basename(path.dirname(checkout))}-provision`, bootstrapPrompt(control, task), logFile, model)
-  return {code, logFile}
+  const session = await runOpencodeSession(
+    control,
+    checkout,
+    `${path.basename(path.dirname(checkout))}-provision`,
+    bootstrapPrompt(control, task),
+    logFile,
+    model,
+    onStart,
+    {OPENTEAM_PHASE: "provision"},
+  )
+  return {code: session.code, pid: session.pid, logFile}
 }
 
 const writeState = async (agent: PreparedAgent, value: unknown) => {
@@ -628,6 +643,9 @@ const createRunRecord = async (agent: PreparedAgent, item: TaskItem) => {
     parallel: item.parallel,
     state: "running",
     startedAt: now(),
+    process: {
+      runnerPid: process.pid,
+    },
     phases: [],
   }
   await writeRunRecord(record)
@@ -637,6 +655,12 @@ const createRunRecord = async (agent: PreparedAgent, item: TaskItem) => {
 const updateRunRecord = async (record: TaskRunRecord, patch: Partial<TaskRunRecord>) => {
   if (patch.logs) {
     record.logs = {...record.logs, ...patch.logs}
+  }
+  if (patch.process) {
+    record.process = {...record.process, ...patch.process}
+  }
+  if (patch.devServer) {
+    record.devServer = {...record.devServer, ...patch.devServer}
   }
   if (patch.browser) {
     record.browser = {...record.browser, ...patch.browser}
@@ -777,6 +801,8 @@ export const runTask = async (
         "- status",
         "- start <role> on <target>",
         "- watch <target> as <role>",
+        "- research <target> and <question>",
+        "- plan <target> and <goal>",
         "- work on <target> as <role> [in <mode> mode] [with model <model>] and do <task>",
       ].join("\n"),
       item.recipients,
@@ -872,7 +898,7 @@ export const runTask = async (
       const provision = await runPhase(
         runRecord,
         "provision",
-        () => runProvisioningPhase(app, resolved.repo, checkout, item.task, item.model),
+        () => runProvisioningPhase(app, resolved.repo, checkout, item.task, item.model, pid => updateRunRecord(runRecord, {process: {provisionPid: pid}})),
       )
       provisionLogFile = provision.logFile
       await updateRunRecord(runRecord, {logs: {provision: provisionLogFile}})
@@ -889,11 +915,11 @@ export const runTask = async (
           checkout,
           branch,
           url: "",
-        logFile: provisionLogFile,
-        baseAgentId: agent.configId,
-        runtimeId: agent.id,
-        parallel: item.parallel,
-      }
+          logFile: provisionLogFile,
+          baseAgentId: agent.configId,
+          runtimeId: agent.id,
+          parallel: item.parallel,
+        }
         finalResult = result
 
         await mergeState(agent, {...result, finishedAt: now(), running: false})
@@ -927,8 +953,10 @@ export const runTask = async (
     if (mode === "web") {
       if (ownedRuntime) {
         await skipRunPhase(runRecord, "start-runtime", {reason: "using existing worker runtime"})
+        await updateRunRecord(runRecord, {process: {bunkerPid: effectiveRuntime?.bunker?.child.pid}})
       } else {
         effectiveRuntime = await runPhase(runRecord, "start-runtime", () => startRuntime(agent))
+        await updateRunRecord(runRecord, {process: {bunkerPid: effectiveRuntime.bunker?.child.pid}})
       }
       await runPhase(runRecord, "write-runtime-identity", () => writeRuntimeIdentity(agent, effectiveRuntime))
       await runPhase(runRecord, "write-browser-config", () => writeOcfg(agent, checkout, effectiveRuntime))
@@ -951,31 +979,45 @@ export const runTask = async (
       url = dev.url
       await updateRunRecord(runRecord, {
         logs: {dev: dev.logFile},
+        process: {devPid: dev.child.pid},
+        devServer: {
+          url,
+          pid: dev.child.pid,
+          startedAt: now(),
+          lastHealthOkAt: now(),
+        },
         browser: browserRunInfo(agent, url),
       })
       await mergeState(agent, {url, logFile, browserProfile: path.join(agent.paths.browser, "profile"), browserArtifacts: path.join(agent.paths.artifacts, "playwright")})
 
       try {
         const prompt = compose(agent, item.task, dev.url, effectiveRuntime, repoPolicy, defaultPublishScope)
-        code = await runPhase(
+        const session = await runPhase(
           runRecord,
           "opencode-worker",
-          () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, item.model),
+          () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, item.model, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}})),
           {logFile},
         )
+        code = session.code
       } finally {
         await runPhase(runRecord, "stop-dev-server", async () => {
           dev.child.kill("SIGTERM")
+          await updateRunRecord(runRecord, {
+            devServer: {
+              stoppedAt: now(),
+            },
+          })
         }, {pid: dev.child.pid})
       }
     } else {
       const prompt = composeCode(agent, item.task, repoPolicy, defaultPublishScope)
-      code = await runPhase(
+      const session = await runPhase(
         runRecord,
         "opencode-worker",
-        () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, item.model),
+        () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, item.model, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}})),
         {logFile},
       )
+      code = session.code
     }
 
     const state = code === 0 ? "succeeded" : "failed"
@@ -1027,7 +1069,7 @@ export const runTask = async (
   } finally {
     if (contextId) {
       try {
-        await runPhase(runRecord, "release-context", () => releaseRepoContext(app, contextId), {contextId})
+        await runPhase(runRecord, "release-context", () => releaseRepoContext(app, contextId, {workerId: agent.id, jobId: item.id}), {contextId})
       } catch (error) {
         cleanupError = error
         runError = runError ?? error

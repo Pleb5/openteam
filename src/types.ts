@@ -115,7 +115,7 @@ export type AppCfg = {
   config: RootCfg
 }
 
-export type TaskState = "queued" | "running" | "succeeded" | "failed"
+export type TaskState = "queued" | "running" | "succeeded" | "failed" | "interrupted" | "stale"
 
 export type TaskItem = {
   id: string
@@ -148,7 +148,7 @@ export type AgentPaths = {
   stateFile: string
 }
 
-export type RunPhaseState = "running" | "succeeded" | "failed" | "skipped"
+export type RunPhaseState = "running" | "succeeded" | "failed" | "skipped" | "interrupted" | "stale"
 
 export type TaskRunPhase = {
   name: string
@@ -302,6 +302,21 @@ export type TaskRunRecord = {
     provision?: string
     dev?: string
   }
+  process?: {
+    runnerPid?: number
+    provisionPid?: number
+    opencodePid?: number
+    devPid?: number
+    bunkerPid?: number
+  }
+  devServer?: {
+    url?: string
+    pid?: number
+    startedAt?: string
+    stoppedAt?: string
+    lastHealthOkAt?: string
+    lastHealthError?: string
+  }
   browser?: {
     enabled: boolean
     headless: boolean
@@ -319,6 +334,7 @@ export type TaskRunRecord = {
 export type AgentRuntimeState = {
   preparedAt?: string
   running?: boolean
+  state?: TaskState
   taskId?: string
   task?: string
   startedAt?: string

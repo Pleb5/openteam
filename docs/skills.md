@@ -44,6 +44,7 @@ Current skills:
 - `repo-bootstrap`
 - `builder-workflow`
 - `builder-labels-status`
+- `research-workflow`
 - `nostr-git-map`
 - `nak-git-read`
 - `triager-workflow`
@@ -66,6 +67,13 @@ Suggested default skill stack by role:
 
 - `builder-workflow`
 - `builder-labels-status`
+- `nostr-git-map`
+- `nak-git-read`
+- global shared `nak` skill
+
+### Researcher
+
+- `research-workflow`
 - `nostr-git-map`
 - `nak-git-read`
 - global shared `nak` skill
@@ -101,6 +109,7 @@ Prefer shared skills for:
 Then add role-specific skills for:
 
 - triager behavior
+- researcher behavior
 - builder behavior
 - qa behavior
 
@@ -165,6 +174,14 @@ Purpose:
 - prefer reply before structured state if a reply is sufficient
 - use NIP-32 labels and NIP-34 statuses intentionally
 
+### `research-workflow`
+
+Purpose:
+
+- read-only investigation and planning before implementation or validation
+- produce a concise handoff brief with evidence, options, risks, next worker, and verification plan
+- avoid turning research into unrequested code changes or PR publication
+
 ### `nostr-git-map`
 
 Purpose:
@@ -209,6 +226,7 @@ Shared:
 Role-specific:
 
 - `orchestrator-control`
+- `research-workflow`
 - `builder-workflow`
 - `builder-labels-status`
 - `triager-workflow`

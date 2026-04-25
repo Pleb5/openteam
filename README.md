@@ -12,7 +12,7 @@
 Current MVP:
 
 - one primary long-running orchestrator: `orchestrator-01`
-- focused worker roles: `triager-01`, `builder-01`, and `qa-01`
+- focused worker roles: `researcher-01`, `triager-01`, `builder-01`, and `qa-01`
 - direct launches with explicit target, mode, and optional model
 - Nostr-announced repository target resolution
 - managed normal-clone repo contexts under the runtime directory
@@ -67,8 +67,9 @@ Control-plane responsibilities are split deliberately:
 
 - runtime-owned: orchestrator DM task intake, immediate acknowledgement, completion/blocker reporting, relay/profile seeding
 - orchestrator-owned: target resolution, repository provisioning before handoff, worker selection, mode/model selection, and worker lifecycle
-- worker-owned: code changes, browser interaction, app workflows, repo work, and task-specific Nostr operations when explicitly needed
+- worker-owned: research briefs, code changes, browser interaction, app workflows, repo work, and task-specific Nostr operations when explicitly needed
 - workers do not accept operator DMs; their Nostr capability is for identity, signing, repository-event reads/writes, and browser signer flows
+- researcher is read-only by default and includes planning; it produces a handoff brief rather than implementation or PRs
 
 Configuration is shared-first:
 
@@ -83,12 +84,15 @@ The runtime keeps operator DMs deterministic and out of the agent prompt, while 
 ```bash
 bun run src/cli.ts doctor
 bun run src/cli.ts prepare orchestrator-01
+bun run src/cli.ts launch researcher --target 30617:<owner-pubkey>:<repo-d-tag> --mode code --task "Research the safest implementation plan..."
 bun run src/cli.ts launch builder --target 30617:<owner-pubkey>:<repo-d-tag> --mode web --task "Investigate issue..."
 bun run src/cli.ts serve orchestrator-01
 bun run src/cli.ts enqueue builder --target <repo-hint-or-alias> --mode code --task "Build feature..."
 bun run src/cli.ts worker start triager --target <repo-hint-or-alias> --mode code --name triager-repo-a
 bun run src/cli.ts worker list
 bun run src/cli.ts runs list --limit 10
+bun run src/cli.ts runs diagnose <run-id>
+bun run src/cli.ts runs cleanup-stale --dry-run
 bun run src/cli.ts browser attach qa
 bun run src/cli.ts relay sync builder-01
 bun run src/cli.ts profile sync builder-01
@@ -107,6 +111,8 @@ Short operator request examples:
 openteam "status"
 openteam "start triager on 30617:<owner-pubkey>:<repo-d-tag>"
 openteam "watch <repo-hint-or-alias> as triager"
+openteam "research <repo-hint-or-alias> and compare the safest implementation options"
+openteam "plan <repo-hint-or-alias> and produce a builder handoff for the failing sync flow"
 openteam "work on <repo-hint-or-alias> as builder in web mode and do investigate issue comment UX"
 openteam "work on <repo-hint-or-alias> as builder in web mode in parallel and do investigate a separate issue"
 ```
@@ -114,9 +120,12 @@ openteam "work on <repo-hint-or-alias> as builder in web mode in parallel and do
 Worker launch commands automatically seed the selected worker identity from shared config before work begins.
 One-off worker jobs launched by the orchestrator use isolated runtime ids, state files, browser profiles, Playwright artifacts, logs, and run records.
 Same-repo tasks are serialized by default; `in parallel` explicitly creates a separate same-repo context.
-Default one-off job limits are intentionally small: builder 2, qa 1, triager 1.
+Default one-off job limits are intentionally small: builder 2, researcher 2, qa 1, triager 1.
 Run records are written to `runtime/runs/` with total duration, phase timings, context details, log paths, and browser artifact paths.
-For live web tasks, `openteam browser attach <agent-or-role>` prints the dev URL, worker log, browser profile, and Playwright artifact directory.
+For live web tasks, `openteam browser attach <agent-or-role>` health-checks the dev URL before reporting it as live or offering an open command.
+`openteam runs list` and `openteam runs show <run-id>` report effective stale state from live signals; if `state` is `stale` and `storedState` is `running`, trust `state`.
+Use `openteam runs show <run-id> --raw` only when you need the unmodified run file.
+If a run looks active but the process, URL, or logs disagree, use `openteam runs diagnose <run-id>` and `openteam runs cleanup-stale --dry-run` before cleaning stale leases.
 
 ## DM workflow
 
@@ -263,6 +272,11 @@ Task run history lives under:
 ```
 
 Each run record captures the resolved Nostr repo/fork/context, final result, `durationMs`, phase timings, log files, and browser observability paths.
+New run records also capture known runner, provisioning, worker, dev-server, and bunker PIDs where available.
+`runs diagnose` uses those PIDs plus dev URL health, log freshness, and context lease state to detect stale records.
+
+Provisioning runs with `OPENTEAM_PHASE=provision`.
+In that phase, the CLI rejects worker-control commands such as `launch`, `enqueue`, `serve`, and `worker` so provisioning cannot recursively hand off to another worker.
 
 ## Detailed Docs
 
@@ -271,6 +285,7 @@ Each run record captures the resolved Nostr repo/fork/context, final result, `du
 - `docs/skills.md`
 - `docs/operations.md`
 - `docs/deployment.md`
+- `docs/tenex-lessons-plan.md`
 
 ## Notes
 
