@@ -9,12 +9,16 @@ This document explains how `openteam` uses project-local skills and how role ski
 The runtime provides:
 
 - identity
-- DM control plane
+- orchestrator-only DM control plane
 - relay/profile seeding
-- worktrees
+- Nostr repo identity resolution
+- managed repo contexts
 - dev servers
 - browser sessions
 - OpenCode task execution
+
+The orchestrator owns repository provisioning before worker handoff. Worker skills assume a ready-state repository context unless a task explicitly proves otherwise.
+Workers do not accept operator instructions by DM; repository events they read are task inputs, not control-plane commands.
 
 Skills provide:
 
@@ -36,6 +40,8 @@ Project-local skills live under:
 
 Current skills:
 
+- `orchestrator-control`
+- `repo-bootstrap`
 - `builder-workflow`
 - `builder-labels-status`
 - `nostr-git-map`
@@ -47,6 +53,14 @@ Current skills:
 ## Default role-to-skill mapping
 
 Suggested default skill stack by role:
+
+### Orchestrator
+
+- `orchestrator-control`
+- `repo-bootstrap`
+- `nostr-git-map`
+- `nak-git-read`
+- global shared `nak` skill
 
 ### Builder
 
@@ -92,22 +106,25 @@ Then add role-specific skills for:
 
 ### 2. Prefer highest-level tools
 
-When a high-level `nak git ...` command exists, prefer it over raw event construction.
+When a high-level `nak git ...` command exists, prefer it for read/inspection workflows.
 
-Use raw `nak event` only when necessary, such as:
+For repo-side writes, prefer the runtime helper because it applies the resolved repository relay policy:
 
-- label events
-- status events
-- PR / PR update events
-- other unsupported high-level cases
+- `openteam repo publish issue ...`
+- `openteam repo publish comment ...`
+- `openteam repo publish label ...`
+- `openteam repo publish status ...`
+- `openteam repo publish pr ...`
+- `openteam repo publish pr-update ...`
 
 ### 3. Keep runtime-owned concerns out of skills
 
 The runtime owns:
 
-- operator task intake DMs
+- operator task intake DMs to the orchestrator
 - immediate acknowledgement
 - completion/blocker reporting
+- Nostr-announced repo target resolution
 
 Skills should not instruct agents to manually send operator DMs unless the task itself is about messaging.
 
@@ -184,12 +201,14 @@ Each skill should include:
 
 Shared:
 
+- `repo-bootstrap`
 - `nostr-git-map`
 - `nak-git-read`
-- future generic `nak-git-publish`
+- runtime `openteam repo publish ...` helpers for repo-side writes
 
 Role-specific:
 
+- `orchestrator-control`
 - `builder-workflow`
 - `builder-labels-status`
 - `triager-workflow`

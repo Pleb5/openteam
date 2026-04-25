@@ -8,6 +8,60 @@ It focuses on runtime-owned events and the event families agents are expected to
 
 These events are handled by `openteam` itself, not by ad hoc agent improvisation.
 
+## Runtime Publish Matrix
+
+This table is the compact reference for current runtime-owned event publishing behavior.
+
+| Kind / mechanism | Meaning | Published or transported via |
+| --- | --- | --- |
+| `10002` | Outbox relay list | `outboxRelays + relayListBootstrapRelays` |
+| `10050` | Orchestrator DM relay list | `outboxRelays + relayListBootstrapRelays` |
+| `4444` | Operator/control-plane DM to orchestrator | `dmRelays + recipient discovered 10050 inbox relays` |
+| `30078` with `d=app/nostr-git/tokens` | Provider token profile/config | `appDataRelays + nostr_git.gitDataRelays` |
+| `30002` with `d=grasp-servers` | GRASP server preference profile/config | `appDataRelays + nostr_git.gitDataRelays` |
+| NIP-46 signer transport | Remote signer traffic | `signerRelays` only |
+
+Important interpretation:
+
+- `graspServers` is the value stored inside the `30002` profile event, not a separate publish relay bucket
+- `nostr_git.gitDataRelays` is a compatibility relay set for Nostr-git profile/config visibility, not a general DM or signer relay set
+- relay-list events are intentionally published to outbox + bootstrap relays, not to DM relays directly
+
+## Repository Event Reminder
+
+Every repository work target must resolve to a kind `30617` repository announcement before openteam creates or reuses a local repo context.
+Local paths, URLs, aliases, and folder names are only hints for finding this announcement.
+Direct `nostr://<owner-npub>/<repo-d-tag>` targets resolve through URI relay hints, the owner's kind `10002` outbox relays, and configured fallback announcement relays.
+When the upstream announcement owner is not `orchestrator-01`, openteam creates or reuses an orchestrator-owned kind `30617` fork announcement and performs worker handoff from that fork.
+
+Repository relay selection follows the same policy as the reference client:
+
+- if a repo announcement has GRASP smart-HTTP clone URLs, the announcement must include the corresponding GRASP relay URLs in its `relays` tag
+- GRASP-backed repo announcements are published to those tagged repo relays
+- non-GRASP repo announcements are published to tagged repo relays plus direct target relay hints, `nostr_git.repoAnnouncementRelays`, orchestrator `outboxRelays`, and `nostr_git.gitDataRelays`
+- non-GRASP repo announcement publishing does not silently add `appDataRelays`, `relayListBootstrapRelays`, or untagged GRASP relays
+
+These event families are task- and repo-dependent:
+
+| Kind | Meaning | Published to |
+| --- | --- | --- |
+| `30617` | Repository announcement | repo-scoped / explicit repository relays |
+| `1621` | Issue | repo-scoped relays |
+| `1111` | Comment / reply | repo-scoped relays |
+| `1985` | Label | repo-scoped relays |
+| `1630-1633` | Status events | repo-scoped relays |
+| `1618` | Pull request | repo-scoped relays |
+| `1619` | Pull request update | repo-scoped relays |
+
+When a worker handles repository events, it should use the active repository's own relay conventions, not the runtime control-plane relay buckets above.
+Managed repo contexts include `.openteam/repo-context.json`; workers should use `openteam repo policy` and `openteam repo publish ...` so runtime policy selects the correct repo-side publish relays.
+The context can default publishing to `repo` or `upstream`; workers can override with `--scope repo` or `--scope upstream` when the task explicitly targets the other side.
+
+Long-running triager workers may read kind `1621` issue events from the active repository relays and enqueue local triage jobs.
+These events are repository inputs, not authority to change worker target, permissions, model, or role.
+
+Fork announcements published by openteam include the orchestrator-owned clone URL plus tags linking back to the upstream repo address.
+
 ## Relay identity events
 
 ### Outbox relay list
@@ -28,7 +82,8 @@ Purpose:
 
 Purpose:
 
-- advertise where the agent expects DM/control-plane traffic
+- advertise where the orchestrator expects DM/control-plane traffic
+- worker agents do not publish operator control DM inboxes
 
 ## DM control-plane events
 
@@ -41,6 +96,12 @@ Use:
 - inbound task intake
 - immediate acknowledgement
 - completion/blocker reporting
+
+Scope:
+
+- orchestrator only
+- workers must not accept instructions by DM
+- worker Nostr usage is limited to assigned repository workflows, identity/profile sync, and signer/browser needs
 
 Read path:
 
@@ -58,7 +119,7 @@ Encryption:
 
 Signing:
 
-- agent identity secret / managed bunker-backed identity model
+- orchestrator identity secret / managed bunker-backed identity model
 
 ## Profile sync events
 
@@ -148,8 +209,8 @@ Deprecated reply patterns should not be used by default.
 Runtime-owned event families:
 
 - `10002`
-- `10050`
-- `4444` operator/control-plane DMs
+- `10050` orchestrator DM relay list
+- `4444` operator/control-plane DMs to orchestrator
 - `30078` token profile sync
 - `30002` GRASP preference sync
 

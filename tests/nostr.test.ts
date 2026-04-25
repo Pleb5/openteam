@@ -48,6 +48,10 @@ const makeAgent = (): PreparedAgent => {
       nostr_git: {
         graspServers: ["wss://example-grasp.server"],
         gitDataRelays: ["wss://git-a.example.com", "wss://app.example.com"],
+        repoAnnouncementRelays: [],
+        forkGitOwner: "",
+        forkRepoPrefix: "",
+        forkCloneUrlTemplate: "",
       },
     },
     repo: {
@@ -55,7 +59,6 @@ const makeAgent = (): PreparedAgent => {
       baseBranch: "dev",
       devCommand: [],
       healthUrl: "http://127.0.0.1:{port}",
-      worktreeRoot: "/tmp/worktrees",
       sharedPaths: [],
     },
     paths: {
@@ -67,7 +70,6 @@ const makeAgent = (): PreparedAgent => {
       history: "/tmp/runtime/agents/builder-01/tasks/history",
       artifacts: "/tmp/runtime/agents/builder-01/artifacts",
       browser: "/tmp/runtime/agents/builder-01/browser",
-      worktrees: "/tmp/runtime/agents/builder-01/worktrees",
       stateFile: "/tmp/runtime/agents/builder-01/state.json",
     },
     app: {
@@ -91,9 +93,22 @@ const makeAgent = (): PreparedAgent => {
         providers: {},
         repos: {},
         reporting: {
+          dmRelays: [],
+          outboxRelays: [],
+          relayListBootstrapRelays: [],
+          appDataRelays: [],
+          signerRelays: [],
           allowFrom: ["npub1globalallowedexample000000000000000000000000000000000000000000000000000"],
           reportTo: [],
           pollIntervalMs: 5000,
+        },
+        nostr_git: {
+          graspServers: [],
+          gitDataRelays: [],
+          repoAnnouncementRelays: [],
+          forkGitOwner: "",
+          forkRepoPrefix: "",
+          forkCloneUrlTemplate: "",
         },
         agents: {},
       },

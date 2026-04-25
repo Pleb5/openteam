@@ -8,8 +8,8 @@
   },
   "scripts": {
     "dev": "bun run src/cli.ts",
-    "test": "bun test tests/**/*.test.ts",
-    "test:coverage": "bun test --coverage tests/**/*.test.ts",
+    "test": "bun test ./tests",
+    "test:coverage": "bun test --coverage ./tests",
     "check": "tsc --noEmit",
     "build": "bun build ./src/cli.ts --target bun --outfile ./dist/cli.js"
   },

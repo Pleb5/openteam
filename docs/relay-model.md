@@ -6,6 +6,12 @@ This document defines every relay bucket used by `openteam`, what each bucket me
 
 `openteam` separates relay usage by purpose.
 
+The default configuration model is shared-first:
+
+- top-level relay buckets are the primary source
+- worker identities inherit those buckets by default
+- worker-specific overrides exist only for exceptional cases
+
 Do not collapse all relay traffic into one set.
 
 The buckets exist to keep these concerns separate:
@@ -39,15 +45,16 @@ Do not use as:
 
 Meaning:
 
-- the agent's DM inbox and control-plane relays
+- the orchestrator's DM inbox and control-plane relays
 
 Use:
 
-- live DM subscription for task intake
-- DM fallback polling
+- live orchestrator DM subscription for task intake
+- orchestrator DM fallback polling
 - outbound operator-facing DMs
 
-The agent's `10050` event should advertise this set.
+Only the orchestrator's `10050` event should advertise this set.
+Worker agents do not accept operator instructions by DM.
 
 ### `relayListBootstrapRelays`
 
@@ -115,12 +122,58 @@ Treat it as a compatibility layer, not a universal relay identity.
 Meaning:
 
 - GRASP target relays the current client should remember for repo actions
+- fallback Git smart-HTTP storage targets for orchestrator-owned forks
 
 Use:
 
-- sync the GRASP server preference/profile state
+- store the GRASP server URL list inside the GRASP server preference/profile event
+- provide fallback fork storage when GitHub/GitLab provider targets are unavailable
+- when used for fork storage, derive both the smart-HTTP clone URL and the NIP-34 repo `relays` tag entry from the same GRASP server
 
-These are not DM relays and not signer relays.
+Do not use as:
+
+- publish targets for GRASP server preference/profile events
+- generic profile/app-data relays
+- DM relays
+- signer relays
+
+GRASP server preference/profile events are published to `appDataRelays + nostr_git.gitDataRelays`.
+The GRASP server URLs are event content/config values, not the relay bucket for publishing that event.
+
+### `nostr_git.repoAnnouncementRelays`
+
+Meaning:
+
+- fallback relays used to discover kind `30617` Nostr repository announcements
+- fallback repo relays for non-GRASP repo-scoped events
+
+Use:
+
+- resolve operator target hints to canonical Nostr repo identities before any clone/provision step
+- supplement direct `nostr://<owner-npub>/<repo-d-tag>` resolution after checking relay hints and the owner's kind `10002` outbox relays
+- discover existing orchestrator-owned fork announcements
+- publish non-GRASP openteam-created fork announcements
+- cache discovered repo identity in `runtime/repos/registry.json`
+
+Do not use as:
+
+- operator DM relays
+- signer relays
+- a substitute for repo-scoped workflow relays from the announcement itself
+
+### Repository Relay Policy
+
+For active repository events, openteam follows the same split used by the reference Nostr-git client:
+
+- GRASP-backed repos: repo relays, publish relays, and naddr relays are exactly the `relays` tag values from the repo event
+- non-GRASP repos: repo relays are tagged repo relays plus direct target relay hints plus `nostr_git.repoAnnouncementRelays`
+- non-GRASP publish/naddr relays: repo relays plus orchestrator `outboxRelays` plus `nostr_git.gitDataRelays`
+
+Discovery may use a broader relay set, but repo-event writes must not silently add `appDataRelays`, `relayListBootstrapRelays`, or untagged GRASP relays.
+
+Managed repo contexts write `.openteam/repo-context.json`.
+Workers should use `openteam repo policy` to inspect the active policy and `openteam repo publish ...` for repo-side issue/comment/label/status/PR writes.
+The context records the default publish scope; repository-event triage can default to `upstream`, while implementation work defaults to the managed working repo.
 
 ## Event Routing Matrix
 
@@ -163,6 +216,7 @@ Discovery/inspection targets:
 Note:
 
 - the `10050` event describes the DM inbox relays
+- it is orchestrator-only
 - it is intentionally not published to `dmRelays` just because they are DM relays
 
 ## DM Control Plane
@@ -177,12 +231,13 @@ Mechanics:
 
 - subscription-first
 - polling fallback/catch-up
+- orchestrator-only; workers never accept instructions through this path
 
 ### Outbound operator DMs
 
 Publish to:
 
-- the agent's own `dmRelays`
+- the orchestrator's own `dmRelays`
 - the recipient's discovered `10050` inbox relays
 
 This gives redundancy without conflating relay identity with recipient discovery.
@@ -216,10 +271,12 @@ Do not silently merge signer traffic into other relay buckets.
 Use this decision rule:
 
 1. If the event is about relay identity, use relay-list rules.
-2. If the event is an operator DM, use DM rules.
-3. If the event is generic user profile/app state, use `appDataRelays`.
-4. If the event is client-specific Nostr-git profile compatibility, include `nostr_git.gitDataRelays`.
-5. If the event is remote signer transport, use `signerRelays` only.
+2. If the event is an operator DM, use DM rules and route it only to/from the orchestrator.
+3. If the event is Nostr repository announcement discovery, use the broad discovery relay set.
+4. If the event is repo-scoped Nostr-git data, use the repository relay policy.
+5. If the event is generic user profile/app state, use `appDataRelays`.
+6. If the event is client-specific Nostr-git profile compatibility, include `nostr_git.gitDataRelays`.
+7. If the event is remote signer transport, use `signerRelays` only.
 
 ## Recommended Defaults
 
@@ -231,6 +288,7 @@ For a new agent setup:
 - `appDataRelays`: one or more stable general relays
 - `signerRelays`: small stable set for bunker transport
 - `nostr_git.gitDataRelays`: current target client's known Nostr-git fallback relays
+- `nostr_git.repoAnnouncementRelays`: current target client's known repository announcement relays
 
 ## Diagnostics
 

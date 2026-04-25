@@ -114,23 +114,20 @@ Do not use a status event just to say “I started looking”. A reply is better
 
 ### Status event pattern
 
-Use raw `nak event` when a status event is needed:
+Use the runtime helper when a status event is needed:
 
 ```bash
-nak event \
-  --kind 1630 \
-  -e <root-id> \
-  -t 'a=<repo-addr>' \
-  -p <recipient-pubkey> \
-  -c 'status explanation' \
-  --auth \
-  <relay...>
+openteam repo publish status \
+  --root-id <root-id> \
+  --state open \
+  --p <recipient-pubkey> \
+  --content 'status explanation'
 ```
 
 Notes:
 
 - root thread target is required
-- repo address `a` should be included when known
+- repo address and publish relays are supplied from the managed repo context
 - include relevant recipients in `p`
 - use `1631` / `1632` / `1633` as appropriate
 

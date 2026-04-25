@@ -15,6 +15,12 @@ export type RunningBunker = {
   stop: () => void
 }
 
+const safeProfile = (value: string) =>
+  value
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 160) || "agent"
+
 const capture = (
   child: SpawnedChild,
   logFile: string,
@@ -51,8 +57,10 @@ export const startBunker = async (agent: PreparedAgent): Promise<RunningBunker |
   await mkdir(agent.paths.artifacts, {recursive: true})
   const logFile = path.join(agent.paths.artifacts, "bunker.log")
   const args = ["bunker", "--persist"]
-  if (agent.agent.identity.bunkerProfile) {
-    args.push("--profile", agent.agent.identity.bunkerProfile)
+  const baseProfile = agent.agent.identity.bunkerProfile
+  if (baseProfile) {
+    const profile = agent.id === agent.configId ? baseProfile : `${baseProfile}-${safeProfile(agent.id)}`
+    args.push("--profile", profile)
   }
   args.push("--sec", agent.agent.identity.sec, ...relays)
   const child = spawn("nak", args, {

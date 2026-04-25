@@ -16,7 +16,24 @@ describe("config helpers", () => {
         },
         providers: {},
         repos: {},
-        reporting: {allowFrom: [], reportTo: [], pollIntervalMs: 5000},
+        reporting: {
+          dmRelays: [],
+          outboxRelays: [],
+          relayListBootstrapRelays: [],
+          appDataRelays: [],
+          signerRelays: [],
+          allowFrom: [],
+          reportTo: [],
+          pollIntervalMs: 5000,
+        },
+        nostr_git: {
+          graspServers: [],
+          gitDataRelays: [],
+          repoAnnouncementRelays: [],
+          forkGitOwner: "",
+          forkRepoPrefix: "",
+          forkCloneUrlTemplate: "",
+        },
         agents: {},
       },
     }
@@ -26,7 +43,6 @@ describe("config helpers", () => {
     expect(paths.root).toBe("/home/johnd/Work/openteam/runtime/agents/builder-01")
     expect(paths.workspace).toBe("/home/johnd/Work/openteam/runtime/agents/builder-01/workspace")
     expect(paths.browser).toBe("/home/johnd/Work/openteam/runtime/agents/builder-01/browser")
-    expect(paths.worktrees).toBe("/home/johnd/Work/openteam/runtime/agents/builder-01/worktrees")
     expect(paths.stateFile).toBe("/home/johnd/Work/openteam/runtime/agents/builder-01/state.json")
   })
 })

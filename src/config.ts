@@ -107,7 +107,6 @@ export const loadApp = async (): Promise<AppCfg> => {
       {
         ...repo,
         root: resolvePath(rootDir, repo.root),
-        worktreeRoot: resolvePath(rootDir, repo.worktreeRoot),
       },
     ]),
   )
@@ -145,6 +144,12 @@ const writeAlways = async (file: string, value: string) => {
   await writeFile(file, value)
 }
 
+const runtimeId = (value: string) =>
+  value
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 160) || "agent"
+
 export const agentPaths = (app: AppCfg, id: string): AgentPaths => {
   const root = path.join(app.config.runtimeRoot, "agents", id)
   return {
@@ -156,12 +161,15 @@ export const agentPaths = (app: AppCfg, id: string): AgentPaths => {
     history: path.join(root, "tasks", "history"),
     artifacts: path.join(root, "artifacts"),
     browser: path.join(root, "browser"),
-    worktrees: path.join(root, "worktrees"),
     stateFile: path.join(root, "state.json"),
   }
 }
 
-export const prepareAgent = async (app: AppCfg, id: string): Promise<PreparedAgent> => {
+export const prepareAgent = async (
+  app: AppCfg,
+  id: string,
+  options: {runtimeId?: string} = {},
+): Promise<PreparedAgent> => {
   const metaFile = path.join(app.root, "agents", `${id}.json`)
   const meta = await readJson<AgentMeta>(metaFile)
   const agent = app.config.agents[id]
@@ -174,7 +182,8 @@ export const prepareAgent = async (app: AppCfg, id: string): Promise<PreparedAge
     throw new Error(`missing repo config for ${agent.repo}`)
   }
 
-  const paths = agentPaths(app, id)
+  const preparedId = options.runtimeId ? runtimeId(options.runtimeId) : id
+  const paths = agentPaths(app, preparedId)
   await Promise.all([
     ensureDir(paths.workspace),
     ensureDir(paths.memory),
@@ -182,10 +191,9 @@ export const prepareAgent = async (app: AppCfg, id: string): Promise<PreparedAge
     ensureDir(paths.history),
     ensureDir(paths.artifacts),
     ensureDir(paths.browser),
-    ensureDir(paths.worktrees),
   ])
 
-  const prepared: PreparedAgent = {app, id, meta, agent, repo, paths}
+  const prepared: PreparedAgent = {app, id: preparedId, configId: id, meta, agent, repo, paths}
 
   let npub = agent.identity.npub || "(unset)"
   try {
@@ -193,11 +201,12 @@ export const prepareAgent = async (app: AppCfg, id: string): Promise<PreparedAge
   } catch {}
 
   const vars: Dict = {
-    agentId: id,
+    agentId: preparedId,
+    baseAgentId: id,
     role: agent.role,
     npub,
     bunkerProfile: agent.identity.bunkerProfile || "(unset)",
-    dmRelays: agent.reporting.dmRelays.join(", ") || "(unset)",
+    dmRelays: (agent.reporting.dmRelays?.join(", ") || app.config.reporting.dmRelays.join(", ")) || "(unset)",
   }
 
   const templateDir = path.join(app.root, "templates")

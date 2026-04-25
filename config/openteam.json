@@ -13,17 +13,14 @@
       "environment": {}
     }
   },
-  "providers": {
-    "github": {
-      "host": "github.com",
-      "token": "$OPENTEAM_GITHUB_TOKEN"
-    },
-    "gitlab": {
-      "host": "gitlab.com",
-      "token": "$OPENTEAM_GITLAB_TOKEN"
-    }
-  },
+  "providers": {},
   "repos": {
+    "control": {
+      "root": ".",
+      "baseBranch": "master",
+      "sharedPaths": [],
+      "mode": "code"
+    },
     "app": {
       "root": "$OPENTEAM_APP_ROOT",
       "baseBranch": "dev",
@@ -40,14 +37,27 @@
         "{port}"
       ],
       "healthUrl": "http://127.0.0.1:{port}",
-      "worktreeRoot": "./runtime/worktrees/app",
-      "sharedPaths": ["node_modules"]
+      "sharedPaths": ["node_modules"],
+      "mode": "web"
     }
   },
   "reporting": {
+    "dmRelays": [],
+    "outboxRelays": [],
+    "relayListBootstrapRelays": [],
+    "appDataRelays": [],
+    "signerRelays": [],
     "allowFrom": [],
     "reportTo": [],
     "pollIntervalMs": 5000
+  },
+  "nostr_git": {
+    "graspServers": [],
+    "gitDataRelays": [],
+    "repoAnnouncementRelays": [],
+    "forkGitOwner": "",
+    "forkRepoPrefix": "",
+    "forkCloneUrlTemplate": ""
   },
   "agents": {
     "triager-01": {
@@ -55,75 +65,56 @@
       "soul": "triager",
       "repo": "app",
       "portStart": 18472,
-      "reporting": {
-        "dmRelays": [],
-        "outboxRelays": [],
-        "relayListBootstrapRelays": [],
-        "appDataRelays": [],
-        "signerRelays": [],
-        "reportTo": [],
-        "allowFrom": []
-      },
+      "reporting": {},
       "identity": {
         "npub": "",
         "sec": "",
         "bunkerProfile": "triager-01",
         "nakClientKey": "$NOSTR_CLIENT_KEY"
       },
-      "nostr_git": {
-        "graspServers": [],
-        "gitDataRelays": []
-      }
+      "nostr_git": {}
+    },
+    "orchestrator-01": {
+      "role": "orchestrator",
+      "soul": "orchestrator",
+      "repo": "control",
+      "portStart": 18470,
+      "reporting": {},
+      "identity": {
+        "npub": "",
+        "sec": "",
+        "bunkerProfile": "orchestrator-01",
+        "nakClientKey": "$NOSTR_CLIENT_KEY"
+      },
+      "nostr_git": {}
     },
     "builder-01": {
       "role": "builder",
       "soul": "builder",
       "repo": "app",
       "portStart": 18471,
-      "reporting": {
-        "dmRelays": [],
-        "outboxRelays": [],
-        "relayListBootstrapRelays": [],
-        "appDataRelays": [],
-        "signerRelays": [],
-        "reportTo": [],
-        "allowFrom": []
-      },
+      "reporting": {},
       "identity": {
         "npub": "",
         "sec": "",
         "bunkerProfile": "builder-01",
         "nakClientKey": "$NOSTR_CLIENT_KEY"
       },
-      "nostr_git": {
-        "graspServers": [],
-        "gitDataRelays": []
-      }
+      "nostr_git": {}
     },
     "qa-01": {
       "role": "qa",
       "soul": "qa",
       "repo": "app",
       "portStart": 18473,
-      "reporting": {
-        "dmRelays": [],
-        "outboxRelays": [],
-        "relayListBootstrapRelays": [],
-        "appDataRelays": [],
-        "signerRelays": [],
-        "reportTo": [],
-        "allowFrom": []
-      },
+      "reporting": {},
       "identity": {
         "npub": "",
         "sec": "",
         "bunkerProfile": "qa-01",
         "nakClientKey": "$NOSTR_CLIENT_KEY"
       },
-      "nostr_git": {
-        "graspServers": [],
-        "gitDataRelays": []
-      }
+      "nostr_git": {}
     }
   }
 }

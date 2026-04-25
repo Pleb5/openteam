@@ -1,6 +1,6 @@
 import {finalizeEvent, getPublicKey, nip19, nip44, SimplePool} from "nostr-tools"
 import type {Event, Filter} from "nostr-tools"
-import type {PreparedAgent, ProviderCfg} from "./types.js"
+import type {PreparedAgent, ProviderCfg, NostrGitCfg, ReportingCfg} from "./types.js"
 
 const pool = new SimplePool({enableReconnect: true})
 const KIND_DM_RELAYS = 10050
@@ -9,8 +9,15 @@ const DIRECTORY_RELAYS = ["wss://nos.lol", "wss://relay.damus.io", "wss://purple
 const recipientRelayCache = new Map<string, { relays: string[]; expiresAt: number }>()
 const GRASP_SET_KIND = 30002
 const DEFAULT_GRASP_SET_ID = "grasp-servers"
+export const PROFILE_SYNC_DELAY_MS = 2000
 
 const uniq = (items: string[]) => Array.from(new Set(items.filter(Boolean)))
+
+const shared = (agent: PreparedAgent): ReportingCfg => agent.app.config.reporting
+
+const sharedGit = (agent: PreparedAgent): NostrGitCfg => agent.app.config.nostr_git
+
+const pick = (value: string[] | undefined, fallback: string[]) => uniq((value?.length ? value : fallback).map(normalizeRelayLikeUrl).filter(isRelayLikeUrl))
 
 const normalizeRelayLikeUrl = (value: string) => value.trim().replace(/\/+$/, "")
 
@@ -24,6 +31,8 @@ const isRelayLikeUrl = (value: string) => {
 }
 
 const nowSec = () => Math.floor(Date.now() / 1000)
+
+export const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 type PublishAttempt = {
   relay: string
@@ -113,29 +122,30 @@ export const getSelfNpub = (agent: PreparedAgent) => {
   return encodeNpub(getSelfPubkey(agent))
 }
 
-export const dmRelays = (agent: PreparedAgent) => uniq(agent.agent.reporting.dmRelays)
+export const dmRelays = (agent: PreparedAgent) => pick(agent.agent.reporting.dmRelays, shared(agent).dmRelays)
 
-export const outboxRelays = (agent: PreparedAgent) => uniq(agent.agent.reporting.outboxRelays)
+export const outboxRelays = (agent: PreparedAgent) => pick(agent.agent.reporting.outboxRelays, shared(agent).outboxRelays)
 
-export const relayListBootstrapRelays = (agent: PreparedAgent) => uniq(agent.agent.reporting.relayListBootstrapRelays)
+export const relayListBootstrapRelays = (agent: PreparedAgent) =>
+  pick(agent.agent.reporting.relayListBootstrapRelays, shared(agent).relayListBootstrapRelays)
 
-export const appDataRelays = (agent: PreparedAgent) => uniq(agent.agent.reporting.appDataRelays)
+export const appDataRelays = (agent: PreparedAgent) => pick(agent.agent.reporting.appDataRelays, shared(agent).appDataRelays)
 
-export const signerRelays = (agent: PreparedAgent) => uniq(agent.agent.reporting.signerRelays)
+export const signerRelays = (agent: PreparedAgent) => pick(agent.agent.reporting.signerRelays, shared(agent).signerRelays)
 
 export const gitDataRelays = (agent: PreparedAgent) =>
-  uniq((agent.agent.nostr_git?.gitDataRelays ?? []).map(normalizeRelayLikeUrl).filter(isRelayLikeUrl))
+  pick(agent.agent.nostr_git?.gitDataRelays, sharedGit(agent).gitDataRelays)
 
 export const profileRelays = (agent: PreparedAgent) =>
   uniq([...appDataRelays(agent), ...gitDataRelays(agent)])
 
 export const graspServers = (agent: PreparedAgent) =>
-  uniq((agent.agent.nostr_git?.graspServers ?? []).map(normalizeRelayLikeUrl).filter(isRelayLikeUrl))
+  pick(agent.agent.nostr_git?.graspServers, sharedGit(agent).graspServers)
 
 export const allowFrom = (agent: PreparedAgent) => {
   const values = agent.agent.reporting.allowFrom?.length
     ? agent.agent.reporting.allowFrom
-    : agent.app.config.reporting.allowFrom
+    : shared(agent).allowFrom
   return uniq(values)
 }
 
@@ -502,9 +512,9 @@ export const sendDm = async (agent: PreparedAgent, body: string, recipients?: st
   const selfRelays = dmRelays(agent)
   const reportTo = recipients && recipients.length > 0
     ? recipients
-    : agent.agent.reporting.reportTo.length
+    : agent.agent.reporting.reportTo?.length
       ? agent.agent.reporting.reportTo
-      : agent.app.config.reporting.reportTo
+      : shared(agent).reportTo
 
   if (selfRelays.length === 0 || reportTo.length === 0) {
     return

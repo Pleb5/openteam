@@ -1,17 +1,27 @@
 export type Dict = Record<string, string>
 
+export type TaskMode = "web" | "code"
+
 export type ProviderCfg = {
   host: string
   token: string
+  username?: string
+  type?: "github" | "gitlab" | "generic"
+  apiBaseUrl?: string
+  namespace?: string
+  namespaceId?: string | number
+  namespacePath?: string
+  private?: boolean
+  visibility?: "public" | "private" | "internal"
 }
 
 export type RepoCfg = {
   root: string
   baseBranch: string
-  devCommand: string[]
-  healthUrl: string
-  worktreeRoot: string
+  devCommand?: string[]
+  healthUrl?: string
   sharedPaths: string[]
+  mode?: TaskMode
 }
 
 export type McpCfg = {
@@ -27,6 +37,11 @@ export type BrowserCfg = {
 }
 
 export type ReportingCfg = {
+  dmRelays: string[]
+  outboxRelays: string[]
+  relayListBootstrapRelays: string[]
+  appDataRelays: string[]
+  signerRelays: string[]
   allowFrom: string[]
   reportTo: string[]
   pollIntervalMs?: number
@@ -40,14 +55,23 @@ export type AgentIdentityCfg = {
 }
 
 export type AgentReportingCfg = {
-  dmRelays: string[]
-  outboxRelays: string[]
-  relayListBootstrapRelays: string[]
-  appDataRelays: string[]
-  signerRelays: string[]
-  reportTo: string[]
+  dmRelays?: string[]
+  outboxRelays?: string[]
+  relayListBootstrapRelays?: string[]
+  appDataRelays?: string[]
+  signerRelays?: string[]
+  reportTo?: string[]
   allowFrom?: string[]
   pollIntervalMs?: number
+}
+
+export type NostrGitCfg = {
+  graspServers: string[]
+  gitDataRelays: string[]
+  repoAnnouncementRelays: string[]
+  forkGitOwner: string
+  forkRepoPrefix: string
+  forkCloneUrlTemplate: string
 }
 
 export type AgentCfg = {
@@ -57,10 +81,7 @@ export type AgentCfg = {
   portStart: number
   reporting: AgentReportingCfg
   identity: AgentIdentityCfg
-  nostr_git?: {
-    graspServers?: string[]
-    gitDataRelays?: string[]
-  }
+  nostr_git?: Partial<NostrGitCfg>
 }
 
 export type AgentMeta = {
@@ -85,6 +106,7 @@ export type RootCfg = {
   providers: Record<string, ProviderCfg>
   repos: Record<string, RepoCfg>
   reporting: ReportingCfg
+  nostr_git: NostrGitCfg
   agents: Record<string, AgentCfg>
 }
 
@@ -101,9 +123,14 @@ export type TaskItem = {
   createdAt: string
   state: TaskState
   agentId: string
+  runtimeId?: string
+  target?: string
+  mode?: TaskMode
+  model?: string
+  parallel?: boolean
   recipients?: string[]
   source?: {
-    kind: "dm" | "local"
+    kind: "dm" | "local" | "repo-event"
     eventId?: string
     from?: string
   }
@@ -118,13 +145,101 @@ export type AgentPaths = {
   history: string
   artifacts: string
   browser: string
-  worktrees: string
   stateFile: string
+}
+
+export type RunPhaseState = "running" | "succeeded" | "failed" | "skipped"
+
+export type TaskRunPhase = {
+  name: string
+  state: RunPhaseState
+  startedAt?: string
+  finishedAt?: string
+  durationMs?: number
+  details?: Record<string, unknown>
+  error?: string
+}
+
+export type RepoIdentity = {
+  key: string
+  ownerPubkey: string
+  ownerNpub: string
+  identifier: string
+  announcementEventId: string
+  announcedAt: number
+  relays: string[]
+  cloneUrls: string[]
+  name?: string
+  defaultBranch?: string
+  sourceHint?: string
+  rawTags: string[][]
+}
+
+export type WorkerLease = {
+  workerId: string
+  baseAgentId?: string
+  role: string
+  jobId: string
+  mode: TaskMode
+  parallel?: boolean
+  leasedAt: string
+}
+
+export type RepoContextState = "idle" | "leased"
+
+export type RepoContext = {
+  id: string
+  repoKey: string
+  upstreamRepoKey?: string
+  path: string
+  checkout: string
+  mirror: string
+  mode: TaskMode
+  baseRef: string
+  baseCommit: string
+  branch: string
+  state: RepoContextState
+  lease?: WorkerLease
+  createdAt: string
+  updatedAt: string
+}
+
+export type RepoFork = {
+  upstreamKey: string
+  forkKey: string
+  ownerPubkey: string
+  ownerNpub: string
+  forkIdentifier: string
+  forkAnnouncementEventId: string
+  upstreamCloneUrl: string
+  forkCloneUrl: string
+  forkCloneUrls?: string[]
+  authUsername?: string
+  provider: "github" | "gitlab" | "grasp" | "git-smart-http" | "announced"
+  createdAt: string
+  updatedAt: string
+}
+
+export type RepoRegistry = {
+  version: 1
+  repos: Record<string, RepoIdentity>
+  contexts: Record<string, RepoContext>
+  forks: Record<string, RepoFork>
+}
+
+export type ResolvedRepoTarget = {
+  repo: RepoCfg
+  identity: RepoIdentity
+  upstreamIdentity?: RepoIdentity
+  fork?: RepoFork
+  context: RepoContext
+  target: string
 }
 
 export type PreparedAgent = {
   app: AppCfg
   id: string
+  configId: string
   meta: AgentMeta
   agent: AgentCfg
   repo: RepoCfg
@@ -135,10 +250,70 @@ export type LaunchResult = {
   id: string
   state: TaskState
   task: string
-  worktree: string
+  target: string
+  mode: TaskMode
+  contextId?: string
+  checkout?: string
   branch: string
   url: string
   logFile: string
+  runId?: string
+  runFile?: string
+  durationMs?: number
+  baseAgentId?: string
+  runtimeId?: string
+  parallel?: boolean
+}
+
+export type TaskRunRecord = {
+  version: 1
+  runId: string
+  runFile: string
+  taskId: string
+  agentId: string
+  baseAgentId: string
+  role: string
+  task: string
+  source?: TaskItem["source"]
+  model?: string
+  target?: string
+  mode?: TaskMode
+  parallel?: boolean
+  state: TaskState
+  startedAt: string
+  finishedAt?: string
+  durationMs?: number
+  repo?: {
+    key: string
+    ownerNpub: string
+    identifier: string
+    upstreamKey?: string
+    forkProvider?: RepoFork["provider"]
+    forkCloneUrl?: string
+  }
+  context?: {
+    id: string
+    checkout: string
+    branch: string
+    baseCommit?: string
+  }
+  logs?: {
+    opencode?: string
+    provision?: string
+    dev?: string
+  }
+  browser?: {
+    enabled: boolean
+    headless: boolean
+    mcpName?: string
+    executablePath?: string
+    profileDir: string
+    artifactDir: string
+    url?: string
+  }
+  phases: TaskRunPhase[]
+  result?: LaunchResult
+  error?: string
 }
 
 export type AgentRuntimeState = {
@@ -150,12 +325,26 @@ export type AgentRuntimeState = {
   finishedAt?: string
   lastDmCheckAt?: number
   seenDmIds?: string[]
+  seenRepoEventIds?: string[]
+  lastRepoEventCheckAt?: number
   bunkerUri?: string
   bunkerPid?: number
-  worktree?: string
+  contextId?: string
+  checkout?: string
   branch?: string
+  runId?: string
+  runFile?: string
+  durationMs?: number
+  mode?: TaskMode
+  target?: string
+  baseAgentId?: string
+  runtimeId?: string
+  parallel?: boolean
   url?: string
   logFile?: string
+  browserProfile?: string
+  browserArtifacts?: string
+  browserHeadless?: boolean
 }
 
 export type InboundDm = {

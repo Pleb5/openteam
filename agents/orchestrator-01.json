@@ -1,0 +1,14 @@
+{
+  "id": "orchestrator-01",
+  "role": "orchestrator",
+  "soul": "orchestrator",
+  "repo": "control",
+  "description": "Primary openteam control-plane worker.",
+  "capabilities": [
+    "code",
+    "browser",
+    "nostr-reporting",
+    "profile-sync",
+    "worker-management"
+  ]
+}

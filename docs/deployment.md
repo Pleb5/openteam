@@ -9,7 +9,7 @@ The goal is a reproducible baseline with:
 - `nak`
 - OpenCode CLI
 - Chromium for browser-capable agents
-- user-level `systemd` services for persistent workers
+- a user-level `systemd` service for the persistent orchestrator
 
 ## Assumptions
 
@@ -114,11 +114,17 @@ cp config/openteam.secrets.env.example config/openteam.secrets.env
 Then fill:
 
 - `OPENTEAM_APP_ROOT`
-- provider tokens
+- GitHub/GitLab provider tokens
 - agent secrets
 - relay buckets
 - `nostr_git.graspServers`
 - `nostr_git.gitDataRelays`
+- `nostr_git.repoAnnouncementRelays`
+- `agents.orchestrator-01.identity`
+- GitHub/GitLab entries under `config.providers` as the preferred orchestrator-owned fork storage namespace
+- configured GRASP servers as the fallback orchestrator-owned fork storage namespace
+- `nostr_git.forkCloneUrlTemplate` only as an explicit override
+- `nostr_git.forkGitOwner` only as a final fallback path segment for non-npub clone URL layouts
 
 ## Sanity check
 
@@ -134,6 +140,9 @@ This should confirm at least:
 - `nak` present
 - `opencode` present
 - agent workspaces can be prepared
+- repo announcement fallback relays are configured for Nostr-first target resolution
+- direct `nostr://<owner-npub>/<repo-d-tag>` targets can discover owner outbox relays
+- the orchestrator identity can sign orchestrator-owned fork announcements
 
 ## First-time seeding
 
@@ -148,6 +157,9 @@ bun run src/cli.ts profile sync builder-01
 
 bun run src/cli.ts relay sync qa-01
 bun run src/cli.ts profile sync qa-01
+
+bun run src/cli.ts relay sync orchestrator-01
+bun run src/cli.ts profile sync orchestrator-01
 ```
 
 ## First browser bootstrap
@@ -161,7 +173,7 @@ Before long-lived mailbox mode, run one direct browser task per identity to veri
 Example:
 
 ```bash
-bun run src/cli.ts launch builder-01 --task "Open the target app, log in with the remote signer, verify synced profile data is visible, and report exactly what you observed."
+bun run src/cli.ts launch builder --target <repo-hint-or-30617-key> --mode web --task "Open the target app, log in with the remote signer, verify synced profile data is visible, and report exactly what you observed."
 ```
 
 ## Headless on VPS
@@ -193,10 +205,10 @@ systemctl --user daemon-reload
 Start one agent:
 
 ```bash
-systemctl --user start openteam-agent@builder-01
+systemctl --user start openteam-agent@orchestrator-01
 ```
 
-Start all default agents:
+Start the default orchestrator target:
 
 ```bash
 systemctl --user start openteam.target
@@ -205,14 +217,14 @@ systemctl --user start openteam.target
 Check status:
 
 ```bash
-systemctl --user status openteam-agent@builder-01
+systemctl --user status openteam-agent@orchestrator-01
 systemctl --user status openteam.target
 ```
 
 View logs:
 
 ```bash
-journalctl --user -u openteam-agent@builder-01 -f
+journalctl --user -u openteam-agent@orchestrator-01 -f
 ```
 
 Enable at login:

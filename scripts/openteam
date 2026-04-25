@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+CALLER_CWD="$PWD"
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
@@ -13,4 +14,32 @@ if [[ -z "$BUN_BIN" ]]; then
   fi
 fi
 
-exec "$BUN_BIN" run src/cli.ts "$@"
+if [[ $# -eq 0 ]]; then
+  ensure_orchestrator() {
+    if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+      systemctl --user daemon-reload >/dev/null 2>&1 || true
+      if systemctl --user start openteam-agent@orchestrator-01 >/dev/null 2>&1; then
+        return
+      fi
+    fi
+
+    if ! ps -eo args | grep -q '[b]un run src/cli.ts serve orchestrator-01'; then
+      mkdir -p "$ROOT/runtime/logs"
+      nohup env OPENTEAM_CALLER_CWD="$CALLER_CWD" "$BUN_BIN" run src/cli.ts serve orchestrator-01 >"$ROOT/runtime/logs/orchestrator-01.log" 2>&1 </dev/null &
+      sleep 1
+    fi
+  }
+
+  ensure_orchestrator
+
+  OPENCODE_BIN="$(command -v opencode || true)"
+  if [[ -z "$OPENCODE_BIN" ]]; then
+    printf 'opencode binary not found on PATH\n' >&2
+    exit 1
+  fi
+
+  PROMPT="$(env OPENTEAM_CALLER_CWD="$CALLER_CWD" "$BUN_BIN" run src/cli.ts console prompt)"
+  exec env OPENTEAM_CALLER_CWD="$CALLER_CWD" "$OPENCODE_BIN" "$ROOT" --prompt "$PROMPT"
+fi
+
+exec env OPENTEAM_CALLER_CWD="$CALLER_CWD" "$BUN_BIN" run src/cli.ts "$@"

@@ -4,43 +4,86 @@
     "executablePath": "/usr/bin/chromium",
     "mcp": {
       "name": "playwright",
-      "command": ["bunx", "@playwright/mcp@latest"],
+      "command": [
+        "bunx",
+        "@playwright/mcp@latest"
+      ],
       "environment": {
         "PLAYWRIGHT_HEADLESS": "0"
       }
     }
   },
+  "providers": {
+    "github.com": {
+      "type": "github",
+      "host": "github.com",
+      "token": "$OPENTEAM_GITHUB_TOKEN",
+      "private": false
+    },
+    "gitlab.com": {
+      "type": "gitlab",
+      "host": "gitlab.com",
+      "token": "$OPENTEAM_GITLAB_TOKEN",
+      "visibility": "public"
+    }
+  },
   "reporting": {
-    "allowFrom": ["npub1operator..."],
-    "reportTo": ["npub1operator..."],
+    "dmRelays": [
+      "wss://relay.example.com"
+    ],
+    "outboxRelays": [
+      "wss://relay.example.com"
+    ],
+    "relayListBootstrapRelays": [
+      "wss://relay.damus.io",
+      "wss://purplepag.es"
+    ],
+    "appDataRelays": [
+      "wss://relay.example.com"
+    ],
+    "signerRelays": [
+      "wss://relay.example.com"
+    ],
+    "allowFrom": [
+      "npub1operator..."
+    ],
+    "reportTo": [
+      "npub1operator..."
+    ],
     "pollIntervalMs": 5000
   },
+  "nostr_git": {
+    "graspServers": [
+      "wss://replace-with-grasp-server"
+    ],
+    "gitDataRelays": [
+      "wss://relay.example.com",
+      "wss://relay.damus.io",
+      "wss://nos.lol"
+    ],
+    "repoAnnouncementRelays": [
+      "wss://relay.ngit.dev",
+      "wss://gitnostr.com"
+    ],
+    "forkGitOwner": "",
+    "forkRepoPrefix": "",
+    "forkCloneUrlTemplate": ""
+  },
   "agents": {
+    "orchestrator-01": {
+      "identity": {
+        "npub": "npub1orchestrator...",
+        "sec": "$OPENTEAM_ORCHESTRATOR_01_SEC",
+        "bunkerProfile": "orchestrator-01",
+        "nakClientKey": "$NOSTR_CLIENT_KEY"
+      }
+    },
     "triager-01": {
       "identity": {
         "npub": "npub1triager...",
         "sec": "$OPENTEAM_TRIAGER_01_SEC",
         "bunkerProfile": "triager-01",
         "nakClientKey": "$NOSTR_CLIENT_KEY"
-      },
-      "reporting": {
-        "dmRelays": ["wss://relay.example.com"],
-        "outboxRelays": ["wss://relay.example.com"],
-        "relayListBootstrapRelays": ["wss://relay.damus.io", "wss://purplepag.es"],
-        "appDataRelays": ["wss://relay.example.com"],
-        "signerRelays": ["wss://relay.example.com"],
-        "reportTo": ["npub1operator..."],
-        "allowFrom": ["npub1operator..."]
-      },
-      "nostr_git": {
-        "graspServers": ["wss://replace-with-grasp-server"],
-        "gitDataRelays": [
-          "wss://relay.damus.io",
-          "wss://nos.lol",
-          "wss://relay.example.com",
-          "wss://relay.ngit.dev",
-          "wss://gitnostr.com"
-        ]
       }
     },
     "builder-01": {
@@ -49,25 +92,6 @@
         "sec": "$OPENTEAM_BUILDER_01_SEC",
         "bunkerProfile": "builder-01",
         "nakClientKey": "$NOSTR_CLIENT_KEY"
-      },
-      "reporting": {
-        "dmRelays": ["wss://relay.example.com"],
-        "outboxRelays": ["wss://relay.example.com"],
-        "relayListBootstrapRelays": ["wss://relay.damus.io", "wss://purplepag.es"],
-        "appDataRelays": ["wss://relay.example.com"],
-        "signerRelays": ["wss://relay.example.com"],
-        "reportTo": ["npub1operator..."],
-        "allowFrom": ["npub1operator..."]
-      },
-      "nostr_git": {
-        "graspServers": ["wss://replace-with-grasp-server"],
-        "gitDataRelays": [
-          "wss://relay.damus.io",
-          "wss://nos.lol",
-          "wss://relay.example.com",
-          "wss://relay.ngit.dev",
-          "wss://gitnostr.com"
-        ]
       }
     },
     "qa-01": {
@@ -76,25 +100,6 @@
         "sec": "$OPENTEAM_QA_01_SEC",
         "bunkerProfile": "qa-01",
         "nakClientKey": "$NOSTR_CLIENT_KEY"
-      },
-      "reporting": {
-        "dmRelays": ["wss://relay.example.com"],
-        "outboxRelays": ["wss://relay.example.com"],
-        "relayListBootstrapRelays": ["wss://relay.damus.io", "wss://purplepag.es"],
-        "appDataRelays": ["wss://relay.example.com"],
-        "signerRelays": ["wss://relay.example.com"],
-        "reportTo": ["npub1operator..."],
-        "allowFrom": ["npub1operator..."]
-      },
-      "nostr_git": {
-        "graspServers": ["wss://replace-with-grasp-server"],
-        "gitDataRelays": [
-          "wss://relay.damus.io",
-          "wss://nos.lol",
-          "wss://relay.example.com",
-          "wss://relay.ngit.dev",
-          "wss://gitnostr.com"
-        ]
       }
     }
   }
