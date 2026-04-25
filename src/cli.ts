@@ -2,6 +2,7 @@ import {existsSync} from "node:fs"
 import {spawnSync} from "node:child_process"
 import {loadApp, prepareAgent} from "./config.js"
 import {assertAppConfigValid, formatConfigValidationIssues, validateAppConfig} from "./config-validate.js"
+import {assertControlAllowed} from "./control-guard.js"
 import {browserCommand} from "./commands/browser.js"
 import {consolePrompt} from "./commands/console.js"
 import {
@@ -108,14 +109,6 @@ const taskOpts = (args: string[]) => ({
   runtimeId: value(args, "--runtime-id") || undefined,
   parallel: flag(args, "--parallel") || undefined,
 })
-
-const assertControlAllowed = (cmd: string) => {
-  if (process.env.OPENTEAM_PHASE !== "provision") return
-  const blocked = new Set(["launch", "enqueue", "serve", "worker"])
-  if (blocked.has(cmd) || !["doctor", "status", "console", "prepare", "runs", "browser", "repo", "relay", "profile", "tokens"].includes(cmd)) {
-    throw new Error("worker-control commands are disabled during repository provisioning")
-  }
-}
 
 const doctor = async () => {
   const app = await loadApp()

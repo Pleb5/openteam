@@ -27,7 +27,7 @@ import {
   syncOwnOutboxRelays,
   syncProfileTokens,
 } from "./nostr.js"
-import type {AppCfg, LaunchResult, PreparedAgent, TaskItem, AgentRuntimeState, RepoCfg, TaskMode, TaskRunPhase, TaskRunRecord} from "./types.js"
+import type {AppCfg, LaunchResult, PreparedAgent, TaskItem, AgentRuntimeState, RepoCfg, ResolvedRepoTarget, TaskMode, TaskRunPhase, TaskRunRecord} from "./types.js"
 
 type AgentRuntime = {
   bunker?: RunningBunker
@@ -104,6 +104,24 @@ const health = async (url: string, timeoutMs = 60_000) => {
     await new Promise(resolve => setTimeout(resolve, 1000))
   }
   throw new Error(`dev server did not become ready at ${url}`)
+}
+
+export const provisionWorkerControlCommand = (text: string) => {
+  const patterns = [
+    /\bopenteam\s+["']?(launch|enqueue|serve|worker|start|watch)\b/i,
+    /\bbun\s+run\s+src\/cli\.ts\s+(launch|enqueue|serve|worker)\b/i,
+    /\bscripts\/openteam\s+(launch|enqueue|serve|worker)\b/i,
+  ]
+  return patterns.map(pattern => text.match(pattern)?.[0]).find(Boolean)
+}
+
+const assertProvisionLogClean = async (logFile: string) => {
+  if (!existsSync(logFile)) return
+  const text = await readFile(logFile, "utf8")
+  const match = provisionWorkerControlCommand(text)
+  if (match) {
+    throw new Error(`provisioning attempted worker-control command: ${match}`)
+  }
 }
 
 const spawnLogged = (
@@ -404,6 +422,7 @@ const runProvisioningPhase = async (
     onStart,
     {OPENTEAM_PHASE: "provision"},
   )
+  await assertProvisionLogClean(logFile)
   return {code: session.code, pid: session.pid, logFile}
 }
 
@@ -750,6 +769,18 @@ const browserRunInfo = (agent: PreparedAgent, url = "") => ({
   url: url || undefined,
 })
 
+export const assertResolvedContextReady = (resolved: ResolvedRepoTarget, agent: PreparedAgent, item: TaskItem) => {
+  if (resolved.context.state !== "leased") {
+    throw new Error(`repo context ${resolved.context.id} is not leased before worker handoff`)
+  }
+  if (resolved.context.lease?.workerId !== agent.id || resolved.context.lease?.jobId !== item.id) {
+    throw new Error(`repo context ${resolved.context.id} lease does not match run ${agent.id}/${item.id}`)
+  }
+  if (!existsSync(resolved.context.checkout)) {
+    throw new Error(`repo context ${resolved.context.id} checkout is missing: ${resolved.context.checkout}`)
+  }
+}
+
 export const runTask = async (
   app: AppCfg,
   id: string,
@@ -858,6 +889,13 @@ export const runTask = async (
       },
       ...(mode === "web" ? {browser: browserRunInfo(agent)} : {}),
     })
+
+    await runPhase(
+      runRecord,
+      "verify-context-ready",
+      async () => assertResolvedContextReady(resolved, agent, item),
+      {contextId, checkout},
+    )
 
     await runPhase(
       runRecord,
@@ -1000,6 +1038,14 @@ export const runTask = async (
           {logFile},
         )
         code = session.code
+        if (code === 0) {
+          await runPhase(runRecord, "verify-dev-server", async () => {
+            await health(dev.url, 3000)
+            await updateRunRecord(runRecord, {devServer: {lastHealthOkAt: now()}})
+          }, {url: dev.url})
+        } else {
+          await skipRunPhase(runRecord, "verify-dev-server", {reason: "worker did not exit successfully"})
+        }
       } finally {
         await runPhase(runRecord, "stop-dev-server", async () => {
           dev.child.kill("SIGTERM")
@@ -1070,7 +1116,13 @@ export const runTask = async (
   } finally {
     if (contextId) {
       try {
-        await runPhase(runRecord, "release-context", () => releaseRepoContext(app, contextId, {workerId: agent.id, jobId: item.id}), {contextId})
+        await runPhase(runRecord, "release-context", async () => {
+          const released = await releaseRepoContext(app, contextId, {workerId: agent.id, jobId: item.id})
+          if (!released) {
+            throw new Error(`repo context ${contextId} was not released; lease no longer matched this run`)
+          }
+          return released
+        }, {contextId})
       } catch (error) {
         cleanupError = error
         runError = runError ?? error

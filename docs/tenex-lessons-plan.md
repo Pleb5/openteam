@@ -143,6 +143,8 @@ Acceptance checks:
 
 ## Phase 4: Runtime Invariants As Tests
 
+Status: implemented for the current highest-risk invariants, with room to expand as new failure modes appear.
+
 Problem:
 
 - dangerous behaviors have been found through live runs instead of tests.
@@ -167,6 +169,8 @@ Acceptance checks:
 - tests avoid launching OpenCode
 
 ## Phase 5: Small Supervision, Not Agent Governance
+
+Status: implemented as deterministic runtime checks around existing launch, provisioning, browser, cleanup, and publish paths.
 
 Problem:
 

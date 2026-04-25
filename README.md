@@ -282,6 +282,7 @@ In that phase, the CLI rejects worker-control commands such as `launch`, `enqueu
 
 - `docs/relay-model.md`
 - `docs/event-model.md`
+- `docs/invariants.md`
 - `docs/skills.md`
 - `docs/operations.md`
 - `docs/deployment.md`

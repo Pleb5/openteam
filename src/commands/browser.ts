@@ -52,7 +52,7 @@ const resolveBrowserAgent = async (app: AppCfg, ref: string) => {
   return {ref, agentId, runtimeId: agentId, workerName: undefined}
 }
 
-const browserInspection = async (app: AppCfg, ref: string) => {
+export const browserInspection = async (app: AppCfg, ref: string) => {
   const resolved = await resolveBrowserAgent(app, ref)
   const agent = await prepareAgent(app, resolved.agentId, {runtimeId: resolved.runtimeId})
   const state = existsSync(agent.paths.stateFile)
