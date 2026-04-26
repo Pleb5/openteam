@@ -132,6 +132,10 @@ Do not use deprecated code-carrying patch events for the builder workflow.
 Builder policy:
 
 - normal git branches and commits are the default
+- push branches from the managed checkout with plain `git push origin <branch>`; openteam configures repo-local provider-token credentials for the fork remote
+- do not use `gh auth`, personal GitHub/GitLab sessions, host-global credential helpers, or alternate personal remotes for openteam fork publication
+- treat `openteam repo publish pr ...` as the default PR publication path for Nostr-git work
+- forge-native PR tools are only appropriate when the task explicitly asks for that forge and authentication is provided by openteam config, not by a personal CLI login
 - browser verification and code verification come before Nostr PR publication
 - only publish PR events when the task or repo workflow actually requires NIP-34 PR wrappers
 
@@ -179,6 +183,14 @@ When the task touches UI, the browser is the source of truth.
 - trust the browser over assumptions in code
 - check visible behavior, console, and network when relevant
 - do not claim success until the UI behavior is observed
+
+## Runtime policy boundary
+
+- use checkout-local scratch/cache/artifact paths from `.openteam/tmp`, `.openteam/cache`, `.openteam/artifacts`, or the `OPENTEAM_*` env vars
+- put repro clones, generated logs, downloaded artifacts, and temporary files under those paths
+- do not use `/tmp`, host-global caches, or paths outside the managed checkout/runtime unless the operator explicitly allows it
+- do not run GUI openers, system package installs, or broad destructive cleanup such as `rm -rf` or `git reset --hard`
+- if a required action is blocked by policy or missing system access, stop with a concrete blocker instead of claiming task success
 
 ## Communication boundary
 

@@ -1,10 +1,11 @@
-import {chmodSync, existsSync, mkdirSync, writeFileSync} from "node:fs"
+import {existsSync} from "node:fs"
 import {mkdir, readFile, rename, rm, stat, writeFile} from "node:fs/promises"
 import {spawnSync} from "node:child_process"
 import path from "node:path"
 import {nip19} from "nostr-tools"
 import {prepareAgent} from "./config.js"
 import {KIND_OUTBOX_RELAYS, KIND_REPO_ANNOUNCEMENT} from "./events.js"
+import {configureCheckoutGitAuth, gitAuthEnv} from "./git-auth.js"
 import {decodeNpub, encodeNpub, getSelfNpub, getSelfPubkey, publishEventDetailed, queryEvents, secretKey} from "./nostr.js"
 import type {
   AppCfg,
@@ -94,8 +95,6 @@ const firstTag = (tags: string[][], names: string[]) => tagValues(tags, names)[0
 const registryFile = (app: AppCfg) => path.join(app.config.runtimeRoot, "repos", "registry.json")
 const registryLockDir = (app: AppCfg) => path.join(app.config.runtimeRoot, "repos", ".registry.lock")
 
-type GitEnv = Record<string, string | undefined>
-
 const ensureDir = async (dir: string) => {
   await mkdir(dir, {recursive: true})
 }
@@ -156,7 +155,7 @@ const saveRepoRegistry = async (app: AppCfg, registry: RepoRegistry) => {
 
 const repoKey = (ownerPubkey: string, identifier: string) => `${KIND_REPO_ANNOUNCEMENT}:${ownerPubkey}:${identifier}`
 
-const runGit = (args: string[], cwd: string, env?: GitEnv) => {
+const runGit = (args: string[], cwd: string, env?: Record<string, string | undefined>) => {
   const result = spawnSync("git", args, {
     cwd,
     encoding: "utf8",
@@ -395,55 +394,6 @@ const providerHost = (value: string) => {
     return url.host.toLowerCase()
   } catch {
     return trimmed.toLowerCase()
-  }
-}
-
-const providerForUrl = (app: AppCfg, value: string) => {
-  if (!smartHttpUrl(value)) return
-
-  let url: URL
-  try {
-    url = new URL(value)
-  } catch {
-    return
-  }
-
-  const host = url.host.toLowerCase()
-  return Object.values(app.config.providers).find(provider => {
-    const configuredHost = providerHost(provider.host)
-    return configuredHost && provider.token && host === configuredHost
-  })
-}
-
-const ensureGitAskpass = (app: AppCfg) => {
-  const file = path.join(app.config.runtimeRoot, "git", "askpass.sh")
-  if (!existsSync(file)) {
-    mkdirSync(path.dirname(file), {recursive: true})
-    writeFileSync(file, [
-      "#!/bin/sh",
-      "case \"$1\" in",
-      "*Username*) printf '%s\\n' \"${OPENTEAM_GIT_USERNAME:-openteam}\" ;;",
-      "*) printf '%s\\n' \"$OPENTEAM_GIT_TOKEN\" ;;",
-      "esac",
-      "",
-    ].join("\n"))
-    chmodSync(file, 0o700)
-  }
-  return file
-}
-
-const gitAuthEnv = (app: AppCfg, value: string, username?: string): GitEnv | undefined => {
-  const provider = providerForUrl(app, value)
-  if (!provider) return
-
-  return {
-    GIT_ASKPASS: ensureGitAskpass(app),
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_CONFIG_COUNT: "1",
-    GIT_CONFIG_KEY_0: "credential.helper",
-    GIT_CONFIG_VALUE_0: "",
-    OPENTEAM_GIT_USERNAME: username || provider.username || "openteam",
-    OPENTEAM_GIT_TOKEN: provider.token,
   }
 }
 
@@ -1389,6 +1339,19 @@ const lease = (context: RepoContext, agent: PreparedAgent, item: TaskItem, mode:
   updatedAt: now(),
 })
 
+const configureContextGitAuth = async (
+  app: AppCfg,
+  checkout: string,
+  remoteUrls: string[],
+  authUsername?: string,
+) => {
+  const auth = await configureCheckoutGitAuth(app, checkout, remoteUrls, authUsername)
+  if (!auth) return
+  runGit(["config", "--local", "--replace-all", "credential.helper", ""], checkout)
+  runGit(["config", "--local", "--add", "credential.helper", auth.helperCommand], checkout)
+  runGit(["config", "--local", "--replace-all", "credential.useHttpPath", "true"], checkout)
+}
+
 const createContext = async (
   app: AppCfg,
   identity: RepoIdentity,
@@ -1410,6 +1373,7 @@ const createContext = async (
 
   await ensureDir(root)
   runGit(["clone", "--reference", mirror, "--dissociate", source, checkout], process.env.OPENTEAM_CALLER_CWD || process.cwd(), gitAuthEnv(app, source, authUsername))
+  await configureContextGitAuth(app, checkout, [source, ...(upstreamSource ? [upstreamSource] : [])], authUsername)
   if (!hasCommit(checkout, baseCommit)) {
     runGit(["fetch", mirror, "+refs/*:refs/remotes/openteam-cache/*"], checkout)
   }
@@ -1481,6 +1445,8 @@ export const resolveRepoTarget = async (
     const context = reusable
       ? lease(reusable, agent, item, mode)
       : await createContext(app, identity, source, mirror, mode, baseRef, baseCommit, agent, item, working.upstream?.key, working.upstream ? upstreamSource : undefined, working.authUsername)
+
+    await configureContextGitAuth(app, context.checkout, [source, ...(working.upstream ? [upstreamSource] : [])], working.authUsername)
 
     registry.repos[upstreamIdentity.key] = upstreamIdentity
     registry.repos[identity.key] = identity

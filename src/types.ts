@@ -249,6 +249,9 @@ export type PreparedAgent = {
 export type LaunchResult = {
   id: string
   state: TaskState
+  workerState?: TaskState
+  verificationState?: TaskState
+  failureCategory?: string
   task: string
   target: string
   mode: TaskMode
@@ -263,6 +266,10 @@ export type LaunchResult = {
   baseAgentId?: string
   runtimeId?: string
   parallel?: boolean
+  devEnv?: string
+  devEnvSource?: string
+  projectProfile?: string
+  projectStacks?: string[]
 }
 
 export type TaskRunRecord = {
@@ -280,6 +287,9 @@ export type TaskRunRecord = {
   mode?: TaskMode
   parallel?: boolean
   state: TaskState
+  workerState?: TaskState
+  verificationState?: TaskState
+  failureCategory?: string
   startedAt: string
   finishedAt?: string
   durationMs?: number
@@ -296,6 +306,21 @@ export type TaskRunRecord = {
     checkout: string
     branch: string
     baseCommit?: string
+  }
+  devEnv?: {
+    kind: "none" | "nix-flake" | "nix-shell"
+    source?: string
+    commandPrefix: string[]
+  }
+  projectProfile?: {
+    path: string
+    stacks: string[]
+    docs: string[]
+    likelyCommands: Array<{
+      purpose: string
+      command: string[]
+    }>
+    blockers: string[]
   }
   logs?: {
     opencode?: string
@@ -316,6 +341,16 @@ export type TaskRunRecord = {
     stoppedAt?: string
     lastHealthOkAt?: string
     lastHealthError?: string
+    lastHealthCheckAt?: string
+    firstHealthFailureAt?: string
+    healthChecks?: number
+    healthFailures?: number
+    exitCode?: number
+    exitSignal?: string
+    restartCount?: number
+    restartAttemptedAt?: string
+    restartedAt?: string
+    restartLog?: string
   }
   browser?: {
     enabled: boolean
@@ -361,6 +396,10 @@ export type AgentRuntimeState = {
   browserProfile?: string
   browserArtifacts?: string
   browserHeadless?: boolean
+  devEnv?: string
+  devEnvSource?: string
+  projectProfile?: string
+  projectStacks?: string[]
 }
 
 export type InboundDm = {

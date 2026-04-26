@@ -1,4 +1,7 @@
 import {describe, expect, test} from "bun:test"
+import {mkdir, mkdtemp, writeFile} from "node:fs/promises"
+import {tmpdir} from "node:os"
+import path from "node:path"
 import {
   buildCommentEvent,
   buildPullRequestEvent,
@@ -10,12 +13,51 @@ import {
   KIND_GIT_PULL_REQUEST,
   KIND_GIT_PULL_REQUEST_UPDATE,
   KIND_GIT_STATUS_APPLIED,
+  loadRepoPublishContext,
 } from "../src/repo-publish.js"
 
 const repoAddr = "30617:owner-pubkey:repo"
 
 const hasTag = (tags: string[][], expected: string[]) =>
   tags.some(tag => JSON.stringify(tag) === JSON.stringify(expected))
+
+const validIdentity = {
+  key: repoAddr,
+  ownerPubkey: "owner-pubkey",
+  ownerNpub: "npub1owner",
+  identifier: "repo",
+  announcementEventId: "event-id",
+  announcedAt: 1,
+  relays: ["wss://repo.example.com"],
+  cloneUrls: ["https://example.com/repo.git"],
+  rawTags: [],
+}
+
+const validPolicy = {
+  repoRelays: ["wss://repo.example.com"],
+  publishRelays: ["wss://repo.example.com"],
+  naddrRelays: ["wss://repo.example.com"],
+  taggedRelays: ["wss://repo.example.com"],
+  isGrasp: false,
+}
+
+const writeContext = async (patch: Record<string, unknown> = {}) => {
+  const root = await mkdtemp(path.join(tmpdir(), "openteam-repo-context-"))
+  const checkout = path.join(root, "checkout")
+  await mkdir(checkout, {recursive: true})
+  const file = path.join(root, "repo-context.json")
+  await writeFile(file, `${JSON.stringify({
+    version: 1,
+    agentId: "builder-01",
+    target: "nostr://npub1owner/repo",
+    checkout,
+    defaultScope: "repo",
+    repo: validIdentity,
+    policy: validPolicy,
+    ...patch,
+  }, null, 2)}\n`)
+  return {file, checkout}
+}
 
 describe("repo publish event builders", () => {
   test("builds NIP-22 comments with repo context and root tags", () => {
@@ -109,5 +151,23 @@ describe("repo publish event builders", () => {
     expect(hasTag(update.tags ?? [], ["P", "pr-author"])).toBe(true)
     expect(hasTag(update.tags ?? [], ["c", "tip456"])).toBe(true)
     expect(hasTag(update.tags ?? [], ["merge-base", "base456"])).toBe(true)
+  })
+
+  test("rejects repo publish contexts with a missing checkout", async () => {
+    const {file} = await writeContext({checkout: path.join(tmpdir(), `openteam-missing-checkout-${Date.now()}`)})
+
+    await expect(loadRepoPublishContext(file)).rejects.toThrow("checkout does not exist")
+  })
+
+  test("rejects repo publish contexts with an invalid default scope", async () => {
+    const {file} = await writeContext({defaultScope: "fork"})
+
+    await expect(loadRepoPublishContext(file)).rejects.toThrow("invalid defaultScope")
+  })
+
+  test("rejects upstream default scope without upstream repo identity", async () => {
+    const {file} = await writeContext({defaultScope: "upstream"})
+
+    await expect(loadRepoPublishContext(file)).rejects.toThrow("missing upstreamRepo")
   })
 })

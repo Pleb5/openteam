@@ -8,9 +8,12 @@ import path from "node:path"
 import process from "node:process"
 import {startBunker, type RunningBunker} from "./bunker.js"
 import {prepareAgent} from "./config.js"
+import {detectDevEnv, wrapDevEnvCommand, type DevEnv} from "./dev-env.js"
 import {pollInboundTasks, subscribeInboundTasks} from "./dm.js"
 import {KIND_GIT_ISSUE} from "./events.js"
+import {detectOpenCodeHardFailure} from "./opencode-log.js"
 import {dispatchOperatorRequest} from "./orchestrator.js"
+import {detectProjectProfile, projectProfilePromptLines, writeProjectProfile, type ProjectProfile} from "./project-profile.js"
 import {writeRepoPublishContext} from "./repo-publish.js"
 import {releaseRepoContext, resolveRepoAnnouncementTarget, resolveRepoRelayPolicy, resolveRepoTarget, type RepoRelayPolicy} from "./repo.js"
 import {
@@ -57,6 +60,12 @@ const capture = (cmd: string, args: string[], cwd: string) => {
   return result.stdout.trim()
 }
 
+const resolveHostCommand = (cmd: string) => {
+  if (path.isAbsolute(cmd) || cmd.includes("/")) return cmd
+  const result = spawnSync("which", [cmd], {encoding: "utf8"})
+  return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : cmd
+}
+
 const taskId = (task: string) => `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${slug(task)}`
 
 const isPortFree = async (port: number) => {
@@ -83,6 +92,44 @@ const nextPort = async (agent: PreparedAgent) => {
 
 const fill = (items: string[], vars: Record<string, string>) => items.map(item => item.replace(/\{(\w+)\}/g, (_, key: string) => vars[key] ?? ""))
 
+export const checkoutRuntimeDirs = (checkout: string) => {
+  const root = path.join(checkout, ".openteam")
+  return {
+    root,
+    tmp: path.join(root, "tmp"),
+    cache: path.join(root, "cache"),
+    artifacts: path.join(root, "artifacts"),
+    npmCache: path.join(root, "cache", "npm"),
+    yarnCache: path.join(root, "cache", "yarn"),
+    bunCache: path.join(root, "cache", "bun"),
+    pnpmStore: path.join(root, "cache", "pnpm-store"),
+  }
+}
+
+const ensureCheckoutRuntimeDirs = async (checkout: string) => {
+  const dirs = checkoutRuntimeDirs(checkout)
+  await Promise.all(Object.values(dirs).map(dir => ensureDir(dir)))
+  return dirs
+}
+
+export const checkoutRuntimeEnv = (checkout: string, env: Record<string, string> = {}) => {
+  const dirs = checkoutRuntimeDirs(checkout)
+  return {
+    TMPDIR: dirs.tmp,
+    TMP: dirs.tmp,
+    TEMP: dirs.tmp,
+    XDG_CACHE_HOME: dirs.cache,
+    OPENTEAM_TMP_DIR: dirs.tmp,
+    OPENTEAM_CACHE_DIR: dirs.cache,
+    OPENTEAM_ARTIFACTS_DIR: dirs.artifacts,
+    npm_config_cache: dirs.npmCache,
+    YARN_CACHE_FOLDER: dirs.yarnCache,
+    BUN_INSTALL_CACHE_DIR: dirs.bunCache,
+    npm_config_store_dir: dirs.pnpmStore,
+    ...env,
+  }
+}
+
 const hasPackageManagerFiles = (root: string) => {
   return [
     "package.json",
@@ -104,6 +151,29 @@ const health = async (url: string, timeoutMs = 60_000) => {
     await new Promise(resolve => setTimeout(resolve, 1000))
   }
   throw new Error(`dev server did not become ready at ${url}`)
+}
+
+const checkHealthOnce = async (url: string, timeoutMs = 1500) => {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(url, {signal: controller.signal})
+    return {ok: response.ok, status: response.status}
+  } catch (error) {
+    return {ok: false, error: error instanceof Error ? error.message : String(error)}
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+const processAlive = (pid?: number) => {
+  if (!pid || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
 }
 
 export const provisionWorkerControlCommand = (text: string) => {
@@ -130,9 +200,11 @@ const spawnLogged = (
   cwd: string,
   logFile: string,
   env: Record<string, string> = {},
+  devEnv?: DevEnv,
 ) => {
   const stream = createWriteStream(logFile, {flags: "a"})
-  const child = spawn(cmd, args, {
+  const wrapped = wrapDevEnvCommand(devEnv, cmd, args)
+  const child = spawn(wrapped.cmd, wrapped.args, {
     cwd,
     env: {...process.env, ...env},
     stdio: ["ignore", "pipe", "pipe"],
@@ -192,16 +264,21 @@ const syncProjectSkills = async (agent: PreparedAgent, checkout: string) => {
   await cp(src, dest, {recursive: true})
 }
 
-const bootstrapPrompt = (agent: PreparedAgent, task: string) => {
+const bootstrapPrompt = (agent: PreparedAgent, task: string, projectProfile?: ProjectProfile) => {
   return [
     `You are ${agent.id}, a ${agent.meta.role} worker in openteam.`,
     `Read the attached bootstrap files first and follow them.`,
     `You are running in provisioning mode, not orchestration mode.`,
+    ...projectProfilePromptLines(projectProfile),
     `Before any worker is allowed to begin product work, you must make sure this repository environment is capable of fulfilling the requested task.`,
     `Inspect project documentation, lockfiles, workspace files, submodule configuration, and development instructions before choosing commands.`,
     `Provision the environment if needed: initialize submodules, install dependencies, and run the minimum setup needed to make the repository workable.`,
     `Do not assume any specific framework or package manager. Detect what the repository actually uses.`,
+    `If the checkout has a Nix flake or shell, openteam will launch you inside that declared development environment; use repo-native commands normally from there.`,
     `Do not attempt browser verification until the environment is ready for it.`,
+    `Use checkout-local scratch/cache/artifact paths from OPENTEAM_TMP_DIR, OPENTEAM_CACHE_DIR, and OPENTEAM_ARTIFACTS_DIR; avoid /tmp and host-global caches.`,
+    `Do not run GUI openers, system package installs, or writes outside the managed checkout/runtime. Stop with a concrete blocker when those are required.`,
+    `Do not run destructive cleanup such as broad rm -rf or git reset --hard unless the task explicitly requires it and the scope is clear.`,
     `Do not launch, enqueue, start, stop, or watch worker agents. Do not call openteam launch, openteam enqueue, openteam serve, or openteam worker.`,
     `Worker handoff target task: ${task}`,
     `When provisioning is complete, leave the managed repo context ready for the worker handoff. If blocked, stop with a concrete blocker.`,
@@ -227,6 +304,8 @@ const compose = (
   runtime?: AgentRuntime,
   repoPolicy?: RepoRelayPolicy,
   defaultPublishScope = "repo",
+  devEnv?: DevEnv,
+  projectProfile?: ProjectProfile,
 ) => {
   const grasp = graspServers(agent)
   return [
@@ -238,27 +317,48 @@ const compose = (
       ? `Remote signer bunker URL: ${runtime.bunker.uri}`
       : `Remote signer bunker URL: unavailable`,
     grasp.length > 0 ? `Configured GRASP relays: ${grasp.join(", ")}` : `Configured GRASP relays: none`,
+    `Detected repo dev environment: ${devEnv?.kind ?? "none"}${devEnv?.source ? ` (${devEnv.source})` : ""}`,
+    ...projectProfilePromptLines(projectProfile),
     ...repoRelayContext(repoPolicy, defaultPublishScope),
     `Task: ${task}`,
     `The repository environment has been provisioned by the orchestrator before handoff. Start cleanly from the prepared repo context.`,
+    `Use checkout-local scratch space such as .openteam/tmp for repro clones or temporary files; avoid /tmp unless the operator explicitly grants broader filesystem access.`,
+    `Use OPENTEAM_TMP_DIR, OPENTEAM_CACHE_DIR, and OPENTEAM_ARTIFACTS_DIR for temporary files, caches, repro clones, and generated evidence.`,
+    `Do not run GUI openers, system package installs, or writes outside the managed checkout/runtime. Stop with a concrete blocker when those are required.`,
+    `Do not run destructive cleanup such as broad rm -rf or git reset --hard unless the task explicitly requires it and the scope is clear.`,
     `If the environment still appears broken, stop with a concrete blocker instead of trying to redesign provisioning yourself.`,
     `Operator task-status DMs are handled by openteam runtime; focus on the task itself unless the task explicitly requires Nostr messaging work.`,
     `Use the browser MCP if available to verify UI behavior before you claim success.`,
+    `For branch publication, use plain git against the configured origin and publish Nostr-git PR events through openteam repo publish pr; do not rely on gh auth or personal forge sessions.`,
     `If the target app requires login, use the Remote Signer flow with the bunker URL above when appropriate.`,
     `Keep working until the task is handled end-to-end or you hit a concrete blocker.`,
   ].join("\n")
 }
 
-const composeCode = (agent: PreparedAgent, task: string, repoPolicy?: RepoRelayPolicy, defaultPublishScope = "repo") => {
+const composeCode = (
+  agent: PreparedAgent,
+  task: string,
+  repoPolicy?: RepoRelayPolicy,
+  defaultPublishScope = "repo",
+  devEnv?: DevEnv,
+  projectProfile?: ProjectProfile,
+) => {
   return [
     `You are ${agent.id}, a ${agent.meta.role} worker in openteam.`,
     `Read the attached bootstrap files first and follow them.`,
     ...repoRelayContext(repoPolicy, defaultPublishScope),
+    `Detected repo dev environment: ${devEnv?.kind ?? "none"}${devEnv?.source ? ` (${devEnv.source})` : ""}`,
+    ...projectProfilePromptLines(projectProfile),
     `Task: ${task}`,
     `This run is code-first, not browser-first. Do not assume a dev server or browser is required unless the task proves otherwise.`,
     `The repository environment has been provisioned by the orchestrator before handoff. Start cleanly from the prepared repo context.`,
+    `Use checkout-local scratch space such as .openteam/tmp for repro clones or temporary files; avoid /tmp unless the operator explicitly grants broader filesystem access.`,
+    `Use OPENTEAM_TMP_DIR, OPENTEAM_CACHE_DIR, and OPENTEAM_ARTIFACTS_DIR for temporary files, caches, repro clones, and generated evidence.`,
+    `Do not run GUI openers, system package installs, or writes outside the managed checkout/runtime. Stop with a concrete blocker when those are required.`,
+    `Do not run destructive cleanup such as broad rm -rf or git reset --hard unless the task explicitly requires it and the scope is clear.`,
     `If the environment still appears broken, stop with a concrete blocker instead of trying to redesign provisioning yourself.`,
     `Operator task-status DMs are handled by openteam runtime; focus on the task itself unless the task explicitly requires Nostr messaging work.`,
+    `For branch publication, use plain git against the configured origin and publish Nostr-git PR events through openteam repo publish pr; do not rely on gh auth or personal forge sessions.`,
     `Keep working until the task is handled end-to-end or you hit a concrete blocker.`,
   ].join("\n")
 }
@@ -271,10 +371,14 @@ const writeOcfg = async (agent: PreparedAgent, checkout: string, runtime?: Agent
   await ensureDir(dir)
   const browserProfile = path.join(agent.paths.browser, "profile")
   const browserOutput = path.join(agent.paths.artifacts, "playwright")
+  const runtimeDirs = checkoutRuntimeDirs(checkout)
   await ensureDir(browserProfile)
   await ensureDir(browserOutput)
 
   const command = [...mcp.command]
+  if (command[0]) {
+    command[0] = resolveHostCommand(command[0])
+  }
   if (agent.app.config.browser.executablePath) {
     command.push("--executable-path", agent.app.config.browser.executablePath)
   }
@@ -294,6 +398,13 @@ const writeOcfg = async (agent: PreparedAgent, checkout: string, runtime?: Agent
         command,
         environment: {
           ...mcp.environment,
+          TMPDIR: runtimeDirs.tmp,
+          TMP: runtimeDirs.tmp,
+          TEMP: runtimeDirs.tmp,
+          XDG_CACHE_HOME: runtimeDirs.cache,
+          OPENTEAM_TMP_DIR: runtimeDirs.tmp,
+          OPENTEAM_CACHE_DIR: runtimeDirs.cache,
+          OPENTEAM_ARTIFACTS_DIR: runtimeDirs.artifacts,
           OPENTEAM_BROWSER_PROFILE: path.join(agent.paths.browser, "profile"),
           OPENTEAM_BUNKER_URL: runtime?.bunker?.uri ?? "",
           OPENTEAM_AGENT_NPUB: getSelfNpub(agent),
@@ -312,6 +423,7 @@ const prepareSubmodules = async (agent: PreparedAgent, checkout: string) => {
 
 const prepareCheckout = async (agent: PreparedAgent, checkout: string, runtime?: AgentRuntime) => {
   await prepareSubmodules(agent, checkout)
+  await ensureCheckoutRuntimeDirs(checkout)
   await syncProjectSkills(agent, checkout)
   await writeOcfg(agent, checkout, runtime)
 }
@@ -336,7 +448,7 @@ const writeViteWrapper = async (agent: PreparedAgent, checkout: string) => {
   return file
 }
 
-const startDev = async (agent: PreparedAgent, task: string, checkout: string) => {
+const startDev = async (agent: PreparedAgent, task: string, checkout: string, devEnv?: DevEnv) => {
   if (!agent.repo.devCommand?.length || !agent.repo.healthUrl) {
     throw new Error(`repo ${agent.repo.root} is not configured for web mode`)
   }
@@ -346,7 +458,7 @@ const startDev = async (agent: PreparedAgent, task: string, checkout: string) =>
   const vars = {port, checkout, repoRoot: checkout, taskId: task, viteConfig}
   const [cmd, ...args] = fill(agent.repo.devCommand, vars)
   const logFile = path.join(agent.paths.artifacts, `${task}-dev.log`)
-  const child = spawnLogged(cmd, args, checkout, logFile)
+  const child = spawnLogged(cmd, args, checkout, logFile, checkoutRuntimeEnv(checkout), devEnv)
   const ready = health(url)
 
   const exitBeforeReady = new Promise<never>((_, reject) => {
@@ -365,6 +477,103 @@ const startDev = async (agent: PreparedAgent, task: string, checkout: string) =>
   return {child, url, logFile}
 }
 
+const attachDevExitRecorder = (
+  record: TaskRunRecord,
+  dev: Awaited<ReturnType<typeof startDev>>,
+) => {
+  dev.child.once("close", (code, signal) => {
+    if (record.devServer?.pid && record.devServer.pid !== dev.child.pid) return
+    void updateRunRecord(record, {
+      devServer: {
+        stoppedAt: now(),
+        exitCode: code ?? undefined,
+        exitSignal: signal ?? undefined,
+      },
+    }).catch(error => process.stderr.write(`failed to record dev server exit: ${String(error)}\n`))
+  })
+}
+
+const startDevMonitor = (
+  record: TaskRunRecord,
+  dev: Awaited<ReturnType<typeof startDev>>,
+  intervalMs = 5000,
+) => {
+  let stopped = false
+  let checking = false
+  let checks = record.devServer?.healthChecks ?? 0
+  let failures = record.devServer?.healthFailures ?? 0
+  const runCheck = async (force = false) => {
+    if ((stopped && !force) || checking) return
+    if (record.devServer?.pid && record.devServer.pid !== dev.child.pid) {
+      stopped = true
+      return
+    }
+    checking = true
+    const checkedAt = now()
+    try {
+      const health = await checkHealthOnce(dev.url)
+      if (record.devServer?.pid && record.devServer.pid !== dev.child.pid) return
+      checks += 1
+      if (health.ok) {
+        await updateRunRecord(record, {
+          devServer: {
+            lastHealthCheckAt: checkedAt,
+            lastHealthOkAt: checkedAt,
+            lastHealthError: undefined,
+            healthChecks: checks,
+            healthFailures: failures,
+          },
+        })
+      } else {
+        failures += 1
+        await updateRunRecord(record, {
+          devServer: {
+            lastHealthCheckAt: checkedAt,
+            firstHealthFailureAt: record.devServer?.firstHealthFailureAt ?? checkedAt,
+            lastHealthError: health.error ?? `HTTP ${health.status ?? "unknown"}`,
+            healthChecks: checks,
+            healthFailures: failures,
+          },
+        })
+      }
+
+      if (!processAlive(dev.child.pid) && !record.devServer?.stoppedAt) {
+        await updateRunRecord(record, {
+          devServer: {
+            stoppedAt: now(),
+          },
+        })
+      }
+    } finally {
+      checking = false
+    }
+  }
+  const timer = setInterval(() => {
+    void runCheck().catch(error => process.stderr.write(`dev monitor failed: ${String(error)}\n`))
+  }, intervalMs)
+  timer.unref?.()
+  void runCheck().catch(error => process.stderr.write(`dev monitor failed: ${String(error)}\n`))
+  return {
+    stop: async () => {
+      clearInterval(timer)
+      await runCheck(true).catch(() => undefined)
+      stopped = true
+    },
+  }
+}
+
+const stopChild = async (child: ReturnType<typeof spawnLogged>, signal: NodeJS.Signals = "SIGTERM", timeoutMs = 1500) => {
+  if (!processAlive(child.pid)) return
+  await new Promise<void>(resolve => {
+    const timer = setTimeout(resolve, timeoutMs)
+    child.once("close", () => {
+      clearTimeout(timer)
+      resolve()
+    })
+    child.kill(signal)
+  })
+}
+
 const wait = async (child: ReturnType<typeof spawnLogged>) => {
   return new Promise<number>((resolve, reject) => {
     child.on("error", reject)
@@ -381,6 +590,7 @@ const runOpencodeSession = async (
   model?: string,
   onStart?: (pid: number | undefined) => Promise<void> | void,
   env: Record<string, string> = {},
+  devEnv?: DevEnv,
 ) => {
   const files = attachFiles(agent)
   const args = ["run", "--dir", checkout, "--agent", agent.app.config.opencode.agent, "--title", title]
@@ -396,9 +606,18 @@ const runOpencodeSession = async (
 
   args.push("--", prompt)
 
-  const child = spawnLogged(agent.app.config.opencode.binary, args, agent.app.root, logFile, env)
+  const opencodeBinary = resolveHostCommand(agent.app.config.opencode.binary)
+  const cwd = devEnv && devEnv.kind !== "none" ? checkout : agent.app.root
+  const child = spawnLogged(opencodeBinary, args, cwd, logFile, checkoutRuntimeEnv(checkout, env), devEnv)
   await onStart?.(child.pid)
-  return {code: await wait(child), pid: child.pid}
+  const code = await wait(child)
+  const hardFailure = existsSync(logFile)
+    ? detectOpenCodeHardFailure(await readFile(logFile, "utf8"))
+    : undefined
+  if (hardFailure) {
+    throw new Error(`OpenCode hard failure: ${hardFailure.reason}; evidence: ${hardFailure.evidence}`)
+  }
+  return {code, pid: child.pid}
 }
 
 const runProvisioningPhase = async (
@@ -408,6 +627,8 @@ const runProvisioningPhase = async (
   task: string,
   model?: string,
   onStart?: (pid: number | undefined) => Promise<void> | void,
+  devEnv?: DevEnv,
+  projectProfile?: ProjectProfile,
 ) => {
   const orchestrator = await prepareAgent(app, "orchestrator-01")
   const control: PreparedAgent = {...orchestrator, repo}
@@ -416,11 +637,12 @@ const runProvisioningPhase = async (
     control,
     checkout,
     `${path.basename(path.dirname(checkout))}-provision`,
-    bootstrapPrompt(control, task),
+    bootstrapPrompt(control, task, projectProfile),
     logFile,
     model,
     onStart,
     {OPENTEAM_PHASE: "provision"},
+    devEnv,
   )
   await assertProvisionLogClean(logFile)
   return {code: session.code, pid: session.pid, logFile}
@@ -466,6 +688,13 @@ const provisionFingerprint = async (repo: RepoCfg, checkout: string, mode: TaskM
     "bun.lock",
     "bun.lockb",
     ".gitmodules",
+    ".envrc",
+    "flake.nix",
+    "flake.lock",
+    "shell.nix",
+    "default.nix",
+    "devenv.nix",
+    "devenv.yaml",
     "pnpm-workspace.yaml",
     "Cargo.toml",
     "Cargo.lock",
@@ -687,9 +916,14 @@ const updateRunRecord = async (record: TaskRunRecord, patch: Partial<TaskRunReco
   }
   if (patch.repo) record.repo = patch.repo
   if (patch.context) record.context = patch.context
+  if (patch.devEnv) record.devEnv = patch.devEnv
+  if (patch.projectProfile) record.projectProfile = patch.projectProfile
   if (patch.target !== undefined) record.target = patch.target
   if (patch.mode !== undefined) record.mode = patch.mode
   if (patch.model !== undefined) record.model = patch.model
+  if (patch.workerState !== undefined) record.workerState = patch.workerState
+  if (patch.verificationState !== undefined) record.verificationState = patch.verificationState
+  if (patch.failureCategory !== undefined) record.failureCategory = patch.failureCategory
   if (patch.result !== undefined) record.result = patch.result
   if (patch.error !== undefined) record.error = patch.error
   await writeRunRecord(record)
@@ -904,6 +1138,22 @@ export const runTask = async (
     )
 
     await runPhase(runRecord, "prepare-checkout", () => prepareCheckout(agent, checkout))
+    const devEnv = await runPhase(runRecord, "detect-dev-env", () => detectDevEnv(checkout))
+    await updateRunRecord(runRecord, {devEnv})
+    const projectProfile = await runPhase(runRecord, "detect-project-profile", () => detectProjectProfile(checkout, devEnv))
+    const projectProfileFile = await runPhase(runRecord, "write-project-profile", () => writeProjectProfile(checkout, projectProfile))
+    await updateRunRecord(runRecord, {
+      projectProfile: {
+        path: projectProfileFile,
+        stacks: projectProfile.stacks,
+        docs: projectProfile.docs,
+        likelyCommands: projectProfile.likelyCommands.map(item => ({
+          purpose: item.purpose,
+          command: item.command,
+        })),
+        blockers: projectProfile.blockers,
+      },
+    })
 
     await mergeState(agent, {
       running: true,
@@ -920,6 +1170,10 @@ export const runTask = async (
       baseAgentId: agent.configId,
       runtimeId: agent.id,
       parallel: item.parallel,
+      devEnv: devEnv.kind,
+      devEnvSource: devEnv.source,
+      projectProfile: projectProfileFile,
+      projectStacks: projectProfile.stacks,
       ...(mode === "web" ? {
         browserProfile: path.join(agent.paths.browser, "profile"),
         browserArtifacts: path.join(agent.paths.artifacts, "playwright"),
@@ -937,7 +1191,7 @@ export const runTask = async (
       const provision = await runPhase(
         runRecord,
         "provision",
-        () => runProvisioningPhase(app, resolved.repo, checkout, item.task, item.model, pid => updateRunRecord(runRecord, {process: {provisionPid: pid}})),
+        () => runProvisioningPhase(app, resolved.repo, checkout, item.task, item.model, pid => updateRunRecord(runRecord, {process: {provisionPid: pid}}), devEnv, projectProfile),
       )
       provisionLogFile = provision.logFile
       await updateRunRecord(runRecord, {logs: {provision: provisionLogFile}})
@@ -958,6 +1212,10 @@ export const runTask = async (
           baseAgentId: agent.configId,
           runtimeId: agent.id,
           parallel: item.parallel,
+          devEnv: devEnv.kind,
+          devEnvSource: devEnv.source,
+          projectProfile: projectProfileFile,
+          projectStacks: projectProfile.stacks,
         }
         finalResult = result
 
@@ -1014,7 +1272,9 @@ export const runTask = async (
         process.stderr.write(`grasp server sync skipped: ${String(error)}\n`)
       }
 
-      const dev = await runPhase(runRecord, "start-dev-server", () => startDev(agent, idTask, checkout))
+      let dev = await runPhase(runRecord, "start-dev-server", () => startDev(agent, idTask, checkout, devEnv))
+      attachDevExitRecorder(runRecord, dev)
+      let devMonitor = startDevMonitor(runRecord, dev)
       url = dev.url
       await updateRunRecord(runRecord, {
         logs: {dev: dev.logFile},
@@ -1030,25 +1290,88 @@ export const runTask = async (
       await mergeState(agent, {url, logFile, browserProfile: path.join(agent.paths.browser, "profile"), browserArtifacts: path.join(agent.paths.artifacts, "playwright")})
 
       try {
-        const prompt = compose(agent, item.task, dev.url, effectiveRuntime, repoPolicy, defaultPublishScope)
+        const prompt = compose(agent, item.task, dev.url, effectiveRuntime, repoPolicy, defaultPublishScope, devEnv, projectProfile)
         const session = await runPhase(
           runRecord,
           "opencode-worker",
-          () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, item.model, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}})),
+          () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, item.model, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}}), {}, devEnv),
           {logFile},
         )
         code = session.code
+        await updateRunRecord(runRecord, {workerState: code === 0 ? "succeeded" : "failed"})
         if (code === 0) {
-          await runPhase(runRecord, "verify-dev-server", async () => {
-            await health(dev.url, 3000)
-            await updateRunRecord(runRecord, {devServer: {lastHealthOkAt: now()}})
-          }, {url: dev.url})
+          try {
+            await runPhase(runRecord, "verify-dev-server", async () => {
+              await health(dev.url, 3000)
+              await updateRunRecord(runRecord, {
+                verificationState: "succeeded",
+                devServer: {lastHealthOkAt: now()},
+              })
+            }, {url: dev.url})
+          } catch (verifyError) {
+            await updateRunRecord(runRecord, {verificationState: "failed"})
+            try {
+              dev = await runPhase(runRecord, "restart-dev-server", async () => {
+                await devMonitor.stop()
+                await stopChild(dev.child)
+                const restartAttemptedAt = now()
+                await updateRunRecord(runRecord, {
+                  devServer: {
+                    restartAttemptedAt,
+                    restartCount: (runRecord.devServer?.restartCount ?? 0) + 1,
+                  },
+                })
+                const restarted = await startDev(agent, `${idTask}-restart`, checkout, devEnv)
+                attachDevExitRecorder(runRecord, restarted)
+                devMonitor = startDevMonitor(runRecord, restarted)
+                url = restarted.url
+                await updateRunRecord(runRecord, {
+                  process: {devPid: restarted.child.pid},
+                  devServer: {
+                    url: restarted.url,
+                    pid: restarted.child.pid,
+                    restartAttemptedAt,
+                    restartedAt: now(),
+                    restartLog: restarted.logFile,
+                    stoppedAt: undefined,
+                    exitCode: undefined,
+                    exitSignal: undefined,
+                  },
+                  browser: browserRunInfo(agent, restarted.url),
+                })
+                await mergeState(agent, {url: restarted.url})
+                return restarted
+              }, {
+                url: dev.url,
+                reason: verifyError instanceof Error ? verifyError.message : String(verifyError),
+              })
+            } catch (restartError) {
+              await updateRunRecord(runRecord, {
+                verificationState: "failed",
+                failureCategory: "dev-server-unhealthy",
+              })
+              throw restartError
+            }
+
+            await runPhase(runRecord, "verify-dev-server-after-restart", async () => {
+              await health(dev.url, 3000)
+              await updateRunRecord(runRecord, {
+                verificationState: "succeeded",
+                devServer: {lastHealthOkAt: now()},
+              })
+            }, {url: dev.url})
+          }
         } else {
+          await updateRunRecord(runRecord, {
+            verificationState: "failed",
+            failureCategory: "worker-failed",
+          })
           await skipRunPhase(runRecord, "verify-dev-server", {reason: "worker did not exit successfully"})
         }
       } finally {
+        await devMonitor.stop()
         await runPhase(runRecord, "stop-dev-server", async () => {
-          dev.child.kill("SIGTERM")
+          await stopChild(dev.child)
           await updateRunRecord(runRecord, {
             devServer: {
               stoppedAt: now(),
@@ -1057,20 +1380,24 @@ export const runTask = async (
         }, {pid: dev.child.pid})
       }
     } else {
-      const prompt = composeCode(agent, item.task, repoPolicy, defaultPublishScope)
+      const prompt = composeCode(agent, item.task, repoPolicy, defaultPublishScope, devEnv, projectProfile)
       const session = await runPhase(
         runRecord,
         "opencode-worker",
-        () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, item.model, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}})),
+        () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, item.model, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}}), {}, devEnv),
         {logFile},
       )
       code = session.code
+      await updateRunRecord(runRecord, {workerState: code === 0 ? "succeeded" : "failed"})
     }
 
     const state = code === 0 ? "succeeded" : "failed"
     const result: LaunchResult = {
       id: idTask,
       state,
+      workerState: code === 0 ? "succeeded" : "failed",
+      verificationState: runRecord.verificationState,
+      failureCategory: runRecord.failureCategory,
       task: item.task,
       target: resolved.target,
       mode,
@@ -1082,6 +1409,10 @@ export const runTask = async (
       baseAgentId: agent.configId,
       runtimeId: agent.id,
       parallel: item.parallel,
+      devEnv: devEnv.kind,
+      devEnvSource: devEnv.source,
+      projectProfile: projectProfileFile,
+      projectStacks: projectProfile.stacks,
     }
     finalResult = result
 
@@ -1103,6 +1434,10 @@ export const runTask = async (
   } catch (error) {
     taskError = error
     runError = error
+    await updateRunRecord(runRecord, {
+      workerState: runRecord.workerState ?? "failed",
+      failureCategory: runRecord.failureCategory ?? "task-runtime-error",
+    }).catch(() => undefined)
     await mergeState(agent, {
       running: false,
       finishedAt: now(),

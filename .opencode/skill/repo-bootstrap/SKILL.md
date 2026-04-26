@@ -22,6 +22,7 @@ Default sequence:
 
 Look for:
 
+- `.openteam/project-profile.json`
 - `AGENTS.md`
 - `README.md`
 - `CONTRIBUTING.md`
@@ -33,9 +34,19 @@ Look for:
 
 ## Detection checklist
 
+Start from `.openteam/project-profile.json` if present.
+It is a checklist of detected signals and likely commands, not authoritative project policy.
+Repo docs, declared scripts, and declared development environments override profile hints.
+
 Check for:
 
 - `.gitmodules`
+- `.envrc`
+- `flake.nix`
+- `shell.nix`
+- `devcontainer.json`
+- `mise.toml`
+- `.tool-versions`
 - `pnpm-lock.yaml`
 - `package-lock.json`
 - `yarn.lock`
@@ -43,6 +54,8 @@ Check for:
 - `pyproject.toml`
 - `Cargo.toml`
 - `go.mod`
+- `build.gradle` / `gradlew`
+- `Package.swift` / `.xcodeproj`
 
 Do not assume one package manager or framework.
 
@@ -57,6 +70,14 @@ Examples:
 - if lifecycle scripts fail during install, decide whether to retry with scripts disabled and then run the required build steps manually
 - run required prepare/build/bootstrap commands documented by the repo
 - run a minimal verification command such as `check`, `build`, or an equivalent health command
+
+## Runtime policy boundary
+
+- use checkout-local scratch/cache/artifact paths from `.openteam/tmp`, `.openteam/cache`, `.openteam/artifacts`, or the `OPENTEAM_*` env vars
+- put temporary files, package caches, downloaded artifacts, and generated logs under those paths
+- do not use `/tmp`, host-global caches, or paths outside the managed checkout/runtime unless the operator explicitly allows it
+- do not run GUI openers or system package installs from provisioning; stop with a concrete blocker if system access is required
+- do not run broad destructive cleanup such as `rm -rf` or `git reset --hard`
 
 ## Package manager guidance
 

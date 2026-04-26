@@ -1,8 +1,9 @@
 import {existsSync} from "node:fs"
 import {spawnSync} from "node:child_process"
 import {loadApp, prepareAgent} from "./config.js"
-import {assertAppConfigValid, formatConfigValidationIssues, validateAppConfig} from "./config-validate.js"
+import {assertAppConfigValid, formatConfigValidationIssues, validateAppConfig, type ConfigValidationOptions} from "./config-validate.js"
 import {assertControlAllowed} from "./control-guard.js"
+import {gitCredentialFromStdin} from "./git-auth.js"
 import {browserCommand} from "./commands/browser.js"
 import {consolePrompt} from "./commands/console.js"
 import {
@@ -22,8 +23,9 @@ import {
 import {statusReport} from "./commands/status.js"
 import {runTask, enqueueTask, prepareOnly, serveAgent} from "./launcher.js"
 import {dispatchOperatorRequest} from "./orchestrator.js"
+import {refreshRuntimeStatus} from "./runtime-status.js"
 import {listWorkers, startWorker, stopWorker} from "./supervisor.js"
-import type {TaskMode} from "./types.js"
+import type {AppCfg, TaskMode} from "./types.js"
 import {
   destroyNostr,
   dmRelays,
@@ -79,6 +81,14 @@ const value = (args: string[], key: string) => {
 
 const flag = (args: string[], key: string) => args.includes(key)
 
+const readStdin = async () => {
+  const chunks: Buffer[] = []
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
+  }
+  return Buffer.concat(chunks).toString("utf8")
+}
+
 const must = (value: string, label: string) => {
   if (!value) throw new Error(`missing ${label}`)
   return value
@@ -110,8 +120,42 @@ const taskOpts = (args: string[]) => ({
   parallel: flag(args, "--parallel") || undefined,
 })
 
-const doctor = async () => {
-  const app = await loadApp()
+type CapabilityCheck = {
+  label: string
+  options: ConfigValidationOptions
+}
+
+const defaultAgentMode = (app: AppCfg, agentId: string) =>
+  app.config.repos[app.config.agents[agentId]?.repo || ""]?.mode ?? "code"
+
+const capabilityChecks = (app: AppCfg): CapabilityCheck[] => {
+  const checks: CapabilityCheck[] = []
+  for (const id of Object.keys(app.config.agents)) {
+    const defaultMode = defaultAgentMode(app, id)
+    checks.push(
+      {label: `launch ${id} ${defaultMode}`, options: {capability: "launch", agentId: id, mode: defaultMode}},
+      {label: `serve ${id} ${defaultMode}`, options: {capability: "serve", agentId: id, mode: defaultMode}},
+      {label: `relay sync ${id}`, options: {capability: "relay-sync", agentId: id}},
+      {label: `profile sync ${id}`, options: {capability: "profile-sync", agentId: id}},
+      {label: `repo publish ${id}`, options: {capability: "repo-publish", agentId: id}},
+    )
+  }
+  return checks
+}
+
+const printCapabilityReadiness = (app: AppCfg) => {
+  console.log("capability readiness:")
+  for (const check of capabilityChecks(app)) {
+    const result = validateAppConfig(app, check.options)
+    const state = result.errors.length > 0 ? "blocked" : result.warnings.length > 0 ? "warn" : "ready"
+    const details = [...result.errors, ...result.warnings]
+      .map(item => `${item.severity}:${item.code}`)
+      .join(", ")
+    console.log(`  ${check.label}: ${state}${details ? ` (${details})` : ""}`)
+  }
+}
+
+const doctor = async (app: AppCfg) => {
   const validation = validateAppConfig(app, {capability: "doctor"})
   console.log("config validation:")
   if (validation.issues.length === 0) {
@@ -121,6 +165,7 @@ const doctor = async () => {
       console.log(`  ${line}`)
     }
   }
+  printCapabilityReadiness(app)
 
   const tools = ["git", "nak", app.config.opencode.binary]
   for (const tool of tools) {
@@ -174,7 +219,7 @@ const main = async () => {
   assertControlAllowed(cmd)
 
   if (cmd === "doctor") {
-    await doctor()
+    await doctor(app)
     return
   }
 
@@ -188,7 +233,12 @@ const main = async () => {
     return
   }
 
-  const known = new Set(["doctor", "console", "prepare", "launch", "enqueue", "serve", "worker", "runs", "browser", "repo", "relay", "profile", "tokens"])
+  if (cmd === "git" && sub === "credential") {
+    process.stdout.write(await gitCredentialFromStdin(app, args.slice(2), await readStdin()))
+    return
+  }
+
+  const known = new Set(["doctor", "console", "prepare", "launch", "enqueue", "serve", "worker", "runs", "browser", "repo", "relay", "profile", "tokens", "git"])
   if (!known.has(cmd)) {
     const handled = await dispatchOperatorRequest(app, args.join(" "))
     if (handled.handled) {
@@ -285,7 +335,11 @@ const main = async () => {
   }
 
   if (cmd === "runs" && (sub === "cleanup-stale" || sub === "reconcile")) {
-    await runsCleanupStale(app, args)
+    const cleaned = await runsCleanupStale(app, args)
+    const cleanupAt = new Date().toISOString()
+    await refreshRuntimeStatus(app, flag(args, "--dry-run")
+      ? {lastCleanupDryRunAt: cleanupAt, lastCleanupCount: cleaned.length}
+      : {lastCleanupAt: cleanupAt, lastCleanupCount: cleaned.length})
     return
   }
 

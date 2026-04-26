@@ -3,6 +3,7 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+.codex
 config/openteam.local.json
 config/openteam.secrets.env
 runtime/

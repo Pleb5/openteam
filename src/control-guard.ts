@@ -1,4 +1,4 @@
-const allowedDuringProvision = new Set(["doctor", "status", "console", "prepare", "runs", "browser", "repo", "relay", "profile", "tokens"])
+const allowedDuringProvision = new Set(["doctor", "status", "console", "prepare", "runs", "browser", "repo", "relay", "profile", "tokens", "git"])
 const blockedDuringProvision = new Set(["launch", "enqueue", "serve", "worker"])
 
 export const assertControlAllowed = (cmd: string) => {

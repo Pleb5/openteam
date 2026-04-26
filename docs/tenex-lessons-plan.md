@@ -193,6 +193,8 @@ Acceptance checks:
 
 ## Phase 6: Operational Status First
 
+Status: implemented for the current MVP surface.
+
 Problem:
 
 - operator commands must be reliable enough that humans do not need to read runtime JSON manually.
@@ -217,6 +219,8 @@ Acceptance checks:
 
 ## Phase 7: Optional Runtime Status File
 
+Status: implemented as a tiny generated status file, not a daemon subsystem.
+
 Only after phases 1-6, consider a tiny status file:
 
 ```text
@@ -233,6 +237,14 @@ Scope:
 
 Do not add a Tenex-style daemon subsystem unless the existing `status` and run records prove insufficient.
 
+Current behavior:
+
+- `openteam status` refreshes `runtime/status.json`
+- `openteam runs cleanup-stale --dry-run` records dry-run cleanup metadata
+- `openteam runs cleanup-stale` records cleanup metadata after reconciliation
+- the file is derived from run records, managed workers, and the repo registry
+- the file is cache/observability state only; run records and the repo registry remain authoritative
+
 ## Sequence
 
 Recommended order:
@@ -243,7 +255,7 @@ Recommended order:
 4. Add invariant tests for stale state, provision guard, and lease cleanup.
 5. Add `docs/invariants.md`.
 6. Expand `doctor` and `status` to expose capability-specific readiness.
-7. Reassess whether a tiny runtime status file is still needed.
+7. Add a tiny runtime status file after the status commands prove the needed shape.
 
 ## Principle
 

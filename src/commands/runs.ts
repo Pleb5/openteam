@@ -2,6 +2,7 @@ import {existsSync} from "node:fs"
 import {readFile, readdir, stat, writeFile} from "node:fs/promises"
 import path from "node:path"
 import {prepareAgent} from "../config.js"
+import {detectOpenCodeHardFailure, detectWorkerVerificationBlockers} from "../opencode-log.js"
 import {loadRepoRegistry, releaseRepoContext} from "../repo.js"
 import type {AgentRuntimeState, AppCfg, TaskRunRecord} from "../types.js"
 
@@ -42,7 +43,7 @@ export const recentRunRecords = async (app: AppCfg, limit: number) => {
 
 export const summarizeRuns = async (app: AppCfg, records: Array<{record: TaskRunRecord}>) =>
   Promise.all(records.map(async ({record}) => {
-    const diagnosis = record.state === "running" || record.state === "stale"
+    const diagnosis = record.state === "running" || record.state === "stale" || record.state === "succeeded"
       ? await diagnoseRun(app, record).catch(() => undefined)
       : undefined
     return runListView(record, diagnosis)
@@ -125,6 +126,16 @@ const logInfo = async (file?: string) => {
   }
 }
 
+const opencodeHardFailure = async (file?: string) => {
+  if (!file || !existsSync(file)) return undefined
+  return detectOpenCodeHardFailure(await readFile(file, "utf8"))
+}
+
+const workerVerificationBlockers = async (file?: string) => {
+  if (!file || !existsSync(file)) return []
+  return detectWorkerVerificationBlockers(await readFile(file, "utf8"))
+}
+
 export const checkUrl = async (url?: string) => {
   if (!url) return {ok: false, url, error: "no url"}
   const attempt = async (method: "HEAD" | "GET") => {
@@ -160,6 +171,8 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
     provision: await logInfo(record.logs?.provision),
     dev: await logInfo(record.logs?.dev),
   }
+  const hardFailure = await opencodeHardFailure(record.logs?.opencode)
+  const verificationBlockers = await workerVerificationBlockers(record.logs?.opencode)
   const newestLogAgeMs = Math.min(...Object.values(logs).map(item => item?.ageMs).filter((age): age is number => typeof age === "number"))
   const runAgeMs = Math.max(0, Date.now() - Date.parse(record.startedAt))
   const recentActivity = Number.isFinite(newestLogAgeMs)
@@ -194,6 +207,18 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
     }
   }
 
+  if (record.state === "succeeded" && hardFailure) {
+    reasons.push(`run is marked succeeded but OpenCode log contains hard failure: ${hardFailure.reason}`)
+  }
+
+  if (record.verificationState === "failed" && record.failureCategory) {
+    reasons.push(`verification failed: ${record.failureCategory}`)
+  }
+
+  if (verificationBlockers.length > 0 && record.state !== "running") {
+    reasons.push(`worker log contains verification blockers: ${verificationBlockers.map(item => item.reason).join("; ")}`)
+  }
+
   if (context?.state === "leased" && record.state !== "running" && contextLeaseMatchesRun) {
     reasons.push("repo context is still leased after run finished")
   }
@@ -226,6 +251,8 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
       ...record.devServer,
       health,
     },
+    hardFailure,
+    verificationBlockers,
     browser: record.browser,
     context: context ? {
       id: context.id,
@@ -242,11 +269,19 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
 type RunDiagnosis = Awaited<ReturnType<typeof diagnoseRun>>
 
 const effectiveRunState = (record: TaskRunRecord, diagnosis?: RunDiagnosis) =>
-  diagnosis?.stale ? "stale" : record.state
+  record.state === "succeeded" && (
+    diagnosis?.hardFailure ||
+    record.workerState === "failed" ||
+    record.verificationState === "failed"
+  )
+    ? "failed"
+    : diagnosis?.stale ? "stale" : record.state
 
 export const compactDiagnosis = (diagnosis?: RunDiagnosis) => diagnosis ? {
   stale: diagnosis.stale,
   reasons: diagnosis.reasons,
+  hardFailure: diagnosis.hardFailure,
+  verificationBlockers: diagnosis.verificationBlockers,
   activePhase: diagnosis.activePhase?.name,
   anyPidAlive: diagnosis.anyPidAlive,
   anyTaskPidAlive: diagnosis.anyTaskPidAlive,
@@ -270,6 +305,9 @@ const runListView = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
     stale: Boolean(diagnosis?.stale || record.state === "stale"),
     staleReasons: compact?.reasons,
     activePhase: compact?.activePhase,
+    workerState: record.workerState,
+    verificationState: record.verificationState,
+    failureCategory: record.failureCategory,
     liveSignals: compact ? {
       anyPidAlive: compact.anyPidAlive,
       anyTaskPidAlive: compact.anyTaskPidAlive,
@@ -285,6 +323,10 @@ const runListView = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
     finishedAt: record.finishedAt,
     durationMs: record.durationMs,
     contextId: record.context?.id,
+    devEnv: record.devEnv?.kind,
+    devEnvSource: record.devEnv?.source,
+    projectStacks: record.projectProfile?.stacks,
+    projectProfile: record.projectProfile?.path,
     logFile: record.logs?.opencode ?? record.result?.logFile,
     runFile: record.runFile,
   }
@@ -397,7 +439,7 @@ export const runsCleanupStale = async (app: AppCfg, args: string[]) => {
   const dir = runRecordsDir(app)
   if (!existsSync(dir)) {
     console.log("[]")
-    return
+    return []
   }
 
   const dryRun = flag(args, "--dry-run")
@@ -415,4 +457,5 @@ export const runsCleanupStale = async (app: AppCfg, args: string[]) => {
     cleaned.push({...await stopRunRecord(app, record.runId, "stale"), reasons: diagnosis.reasons})
   }
   console.log(JSON.stringify(cleaned, null, 2))
+  return cleaned
 }

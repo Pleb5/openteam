@@ -80,6 +80,8 @@ Default fork storage priority is GitHub, then GitLab, then GRASP.
 For GitHub and GitLab providers, openteam creates or reuses an empty repo through the configured provider token, pushes upstream heads/tags over Git smart HTTP, then announces the orchestrator-owned fork on Nostr.
 For a dedicated user account, the token is enough because openteam looks up the authenticated account and uses the provider API response to get the clone URL.
 Only organization or group targets need extra namespace config.
+Managed checkouts are configured with a repo-local Git credential helper that resolves credentials from openteam provider tokens for the fork remote.
+This helper resets ambient/global Git credential helpers for that checkout, so a personal `gh` login or host credential cache should not be used for worker `git push origin ...` commands.
 Configured GRASP servers are the fallback fork namespace: openteam derives fork clone URLs as `https://<grasp-server>/<orchestrator-npub>/<repo-d-tag>.git`, includes the derived GRASP relay URL in the fork announcement `relays` tag, announces the fork on Nostr, waits briefly for GRASP to create the writable repos, then pushes upstream heads/tags to the announced clone URLs.
 For explicit non-provider deployments, fork population still uses normal Git smart HTTP: openteam derives or reads a writable fork clone URL, pushes upstream heads/tags to it, then announces the fork on Nostr.
 For Nostr-native clone URLs that include the upstream owner npub/pubkey in the path, fork clone URL derivation replaces that owner path segment with the orchestrator npub and uses the repository announcement `d` tag as the fork repo name.
@@ -87,6 +89,12 @@ One-off jobs launched through the orchestrator get isolated runtime directories,
 Different Nostr repo targets can run concurrently.
 The same canonical Nostr repo is serialized by default; use the explicit `in parallel` operator phrase, or `--parallel` on direct `launch`, to create a separate same-repo context.
 Current one-off job limits are deliberately small: builder 2, researcher 2, qa 1, triager 1.
+If a managed checkout declares a development environment with `.envrc` `use flake`, `flake.nix`, `shell.nix`, or `default.nix`, openteam launches provisioning, worker OpenCode sessions, and web dev servers through that environment.
+Detected dev environment details are recorded in run records as `devEnv`.
+For Nix flakes, openteam uses `nix develop --command ...`; for legacy Nix shells it uses `nix-shell --run ...`.
+openteam also writes `.openteam/project-profile.json` in each checkout.
+The profile records detected stack hints such as Rust, Node, Go, Python, Gradle/Android, Swift/iOS, tool-version files, docs to inspect, and likely validation commands.
+These are hints only: repository docs, declared scripts, and declared development environments remain authoritative.
 
 Prepare one agent workspace:
 
@@ -155,11 +163,28 @@ bun run src/cli.ts runs stop <run-id>
 
 `runs list` and `runs show` report effective state from live signals for running records.
 If they print `state: "stale"` and `storedState: "running"`, trust `state`; `storedState` is only the raw run-file value.
+If they print `state: "failed"` and `storedState: "succeeded"`, trust `state`; the runtime found a hard OpenCode infrastructure failure in the worker log.
+Web runs also separate `workerState` from `verificationState`.
+`workerState: "succeeded"` means OpenCode completed the task phase; it does not by itself prove the web runtime survived final verification.
+`verificationState: "failed"` with `failureCategory: "dev-server-unhealthy"` means the task phase completed but the dev server could not be verified at the end of the run.
 Use `runs show --raw` only when you need the unmodified run record.
 Use `runs diagnose` for detailed evidence when a worker appears idle, its logs stop moving, or its dev URL is unreachable.
 Diagnosis checks recorded process PIDs, dev/browser URL health, recent log activity, and repo-context lease state.
 `runs cleanup-stale --dry-run` shows which records would be marked stale and which repo contexts would be released.
 The non-dry-run cleanup marks only stale records terminal and releases their leases; it does not delete repo checkouts.
+`openteam status` and stale-run cleanup commands refresh `runtime/status.json` as a compact snapshot of live workers, effective run-state counts, stale leases, and last cleanup metadata.
+Treat `runtime/status.json` as observability cache only; run records and `runtime/repos/registry.json` remain authoritative.
+
+Worker process policy:
+
+- worker, provisioning, dev-server, and browser MCP processes receive checkout-local temp/cache env vars
+- `TMPDIR`, `TMP`, `TEMP`, and `OPENTEAM_TMP_DIR` point to `.openteam/tmp`
+- `XDG_CACHE_HOME`, package-manager cache vars, and `OPENTEAM_CACHE_DIR` point under `.openteam/cache`
+- `OPENTEAM_ARTIFACTS_DIR` points to `.openteam/artifacts`
+- managed Git checkouts use an openteam repo-local credential helper for configured provider fork remotes
+- workers should use plain `git push origin <branch>` from the managed checkout and should not use `gh auth`, host-global credential helpers, or personal Git remotes for openteam fork publication
+- Nostr-git PR publication should use `openteam repo publish pr ...` after pushing the branch; global `gh auth` is not part of the default publication path
+- workers should treat GUI openers, system package installs, writes outside checkout/runtime, and broad destructive cleanup as blockers unless explicitly authorized
 
 Inspect or attach to a worker browser context:
 
@@ -172,6 +197,8 @@ bun run src/cli.ts browser attach qa --open
 `browser attach` prints the current task, dev URL when live, worker log, browser profile, and Playwright artifact directory.
 If multiple live jobs have the same role, attach by worker name from `worker list` instead of by role.
 `browser status` and `browser attach` health-check the dev URL before reporting it as live.
+They also print worker state, verification state, dev-server health counters, restart metadata, and dev-server exit details when those are available.
+For terminal web runs, `browser attach` may show a stored URL as down because the runtime intentionally stopped the dev server after the run finished.
 `--open` opens the live dev URL only while the worker is still running and the URL is reachable.
 Do not open a worker profile while Playwright is actively using it; use the dev URL, logs, and artifacts for live observation.
 
@@ -296,9 +323,13 @@ Durable run records:
 runtime/runs/<agentId>-<taskId>.json
 ```
 
-Each run record stores task identity, target, resolved repo/fork/context, log paths, browser profile/artifact paths, start/finish time, `durationMs`, final result, and phase timings for target resolution, provisioning, dev-server startup, worker execution, and cleanup.
+Each run record stores task identity, target, resolved repo/fork/context, detected dev environment, project-profile summary, log paths, browser profile/artifact paths, start/finish time, `durationMs`, final result, worker state, verification state, failure category, and phase timings for target resolution, provisioning, dev-server startup, worker execution, verification, and cleanup.
 New run records also store known process PIDs for the runner, provisioning OpenCode session, worker OpenCode session, dev server, and bunker where available.
 Those PIDs are diagnostic evidence only; stale-run reconciliation also checks URL health and log freshness.
+For web-mode runs, openteam monitors the dev server while the worker is active.
+If the worker succeeds but final dev-server verification fails, openteam restarts the dev server once and verifies again.
+If the restart succeeds, the run can still finish succeeded and the failed/recovered phases remain visible in the run record.
+If the restart fails, the run is failed with `failureCategory: "dev-server-unhealthy"` and the local checkout is left intact for operator review.
 
 Typical things to inspect:
 
@@ -333,6 +364,7 @@ These do not necessarily mean the system is broken:
 - a subset of relays may fail as long as the required relay set still accepted the event
 - old run records created before PID tracking may be marked stale when the worker is gone and the dev URL is dead
 - a stale run can keep a repo context leased until `runs cleanup-stale` or `runs stop <run-id>` releases it
+- `runtime/status.json` may be absent or old until `openteam status` or stale-run cleanup refreshes it
 
 What matters is:
 

@@ -230,13 +230,57 @@ const findContextFile = (cwd: string) => {
   }
 }
 
+const isPublishScope = (value: unknown): value is RepoPublishScope =>
+  value === "repo" || value === "upstream"
+
+const assertRepoIdentityReady = (identity: RepoIdentity | undefined, file: string, label: string) => {
+  if (!identity) {
+    throw new Error(`repo publish context ${file} is missing ${label}`)
+  }
+  if (!identity.key?.trim()) {
+    throw new Error(`repo publish context ${file} is missing ${label}.key`)
+  }
+  if (!identity.ownerPubkey?.trim()) {
+    throw new Error(`repo publish context ${file} is missing ${label}.ownerPubkey`)
+  }
+  if (!identity.identifier?.trim()) {
+    throw new Error(`repo publish context ${file} is missing ${label}.identifier`)
+  }
+}
+
+export const assertRepoPublishContextReady = (context: RepoPublishContext, file: string) => {
+  if (context.version !== CONTEXT_VERSION) {
+    throw new Error(`unsupported repo publish context version in ${file}`)
+  }
+  if (!context.agentId?.trim()) {
+    throw new Error(`repo publish context ${file} is missing agentId`)
+  }
+  if (!context.target?.trim()) {
+    throw new Error(`repo publish context ${file} is missing target`)
+  }
+  if (!context.checkout?.trim()) {
+    throw new Error(`repo publish context ${file} is missing checkout`)
+  }
+  if (!existsSync(context.checkout)) {
+    throw new Error(`repo publish context ${file} checkout does not exist: ${context.checkout}`)
+  }
+  if (context.defaultScope !== undefined && !isPublishScope(context.defaultScope)) {
+    throw new Error(`repo publish context ${file} has invalid defaultScope: ${String(context.defaultScope)}`)
+  }
+  assertRepoIdentityReady(context.repo, file, "repo")
+  if (context.defaultScope === "upstream") {
+    assertRepoIdentityReady(context.upstreamRepo, file, "upstreamRepo")
+  }
+  if (context.upstreamRepo) {
+    assertRepoIdentityReady(context.upstreamRepo, file, "upstreamRepo")
+  }
+}
+
 export const loadRepoPublishContext = async (file?: string, cwd = process.cwd()) => {
   const resolved = file || findContextFile(cwd)
   if (!resolved || !existsSync(resolved)) return undefined
   const context = JSON.parse(await readFile(resolved, "utf8")) as RepoPublishContext
-  if (context.version !== CONTEXT_VERSION) {
-    throw new Error(`unsupported repo publish context version in ${resolved}`)
-  }
+  assertRepoPublishContextReady(context, resolved)
   return context
 }
 
@@ -249,8 +293,14 @@ export const resolveRepoPublishTarget = async (
 
   if (context) {
     const agent = await prepareAgent(app, options.agentId || context.agentId)
-    const effectiveScope = requestedScope === "upstream" && context.upstreamRepo ? "upstream" : "repo"
-    const identity = effectiveScope === "upstream" && context.upstreamRepo ? context.upstreamRepo : context.repo
+    if (!isPublishScope(requestedScope)) {
+      throw new Error(`invalid repo publish scope: ${String(requestedScope)}`)
+    }
+    if (requestedScope === "upstream" && !context.upstreamRepo) {
+      throw new Error(`repo publish scope upstream requested but context has no upstream repo: ${options.context ?? context.checkout}`)
+    }
+    const effectiveScope = requestedScope
+    const identity = effectiveScope === "upstream" ? context.upstreamRepo! : context.repo
     const target = context.target
     const policy = resolveRepoRelayPolicy(app, identity, {target})
     return {agent, context, identity, policy, target, scope: effectiveScope}

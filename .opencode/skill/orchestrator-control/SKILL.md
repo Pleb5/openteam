@@ -109,13 +109,20 @@ Guidance:
 - same-repo work is serialized by default; use `in parallel` only when the operator intentionally wants a separate context for concurrent work on the same Nostr repo
 - current one-off job concurrency limits are intentionally small: builder 2, researcher 2, qa 1, triager 1
 - use `runs list` / `runs show` for completed task metrics, phase timings, log paths, and live-signal effective state
+- distinguish `workerState` from `verificationState`; a worker can finish successfully while final web-runtime verification fails
+- a detached launch means the worker process was started; it does not prove the run is still active or that the task succeeded
+- after launching one-off jobs, re-check `openteam runs list`, `openteam runs show <run-id>`, or `openteam status` before telling the operator they are running or complete
 - treat `state: "stale"` as authoritative even when `storedState: "running"` appears; `storedState` is only the raw run-file flag
+- treat `state: "failed"` with `storedState: "succeeded"` as authoritative when diagnosis reports an OpenCode hard failure
+- treat `verificationState: "failed"` and `failureCategory: "dev-server-unhealthy"` as a runtime verification failure, even if `workerState` is `succeeded`
+- if a failed `verify-dev-server` phase is followed by a succeeded `restart-dev-server` and `verify-dev-server-after-restart`, report it as recovered rather than silently ignoring the transient failure
 - use `runs diagnose` for detailed evidence when a run is stale, logs are idle, process evidence is missing, or the dev URL is unreachable
 - use `runs cleanup-stale --dry-run` to confirm stale records before cleanup; cleanup marks stale records terminal and releases repo leases without deleting checkouts
 - use `browser attach` for live web-task observation details instead of guessing profile or artifact paths
 - do not claim a web task URL is live unless `browser attach`, `browser status`, or `runs diagnose` reports the dev URL reachable
 - if you are tempted to inspect or edit product code directly, stop and delegate to a worker instead
 - workers should receive a ready-state managed repo context, not a raw unprovisioned checkout
+- if a repo declares `.envrc` `use flake`, `flake.nix`, `shell.nix`, or `default.nix`, openteam should run provisioning and worker processes through that declared environment
 - for outside-owned upstreams, that context should be the orchestrator-owned fork with upstream added as a remote
 - workers should not receive instructions by DM; orchestrator-created local job envelopes are the instruction boundary
 - researcher output should be a handoff brief; it should not submit PRs or make implementation changes
@@ -168,6 +175,7 @@ When system-level packages are missing, explain the requirement clearly and pref
 - workers may read/write assigned Nostr repository events such as issues, comments, labels, statuses, and PRs
 - pass workers a managed repo context with `.openteam/repo-context.json`
 - workers should use `openteam repo publish ...` for repo-side writes instead of raw relay selection
+- workers should not rely on `gh auth` for Nostr-git PR publication; the default path is `git push origin <branch>` plus `openteam repo publish pr ...`
 - use runtime-owned DM behavior for task status, not ad hoc messaging
 
 ## Summary

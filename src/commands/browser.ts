@@ -69,6 +69,17 @@ export const browserInspection = async (app: AppCfg, ref: string) => {
     : undefined
   const devHealth = diagnosis?.devServer.health ?? await checkUrl(url)
   const stale = Boolean(diagnosis?.stale)
+  const runState = runRecord
+    ? runRecord.state === "succeeded" && (
+      diagnosis?.hardFailure ||
+      runRecord.workerState === "failed" ||
+      runRecord.verificationState === "failed"
+    )
+      ? "failed"
+      : stale
+        ? "stale"
+        : runRecord.state
+    : state.state
   const storedRunning = Boolean(state.running)
   const effectiveRunning = Boolean(storedRunning && !stale)
   const liveWebRun = Boolean(effectiveRunning && state.mode === "web" && url && devHealth.ok)
@@ -83,14 +94,35 @@ export const browserInspection = async (app: AppCfg, ref: string) => {
     stale,
     staleReasons: diagnosis?.reasons,
     runDiagnosis: compactDiagnosis(diagnosis),
+    runState,
+    storedRunState: runRecord?.state && runState !== runRecord.state ? runRecord.state : undefined,
+    workerState: runRecord?.workerState,
+    verificationState: runRecord?.verificationState,
+    failureCategory: runRecord?.failureCategory,
+    finishedAt: runRecord?.finishedAt ?? state.finishedAt,
     liveWebRun,
     devServer: {
       url,
       health: devHealth,
+      stoppedAt: runRecord?.devServer?.stoppedAt,
+      lastHealthCheckAt: runRecord?.devServer?.lastHealthCheckAt,
+      lastHealthOkAt: runRecord?.devServer?.lastHealthOkAt,
+      firstHealthFailureAt: runRecord?.devServer?.firstHealthFailureAt,
+      healthChecks: runRecord?.devServer?.healthChecks,
+      healthFailures: runRecord?.devServer?.healthFailures,
+      exitCode: runRecord?.devServer?.exitCode,
+      exitSignal: runRecord?.devServer?.exitSignal,
+      restartCount: runRecord?.devServer?.restartCount,
+      restartedAt: runRecord?.devServer?.restartedAt,
+      restartLog: runRecord?.devServer?.restartLog,
     },
     taskId: state.taskId,
     target: state.target,
     mode: state.mode,
+    devEnv: runRecord?.devEnv?.kind ?? state.devEnv,
+    devEnvSource: runRecord?.devEnv?.source ?? state.devEnvSource,
+    projectProfile: runRecord?.projectProfile?.path ?? state.projectProfile,
+    projectStacks: runRecord?.projectProfile?.stacks ?? state.projectStacks,
     url,
     checkout: state.checkout,
     logFile: state.logFile,
@@ -116,15 +148,35 @@ const printBrowserInspection = (info: Awaited<ReturnType<typeof browserInspectio
   console.log(`worker: ${info.workerName ?? "(none)"}`)
   console.log(`role: ${info.role}`)
   console.log(`running: ${info.running ? "yes" : "no"}${info.storedRunning && !info.running ? " (stored running, diagnosed stale)" : ""}`)
+  console.log(`run state: ${info.runState ?? "(none)"}${info.storedRunState ? ` (stored ${info.storedRunState})` : ""}`)
+  if (info.workerState) console.log(`worker state: ${info.workerState}`)
+  if (info.verificationState) console.log(`verification state: ${info.verificationState}`)
+  if (info.failureCategory) console.log(`failure category: ${info.failureCategory}`)
+  if (info.finishedAt) console.log(`finished at: ${info.finishedAt}`)
   console.log(`stale: ${info.stale ? "yes" : "no"}`)
   for (const reason of info.staleReasons ?? []) {
-    console.log(`stale reason: ${reason}`)
+    console.log(`diagnosis reason: ${reason}`)
   }
   console.log(`live web run: ${info.liveWebRun ? "yes" : "no"}`)
   console.log(`dev health: ${info.devServer.health.ok ? "ok" : "down"}${info.devServer.health.error ? ` (${info.devServer.health.error})` : ""}`)
+  if (info.devServer.lastHealthCheckAt) console.log(`dev last health check: ${info.devServer.lastHealthCheckAt}`)
+  if (info.devServer.lastHealthOkAt) console.log(`dev last healthy: ${info.devServer.lastHealthOkAt}`)
+  if (info.devServer.firstHealthFailureAt) console.log(`dev first health failure: ${info.devServer.firstHealthFailureAt}`)
+  if (info.devServer.healthChecks !== undefined) console.log(`dev health checks: ${info.devServer.healthChecks}`)
+  if (info.devServer.healthFailures !== undefined) console.log(`dev health failures: ${info.devServer.healthFailures}`)
+  if (info.devServer.stoppedAt) console.log(`dev server stopped at: ${info.devServer.stoppedAt}`)
+  if (info.devServer.exitCode !== undefined || info.devServer.exitSignal) {
+    console.log(`dev server exit: code=${info.devServer.exitCode ?? "(none)"} signal=${info.devServer.exitSignal ?? "(none)"}`)
+  }
+  if (info.devServer.restartCount) console.log(`dev server restarts: ${info.devServer.restartCount}`)
+  if (info.devServer.restartedAt) console.log(`dev server restarted at: ${info.devServer.restartedAt}`)
+  if (info.devServer.restartLog) console.log(`dev restart log: ${info.devServer.restartLog}`)
   console.log(`task: ${info.taskId ?? "(none)"}`)
   console.log(`target: ${info.target ?? "(none)"}`)
   console.log(`mode: ${info.mode ?? "(none)"}`)
+  console.log(`dev env: ${info.devEnv ?? "none"}${info.devEnvSource ? ` (${info.devEnvSource})` : ""}`)
+  if (info.projectStacks?.length) console.log(`project stacks: ${info.projectStacks.join(", ")}`)
+  if (info.projectProfile) console.log(`project profile: ${info.projectProfile}`)
   console.log(`url: ${info.url || "(none)"}`)
   console.log(`checkout: ${info.checkout ?? "(none)"}`)
   console.log(`log: ${info.logFile ?? "(none)"}`)

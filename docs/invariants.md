@@ -17,17 +17,30 @@ These are runtime rules that must be enforced by code and tests, not only by age
 - Worker DMs from operators are not accepted as instructions.
 - Worker Nostr inputs, such as triage issue events, are task inputs, not operator control.
 - Provisioning sessions may prepare the repo only; they must not launch, enqueue, start, stop, or watch workers.
+- Worker temp files, caches, repro clones, and generated artifacts should stay under checkout-local `.openteam/` runtime paths.
+- Worker Git pushes from managed checkouts must use openteam provider-token credentials for the fork remote, not ambient user credential helpers.
+- If a checkout declares a Nix dev environment, openteam-launched provisioning, worker, and dev-server processes should run through that environment.
+- Project-profile detection provides setup and validation hints only; it must not override repo docs, declared scripts, or declared development environments.
+- Nostr-git PR publication must not depend on personal `gh auth`; default publication is branch push plus `openteam repo publish pr ...`.
+- Workers should report blockers instead of using GUI openers, system package installs, writes outside checkout/runtime, or broad destructive cleanup.
 
 ## Run Truth
 
 - Operator-facing status reports effective state from live signals, not raw stored `running`.
 - A run marked running with dead PIDs and no live dev URL is stale operationally.
+- A run marked succeeded with an OpenCode infrastructure hard failure in its log is failed operationally.
+- A run marked succeeded with `workerState: "failed"` or `verificationState: "failed"` is failed operationally.
 - Browser status must not report a dead dev URL as a live web run.
 - Run records must preserve phase timings, log paths, known PIDs, context identity, final state, and errors.
+- `runtime/status.json` is generated observability state only; run records and the repo registry remain authoritative.
+- Stale lease counts in `runtime/status.json` must be derived from effective run state, not raw stored run state.
 
 ## Publish And Browser Checks
 
 - Repo publish helpers require a resolved repo context or explicit agent and target.
 - Repo publish helpers must use runtime relay policy for the selected repo scope.
+- Repo publish contexts must include a valid checkout path, repo identity, agent id, target, and unambiguous publish scope.
 - Web-mode success requires the dev server to be reachable before success is recorded.
+- Web-mode runs may restart the dev server once after a successful worker phase when final verification fails; the recovery attempt must be visible in run phases and dev-server metadata.
+- If the worker succeeds but the dev server cannot be recovered, the run must fail with an explicit verification failure category instead of reporting task success.
 - Runtime checks should produce exact invariant failure messages, not heuristic supervision.

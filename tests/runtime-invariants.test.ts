@@ -7,10 +7,16 @@ import path from "node:path"
 import {browserInspection} from "../src/commands/browser.js"
 import {acceptsControlDms} from "../src/commands/profile.js"
 import {stopRunRecord, summarizeRuns} from "../src/commands/runs.js"
+import {statusReport} from "../src/commands/status.js"
 import {prepareAgent} from "../src/config.js"
 import {assertControlAllowed} from "../src/control-guard.js"
-import {assertResolvedContextReady, provisionWorkerControlCommand} from "../src/launcher.js"
+import {detectDevEnv, wrapDevEnvCommand} from "../src/dev-env.js"
+import {configureCheckoutGitAuth, gitCredentialFromStdin} from "../src/git-auth.js"
+import {assertResolvedContextReady, checkoutRuntimeEnv, provisionWorkerControlCommand} from "../src/launcher.js"
+import {detectOpenCodeHardFailure, detectWorkerVerificationBlockers} from "../src/opencode-log.js"
+import {detectProjectProfile, writeProjectProfile} from "../src/project-profile.js"
 import {resolveRepoTarget} from "../src/repo.js"
+import {refreshRuntimeStatus} from "../src/runtime-status.js"
 import type {AppCfg, RepoRegistry, ResolvedRepoTarget, TaskItem, TaskRunRecord} from "../src/types.js"
 import {getPublicKey, nip19} from "nostr-tools"
 
@@ -277,6 +283,131 @@ describe("runtime invariants", () => {
     expect(summary.stale).toBe(true)
   })
 
+  test("run summaries report OpenCode hard-failure logs as effective failed state", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const logFile = path.join(runtimeRoot, "agents", "builder-01", "artifacts", "worker.log")
+    await mkdir(path.dirname(logFile), {recursive: true})
+    await writeFile(logFile, 'Error: {"type":"server_error","code":"server_error"}\n')
+    const [summary] = await summarizeRuns(app, [{
+      record: runRecord(app, {
+        state: "succeeded",
+        finishedAt: "2026-04-25T00:01:00.000Z",
+        durationMs: 60_000,
+        process: {},
+        phases: [{name: "opencode-worker", state: "succeeded", startedAt: "2026-04-25T00:00:00.000Z"}],
+        logs: {opencode: logFile},
+      }),
+    }])
+
+    expect(summary.state).toBe("failed")
+    expect(summary.storedState).toBe("succeeded")
+    expect(summary.stale).toBe(false)
+    expect(summary.staleReasons?.[0]).toContain("OpenCode log contains hard failure")
+  })
+
+  test("run summaries report failed verification as effective failed state", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const [summary] = await summarizeRuns(app, [{
+      record: runRecord(app, {
+        state: "succeeded",
+        workerState: "succeeded",
+        verificationState: "failed",
+        failureCategory: "dev-server-unhealthy",
+        finishedAt: "2026-04-25T00:01:00.000Z",
+        durationMs: 60_000,
+        process: {},
+        phases: [{name: "verify-dev-server", state: "failed", startedAt: "2026-04-25T00:00:30.000Z"}],
+      }),
+    }])
+
+    expect(summary.state).toBe("failed")
+    expect(summary.storedState).toBe("succeeded")
+    expect(summary.workerState).toBe("succeeded")
+    expect(summary.verificationState).toBe("failed")
+    expect(summary.failureCategory).toBe("dev-server-unhealthy")
+    expect(summary.staleReasons?.[0]).toContain("verification failed")
+  })
+
+  test("run summaries preserve recovered dev-server verification success", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const [summary] = await summarizeRuns(app, [{
+      record: runRecord(app, {
+        state: "succeeded",
+        workerState: "succeeded",
+        verificationState: "succeeded",
+        finishedAt: "2026-04-25T00:01:00.000Z",
+        durationMs: 60_000,
+        process: {},
+        devServer: {
+          restartCount: 1,
+          restartedAt: "2026-04-25T00:00:50.000Z",
+        },
+        phases: [
+          {name: "verify-dev-server", state: "failed", startedAt: "2026-04-25T00:00:30.000Z"},
+          {name: "restart-dev-server", state: "succeeded", startedAt: "2026-04-25T00:00:45.000Z"},
+          {name: "verify-dev-server-after-restart", state: "succeeded", startedAt: "2026-04-25T00:00:50.000Z"},
+        ],
+      }),
+    }])
+
+    expect(summary.state).toBe("succeeded")
+    expect(summary.storedState).toBeUndefined()
+    expect(summary.workerState).toBe("succeeded")
+    expect(summary.verificationState).toBe("succeeded")
+    expect(summary.failureCategory).toBeUndefined()
+  })
+
+  test("runtime status file records stale leases and cleanup metadata", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    await writeRegistry(app, registryWithContext(checkout, {
+      workerId: "builder-01",
+      role: "builder",
+      jobId: "task-a",
+      mode: "code",
+      leasedAt: "2026-04-25T00:00:00.000Z",
+    }))
+
+    const status = await refreshRuntimeStatus(app, {
+      lastCleanupDryRunAt: "2026-04-25T01:00:00.000Z",
+      lastCleanupCount: 1,
+    })
+    const saved = JSON.parse(await readFile(status.statusFile, "utf8")) as typeof status
+
+    expect(existsSync(status.statusFile)).toBe(true)
+    expect(saved.leases.leased).toBe(1)
+    expect(saved.leases.stale).toBe(1)
+    expect(saved.leases.staleContexts[0]?.id).toBe("ctx1")
+    expect(saved.cleanup.lastCleanupDryRunAt).toBe("2026-04-25T01:00:00.000Z")
+    expect(saved.cleanup.lastCleanupCount).toBe(1)
+  })
+
+  test("operator status reports stale leases and writes runtime status", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    await writeRegistry(app, registryWithContext(checkout, {
+      workerId: "builder-01",
+      role: "builder",
+      jobId: "task-a",
+      mode: "code",
+      leasedAt: "2026-04-25T00:00:00.000Z",
+    }))
+
+    const report = await statusReport(app)
+
+    expect(report.summary.staleLeases).toBe(1)
+    expect(report.summary.leasedContexts).toBe(1)
+    expect(report.runtimeStatus.leases.staleContexts[0]?.reason).toContain("no live running run matches lease")
+    expect(existsSync(report.summary.statusFile)).toBe(true)
+  })
+
   test("browser inspection does not report a dead dev URL as live", async () => {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
     const app = makeApp(runtimeRoot)
@@ -311,6 +442,56 @@ describe("runtime invariants", () => {
     expect(info.stale).toBe(true)
   })
 
+  test("browser inspection exposes worker and verification state", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const record = runRecord(app, {
+      mode: "web",
+      state: "succeeded",
+      workerState: "succeeded",
+      verificationState: "failed",
+      failureCategory: "dev-server-unhealthy",
+      finishedAt: "2026-04-25T00:01:00.000Z",
+      durationMs: 60_000,
+      process: {},
+      browser: {
+        enabled: true,
+        headless: false,
+        profileDir: path.join(runtimeRoot, "profile"),
+        artifactDir: path.join(runtimeRoot, "artifacts"),
+        url: "http://127.0.0.1:9",
+      },
+      devServer: {
+        url: "http://127.0.0.1:9",
+        healthChecks: 4,
+        healthFailures: 2,
+        restartCount: 1,
+        restartedAt: "2026-04-25T00:00:50.000Z",
+      },
+      phases: [{name: "verify-dev-server", state: "failed", startedAt: "2026-04-25T00:00:30.000Z"}],
+    })
+    await writeRun(record)
+
+    const stateFile = path.join(runtimeRoot, "agents", "builder-01", "state.json")
+    await mkdir(path.dirname(stateFile), {recursive: true})
+    await writeFile(stateFile, `${JSON.stringify({
+      running: false,
+      taskId: "task-a",
+      runId: record.runId,
+      mode: "web",
+      url: "http://127.0.0.1:9",
+    }, null, 2)}\n`)
+
+    const info = await browserInspection(app, "builder")
+
+    expect(info.runState).toBe("failed")
+    expect(info.storedRunState).toBe("succeeded")
+    expect(info.workerState).toBe("succeeded")
+    expect(info.verificationState).toBe("failed")
+    expect(info.failureCategory).toBe("dev-server-unhealthy")
+    expect(info.devServer.restartCount).toBe(1)
+  })
+
   test("worker agents do not accept operator DM control", async () => {
     const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
 
@@ -329,6 +510,122 @@ describe("runtime invariants", () => {
   test("provision logs detect recursive worker-control command attempts", () => {
     expect(provisionWorkerControlCommand("I will run: openteam launch triager --task test")).toBe("openteam launch")
     expect(provisionWorkerControlCommand("safe command: openteam repo policy")).toBeUndefined()
+  })
+
+  test("OpenCode logs detect infrastructure hard failures", () => {
+    expect(detectOpenCodeHardFailure('Error: {"type":"server_error","code":"server_error"}')?.reason).toContain("server_error")
+    expect(detectOpenCodeHardFailure("! permission requested: external_directory (/tmp/*); auto-rejecting")?.reason).toContain("auto-rejected")
+    expect(detectOpenCodeHardFailure("sandbox denied the requested command")?.reason).toContain("sandbox policy")
+    expect(detectOpenCodeHardFailure("normal repo command failed with Error: test output")).toBeUndefined()
+  })
+
+  test("worker logs detect verification blockers without classifying normal errors", () => {
+    expect(detectWorkerVerificationBlockers("Playwright Chromium exited with SIGTRAP")).toHaveLength(2)
+    expect(detectOpenCodeHardFailure("Publication is still blocked by the environment")?.reason).toContain("publication")
+    expect(detectWorkerVerificationBlockers("gitlint: command not found").at(0)?.reason).toContain("gitlint")
+    expect(detectWorkerVerificationBlockers("To get started with GitHub CLI, please run: gh auth login").at(0)?.reason).toContain("GitHub CLI")
+    expect(detectWorkerVerificationBlockers("npm ERR! code EOVERRIDE override conflict").at(0)?.reason).toContain("override")
+    expect(detectWorkerVerificationBlockers("check script exited with code 127").at(0)?.reason).toContain("executable")
+    expect(detectWorkerVerificationBlockers("unit test failed because assertion mismatch")).toHaveLength(0)
+  })
+
+  test("detects Nix dev environments and wraps commands", async () => {
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    await writeFile(path.join(checkout, ".envrc"), "use flake\n")
+    await writeFile(path.join(checkout, "flake.nix"), "{}\n")
+
+    const devEnv = await detectDevEnv(checkout)
+    expect(devEnv.kind).toBe("nix-flake")
+    expect(devEnv.source).toBe(".envrc")
+    expect(wrapDevEnvCommand(devEnv, "cargo", ["clippy", "--all-targets"])).toEqual({
+      cmd: "nix",
+      args: ["develop", "--command", "cargo", "clippy", "--all-targets"],
+    })
+  })
+
+  test("project profile records hints without overriding repo policy", async () => {
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    await writeFile(path.join(checkout, "README.md"), "# Test\n")
+    await writeFile(path.join(checkout, "Cargo.toml"), "[package]\nname = \"test\"\nversion = \"0.1.0\"\n")
+    await writeFile(path.join(checkout, "go.mod"), "module example.com/test\n")
+    await writeFile(path.join(checkout, "package.json"), JSON.stringify({
+      scripts: {
+        check: "tsc --noEmit",
+        build: "vite build",
+      },
+      packageManager: "pnpm@10.0.0",
+    }))
+    await writeFile(path.join(checkout, "flake.nix"), "{}\n")
+
+    const devEnv = await detectDevEnv(checkout)
+    const profile = await detectProjectProfile(checkout, devEnv)
+    const file = await writeProjectProfile(checkout, profile)
+
+    expect(file).toBe(path.join(checkout, ".openteam", "project-profile.json"))
+    expect(profile.declaredEnvironment.kind).toBe("nix-flake")
+    expect(profile.docs).toContain("README.md")
+    expect(profile.stacks).toContain("rust")
+    expect(profile.stacks).toContain("go")
+    expect(profile.stacks).toContain("node")
+    expect(profile.likelyCommands.some(item => item.command.join(" ") === "cargo check")).toBe(true)
+    expect(profile.likelyCommands.some(item => item.command.join(" ") === "go test ./...")).toBe(true)
+    expect(profile.likelyCommands.some(item => item.command.join(" ") === "pnpm run check")).toBe(true)
+    expect(profile.guidance.join(" ")).toContain("override")
+  })
+
+  test("detects legacy nix-shell environments", async () => {
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    await writeFile(path.join(checkout, "shell.nix"), "{}\n")
+
+    const devEnv = await detectDevEnv(checkout)
+    expect(devEnv.kind).toBe("nix-shell")
+    expect(devEnv.source).toBe("shell.nix")
+    expect(wrapDevEnvCommand(devEnv, "git", ["commit", "-m", "fix: test"])).toEqual({
+      cmd: "nix-shell",
+      args: ["--run", "'git' 'commit' '-m' 'fix: test'"],
+    })
+  })
+
+  test("worker process env confines temp and cache paths to checkout runtime dirs", () => {
+    const env = checkoutRuntimeEnv("/repo/checkout", {OPENTEAM_PHASE: "provision"})
+
+    expect(env.TMPDIR).toBe("/repo/checkout/.openteam/tmp")
+    expect(env.TMP).toBe("/repo/checkout/.openteam/tmp")
+    expect(env.TEMP).toBe("/repo/checkout/.openteam/tmp")
+    expect(env.XDG_CACHE_HOME).toBe("/repo/checkout/.openteam/cache")
+    expect(env.OPENTEAM_ARTIFACTS_DIR).toBe("/repo/checkout/.openteam/artifacts")
+    expect(env.npm_config_cache).toBe("/repo/checkout/.openteam/cache/npm")
+    expect(env.OPENTEAM_PHASE).toBe("provision")
+  })
+
+  test("managed checkout git credentials resolve provider token for matching fork URL only", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    app.config.providers["github.com"].token = "openteam-gh-token"
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+
+    const auth = await configureCheckoutGitAuth(app, checkout, ["https://github.com/budabit-agent-gh/ngit.git"], "budabit-agent-gh")
+    expect(auth?.contextFile).toBe(path.join(checkout, ".openteam", "git-credential-context.json"))
+
+    const credential = await gitCredentialFromStdin(app, ["--context", auth!.contextFile, "get"], [
+      "protocol=https",
+      "host=github.com",
+      "path=budabit-agent-gh/ngit.git",
+      "",
+    ].join("\n"))
+
+    expect(credential).toContain("username=budabit-agent-gh")
+    expect(credential).toContain("password=openteam-gh-token")
+
+    const rejected = await gitCredentialFromStdin(app, ["--context", auth!.contextFile, "get"], [
+      "protocol=https",
+      "host=github.com",
+      "path=Pleb5/ngit.git",
+      "",
+    ].join("\n"))
+
+    expect(rejected).toBe("")
   })
 
   test("worker handoff requires a matching lease and checkout", async () => {

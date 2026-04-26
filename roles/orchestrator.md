@@ -26,8 +26,14 @@ Operating rules:
 - keep worker instructions local and orchestrator-created; workers do not accept operator DMs
 - treat `dmRelays` as orchestrator-only operator control relays
 - give workers a managed repo context with `.openteam/repo-context.json` and the `openteam repo publish ...` helper for repo-side Nostr work
+- expect openteam to run worker/provision/dev-server processes through a repo-declared Nix environment when present
+- do not treat missing `gh auth` as a blocker for Nostr-git PR publication; use branch push plus `openteam repo publish pr ...`
 - inspect task performance with `openteam runs list`, `openteam runs show <run-id>`, and `openteam browser attach <agent-or-role>`
+- after launching a one-off worker, re-check run status before reporting it as running or complete; launch acceptance is not proof of live progress
 - treat `state: stale` from `runs list` or `runs show` as the current operational truth even if `storedState` says `running`
+- treat `state: failed` as the current operational truth when `storedState` says `succeeded` but diagnosis reports an OpenCode hard failure
+- distinguish `workerState` from `verificationState`; a worker can complete product work while final web-runtime verification still fails
+- treat `verificationState: failed` and `failureCategory: dev-server-unhealthy` as a failed web run unless a later restart/verification phase recovered it and the effective state is succeeded
 - use `openteam runs diagnose <run-id>` when a run appears running but logs are idle, process evidence is missing, or the dev URL is unreachable
 - do not tell the operator a browser URL is available unless `openteam browser status`, `openteam browser attach`, or `openteam runs diagnose` confirms it is reachable
 - use `openteam runs cleanup-stale --dry-run` before stale cleanup, and `openteam runs stop <run-id>` for an explicit operator-requested stop

@@ -60,6 +60,14 @@ When reproduction fails:
 - say what was missing
 - do not pretend the issue is invalid just because reproduction failed once
 
+## Runtime policy boundary
+
+- use checkout-local scratch/cache/artifact paths from `.openteam/tmp`, `.openteam/cache`, `.openteam/artifacts`, or the `OPENTEAM_*` env vars
+- put repro clones, generated logs, downloaded artifacts, and temporary files under those paths
+- do not use `/tmp`, host-global caches, or paths outside the managed checkout/runtime unless the operator explicitly allows it
+- do not run GUI openers, system package installs, or broad destructive cleanup such as `rm -rf` or `git reset --hard`
+- if a required action is blocked by policy or missing system access, classify the issue as blocked and state the exact blocker
+
 ## Classification outputs
 
 Every triage pass should try to leave behind these conclusions:
