@@ -1339,7 +1339,7 @@ export const assertResolvedContextReady = (resolved: ResolvedRepoTarget, agent: 
 const stripAnsi = (value: string) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "")
 
 const conciseOperatorLogTail = (log: string) => {
-  const lines = stripAnsi(log)
+  const lines = log
     .split(/\r?\n/)
     .map(line => line.trim())
     .filter(line =>
@@ -1355,15 +1355,19 @@ const conciseOperatorLogTail = (log: string) => {
   return lines.slice(-12).join("\n").slice(0, 2500)
 }
 
-const operatorMessageFromLog = async (logFile: string) => {
-  if (!existsSync(logFile)) return ""
-  const log = stripAnsi(await readFile(logFile, "utf8"))
+export const operatorMessageFromLogText = (rawLog: string) => {
+  const log = stripAnsi(rawLog)
   const marker = "OPENTEAM_OPERATOR_MESSAGE:"
   const index = log.lastIndexOf(marker)
   if (index >= 0) {
-    return log.slice(index + marker.length).trim().slice(0, 2500)
+    return log.slice(index + marker.length).trim()
   }
   return conciseOperatorLogTail(log)
+}
+
+const operatorMessageFromLog = async (logFile: string) => {
+  if (!existsSync(logFile)) return ""
+  return operatorMessageFromLogText(await readFile(logFile, "utf8"))
 }
 
 const composeOrchestratorDmPrompt = async (app: AppCfg, agent: PreparedAgent, item: TaskItem) => {

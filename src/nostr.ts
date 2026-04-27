@@ -15,8 +15,49 @@ const pool = new SimplePool({enableReconnect: true})
 const DIRECTORY_RELAYS = ["wss://nos.lol", "wss://relay.damus.io", "wss://purplepag.es"]
 const recipientRelayCache = new Map<string, { relays: string[]; expiresAt: number }>()
 export const PROFILE_SYNC_DELAY_MS = 2000
+export const MAX_NIP44_PLAINTEXT_BYTES = 65535
+export const DM_PLAINTEXT_CHUNK_BYTES = 32000
+const DM_CHUNK_PREFIX_RESERVE_BYTES = 24
+const utf8Encoder = new TextEncoder()
 
 const uniq = (items: string[]) => Array.from(new Set(items.filter(Boolean)))
+
+const byteLength = (value: string) => utf8Encoder.encode(value).length
+
+export const splitDmBody = (body: string, maxBytes = DM_PLAINTEXT_CHUNK_BYTES) => {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= DM_CHUNK_PREFIX_RESERVE_BYTES || maxBytes > MAX_NIP44_PLAINTEXT_BYTES) {
+    throw new Error(`invalid DM chunk size: must be between ${DM_CHUNK_PREFIX_RESERVE_BYTES + 1} and ${MAX_NIP44_PLAINTEXT_BYTES} bytes`)
+  }
+
+  if (byteLength(body) <= maxBytes) return [body]
+
+  const chunks: string[] = []
+  const budget = maxBytes - DM_CHUNK_PREFIX_RESERVE_BYTES
+  let current = ""
+  let currentBytes = 0
+
+  for (const char of body) {
+    const charBytes = byteLength(char)
+    if (current && currentBytes + charBytes > budget) {
+      chunks.push(current)
+      current = ""
+      currentBytes = 0
+    }
+    current += char
+    currentBytes += charBytes
+  }
+
+  if (current) chunks.push(current)
+
+  const total = chunks.length
+  const prefixed = chunks.map((chunk, index) => `[${index + 1}/${total}]\n${chunk}`)
+  const oversized = prefixed.find(chunk => byteLength(chunk) > maxBytes)
+  if (oversized) {
+    throw new Error(`DM chunk exceeds ${maxBytes} bytes after adding order prefix`)
+  }
+
+  return prefixed
+}
 
 const shared = (agent: PreparedAgent): ReportingCfg => agent.app.config.reporting
 
@@ -530,6 +571,8 @@ export const sendDm = async (agent: PreparedAgent, body: string, recipients?: st
 
   const pubkey = getSelfPubkey(agent)
   const sk = secretKey(agent)
+  const chunks = splitDmBody(body)
+  const firstCreatedAt = Math.max(0, nowSec() - chunks.length + 1)
 
   for (const recipient of uniq(reportTo)) {
     const target = decodeNpub(recipient)
@@ -538,16 +581,18 @@ export const sendDm = async (agent: PreparedAgent, body: string, recipients?: st
     if (publishRelays.length === 0) {
       continue
     }
-    await publishEvent(
-      publishRelays,
-      {
-        kind: KIND_DM,
-        created_at: nowSec(),
-        tags: [["p", target]],
-        content: encryptFor(agent, target, body),
-      },
-      sk,
-    )
+    for (let index = 0; index < chunks.length; index += 1) {
+      await publishEvent(
+        publishRelays,
+        {
+          kind: KIND_DM,
+          created_at: firstCreatedAt + index,
+          tags: [["p", target]],
+          content: encryptFor(agent, target, chunks[index] ?? ""),
+        },
+        sk,
+      )
+    }
   }
 }
 
