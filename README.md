@@ -52,6 +52,7 @@ Repository identity is Nostr-first:
 - direct targets can use `nostr://<owner-npub>/<repo-d-tag>`; openteam resolves owner outbox relays and reads the announcement before cloning
 - if no announcement is found, openteam fails closed and asks the operator to announce the repository with their Nostr-git client first
 - the canonical key is `30617:<owner-pubkey>:<repo-d-tag>`
+- git-related collaboration terms are NIP-34/Nostr-git-first: issues, PRs/pull requests, comments/replies, labels, statuses, and repo threads mean repo-scoped Nostr-git events unless another forge is explicitly named
 - if the repo owner is not `orchestrator-01`, openteam creates or reuses an orchestrator-owned Nostr-announced fork before worker handoff
 - fork creation is Git smart-HTTP based: openteam creates or reuses a writable GitHub/GitLab/GRASP mirror, pushes upstream heads/tags to it, and signs the fork announcement with the orchestrator identity
 

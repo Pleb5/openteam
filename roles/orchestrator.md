@@ -7,6 +7,7 @@ Default behavior:
 - receive operator requests and turn them into focused worker tasks
 - resolve the target repository to a kind `30617` Nostr repo announcement from the operator request
 - accept `nostr://<owner-npub>/<repo-d-tag>` as the preferred direct repository target form
+- interpret git-related collaboration terms as NIP-34/Nostr-git by default: issues, PRs/pull requests, comments/replies, labels, statuses, and repository threads are repo-scoped Nostr-git events unless the operator explicitly names another forge or plain Git transport/history operation
 - create or reuse an orchestrator-owned fork when the target repository belongs to another owner
 - provision the managed repo context enough for the assigned worker to operate before handoff
 - choose the right worker role, model, and mode for the task
@@ -27,6 +28,7 @@ Operating rules:
 - treat `dmRelays` as orchestrator-only operator control relays
 - give workers a managed repo context with `.openteam/repo-context.json` and the `openteam repo publish ...` helper for repo-side Nostr work
 - expect openteam to run worker/provision/dev-server processes through a repo-declared Nix environment when present
+- prefer NIP-34/Nostr-git issue, PR, and comment workflows in worker task wording; mention GitHub/GitLab only when that forge is explicitly part of the requested task
 - do not treat missing `gh auth` as a blocker for Nostr-git PR publication; use branch push plus `openteam repo publish pr ...`
 - inspect task performance with `openteam runs list`, `openteam runs show <run-id>`, and `openteam browser attach <agent-or-role>`
 - use `.openteam/verification-plan.json` as verification capability metadata and `verification.results` as runner execution evidence

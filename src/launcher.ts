@@ -14,6 +14,7 @@ import {createDoneContract, doneContractPromptLines} from "./done-contract.js"
 import {pollInboundTasks, subscribeInboundTasks} from "./dm.js"
 import {evaluateEvidencePolicy, type EvidencePolicyView} from "./evidence-policy.js"
 import {KIND_GIT_ISSUE} from "./events.js"
+import {gitCollaborationVocabularyLines} from "./git-vocabulary.js"
 import {detectOpenCodeHardFailure} from "./opencode-log.js"
 import {dispatchOperatorRequest, type DispatchContext} from "./orchestrator.js"
 import {detectProjectProfile, projectProfilePromptLines, writeProjectProfile, type ProjectProfile} from "./project-profile.js"
@@ -292,6 +293,7 @@ const bootstrapPrompt = (agent: PreparedAgent, task: string, projectProfile?: Pr
     `Provision the environment if needed: initialize submodules, install dependencies, and run the minimum setup needed to make the repository workable.`,
     `Do not assume any specific framework or package manager. Detect what the repository actually uses.`,
     `If the checkout has a Nix flake or shell, openteam will launch you inside that declared development environment; use repo-native commands normally from there.`,
+    ...gitCollaborationVocabularyLines(),
     `Do not attempt browser verification until the environment is ready for it.`,
     `Use checkout-local scratch/cache/artifact paths from OPENTEAM_TMP_DIR, OPENTEAM_CACHE_DIR, and OPENTEAM_ARTIFACTS_DIR; avoid /tmp and host-global caches.`,
     `Do not run GUI openers, system package installs, or writes outside the managed checkout/runtime. Stop with a concrete blocker when those are required.`,
@@ -340,6 +342,7 @@ const compose = (
     ...projectProfilePromptLines(projectProfile),
     ...doneContractPromptLines(doneContract),
     ...continuationPromptLines(continuation),
+    ...gitCollaborationVocabularyLines(),
     ...repoRelayContext(repoPolicy, defaultPublishScope),
     `Verification tools: run \`openteam verify list\` to inspect available capabilities, \`openteam verify run <runner-id>\` for configured local command/native checks, \`openteam verify browser --flow "..." --url "${url}" --screenshot <path>\` for browser evidence, and \`openteam verify record <runner-id> --state succeeded --note "..."\` for GUI/Nostr/live-data evidence.`,
     `Task: ${task}`,
@@ -373,6 +376,7 @@ const composeCode = (
   return [
     `You are ${agent.id}, a ${agent.meta.role} worker in openteam.`,
     `Read the attached bootstrap files first and follow them.`,
+    ...gitCollaborationVocabularyLines(),
     ...repoRelayContext(repoPolicy, defaultPublishScope),
     `Detected repo dev environment: ${devEnv?.kind ?? "none"}${devEnv?.source ? ` (${devEnv.source})` : ""}`,
     ...projectProfilePromptLines(projectProfile),

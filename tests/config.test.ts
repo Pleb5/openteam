@@ -1,5 +1,9 @@
 import {describe, expect, test} from "bun:test"
-import {agentPaths} from "../src/config.js"
+import {mkdtemp, readFile} from "node:fs/promises"
+import {tmpdir} from "node:os"
+import path from "node:path"
+import {consolePrompt} from "../src/commands/console.js"
+import {agentPaths, prepareAgent} from "../src/config.js"
 import {validateAppConfig} from "../src/config-validate.js"
 import type {AppCfg} from "../src/types.js"
 
@@ -130,6 +134,34 @@ describe("config helpers", () => {
     }), {capability: "launch", agentId: "builder-01", mode: "web"})
 
     expect(result.errors.some(item => item.code === "browser-mcp-command-missing")).toBe(true)
+  })
+
+  test("materializes NIP-34/Nostr-git collaboration vocabulary for agents", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const testApp = app({runtimeRoot})
+    testApp.root = process.cwd()
+
+    const agent = await prepareAgent(testApp, "builder-01")
+    const agentsMd = await readFile(path.join(agent.paths.workspace, "AGENTS.md"), "utf8")
+    const roleMd = await readFile(path.join(agent.paths.workspace, "ROLE.md"), "utf8")
+
+    expect(agentsMd).toContain("NIP-34/Nostr-git")
+    expect(agentsMd).toContain("GitHub/GitLab issues, PRs, or comments")
+    expect(roleMd).toContain("NIP-34/Nostr-git")
+    expect(roleMd).toContain("openteam repo publish")
+  })
+
+  test("console prompt keeps git collaboration vocabulary Nostr-git-first", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const testApp = app({runtimeRoot})
+    testApp.root = process.cwd()
+
+    const prompt = await consolePrompt(testApp)
+
+    expect(prompt).toContain("Git collaboration vocabulary")
+    expect(prompt).toContain("NIP-34/Nostr-git")
+    expect(prompt).toContain("Issues are kind 1621")
+    expect(prompt).toContain("Use GitHub/GitLab issue, PR, or comment systems only when the task explicitly names that forge")
   })
 
   test("validates required agent secret for launch", () => {

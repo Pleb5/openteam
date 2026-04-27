@@ -36,6 +36,10 @@ Local paths, URLs, aliases, and folder names are only hints for finding this ann
 Direct `nostr://<owner-npub>/<repo-d-tag>` targets resolve through URI relay hints, the owner's kind `10002` outbox relays, and configured fallback announcement relays.
 When the upstream announcement owner is not `orchestrator-01`, openteam creates or reuses an orchestrator-owned kind `30617` fork announcement and performs worker handoff from that fork.
 
+Git collaboration vocabulary is NIP-34/Nostr-git-first throughout openteam.
+When an operator or task says issue, PR/pull request, comment/reply, label, status, repo, or repository thread, agents should interpret that as repo-scoped Nostr-git workflow data unless the task explicitly names GitHub, GitLab, another forge, or a plain Git transport/history operation.
+Plain `git` commands still refer to local Git SCM operations such as inspecting history, branching, committing, and pushing.
+
 Repository relay selection follows the same policy as the reference client:
 
 - if a repo announcement has GRASP smart-HTTP clone URLs, the announcement must include the corresponding GRASP relay URLs in its `relays` tag

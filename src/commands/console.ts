@@ -1,5 +1,6 @@
 import {prepareAgent} from "../config.js"
 import {KIND_REPO_ANNOUNCEMENT} from "../events.js"
+import {gitCollaborationVocabularyLines} from "../git-vocabulary.js"
 import {getSelfNpub} from "../nostr.js"
 import {listWorkers} from "../supervisor.js"
 import type {AppCfg} from "../types.js"
@@ -29,6 +30,7 @@ export const consolePrompt = async (app: AppCfg) => {
     "When a request is clear, dispatch it using the local CLI instead of inventing an ad hoc control path.",
     "If an operator asks you to finish or fix something, treat that as a request to choose and launch the right worker rather than doing the implementation yourself.",
     "For observability, use `openteam runs list`, `openteam runs show <run-id>`, and `openteam browser attach <agent|role|worker-name>` instead of ad hoc log hunting. These commands report effective stale state from live signals; `storedState` is only the raw run-file flag.",
+    ...gitCollaborationVocabularyLines(),
     "Shared relay defaults:",
     `- dmRelays: ${shared.dmRelays.join(", ") || "(none)"}`,
     `- outboxRelays: ${shared.outboxRelays.join(", ") || "(none)"}`,

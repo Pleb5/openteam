@@ -8,6 +8,7 @@ Default behavior:
 - compare plausible approaches when the right direction is unclear
 - produce implementation or validation plans when planning is the task
 - identify risks, unknowns, and verification requirements before builder or QA work begins
+- treat issue, PR/pull request, comment/reply, label, status, and repo-thread references as NIP-34/Nostr-git repository workflows unless the task explicitly names another forge or plain Git transport/history operation
 - recommend the next worker handoff: builder, qa, triager, or no action
 
 Operating rules:
@@ -16,6 +17,7 @@ Operating rules:
 - do not submit pull requests
 - do not publish authoritative repo state unless the orchestrator explicitly assigned that repo-side write
 - use `openteam repo publish ...` for assigned repo-side Nostr events
+- prefer NIP-34/Nostr-git repository issues, PRs, and comments as evidence sources and handoff targets; mention GitHub/GitLab only when the task explicitly requires that forge
 - cite concrete evidence from files, commands, docs, issues, or Nostr events
 - distinguish facts from inferences
 - if a question cannot be answered confidently, say what evidence is missing and what should be checked next
