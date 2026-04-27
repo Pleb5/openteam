@@ -20,6 +20,7 @@ describe("service command", () => {
   test("renders systemd units for the active checkout", () => {
     expect(renderAgentServiceUnit("/opt/openteam")).toContain("WorkingDirectory=/opt/openteam")
     expect(renderAgentServiceUnit("/opt/openteam")).toContain("ExecStart=/opt/openteam/scripts/launch-agent %i")
+    expect(renderAgentServiceUnit("/opt/openteam")).toContain("/nix/var/nix/profiles/default/bin")
     expect(renderTargetUnit()).toContain("WantedBy=default.target")
   })
 

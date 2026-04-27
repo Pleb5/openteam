@@ -32,6 +32,8 @@ const unitPath = (home: string, name: string) =>
 
 const unitEscape = (value: string) => value.replace(/%/g, "%%")
 
+const servicePath = "%h/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin"
+
 export const renderAgentServiceUnit = (root: string) => {
   const escapedRoot = unitEscape(root)
   return `[Unit]
@@ -43,7 +45,7 @@ PartOf=openteam.target
 [Service]
 Type=simple
 WorkingDirectory=${escapedRoot}
-Environment=PATH=%h/.nix-profile/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=${servicePath}
 ExecStart=${escapedRoot}/scripts/launch-agent %i
 Restart=on-failure
 RestartSec=5
