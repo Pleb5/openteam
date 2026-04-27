@@ -280,13 +280,16 @@ export const subscribeEvents = async (
   })
 }
 
-const relayTags = (tags: string[][]) => {
+export const relayTagValues = (tags: string[][]) => {
   return uniq(tags.filter(tag => tag[0] === "relay" || tag[0] === "r").map(tag => tag[1] ?? ""))
 }
 
 const outboxRelayTags = (relays: string[]) => uniq(relays.map(normalizeRelayLikeUrl).filter(isRelayLikeUrl)).map(url => ["r", url] as string[])
 
-const dmRelayTags = (relays: string[]) => uniq(relays.map(normalizeRelayLikeUrl).filter(isRelayLikeUrl)).map(url => ["relay", url] as string[])
+const dmRelayTags = (relays: string[]) => uniq(relays.map(normalizeRelayLikeUrl).filter(isRelayLikeUrl)).flatMap(url => [
+  ["relay", url],
+  ["r", url],
+] as string[][])
 
 const latestOwnRelayList = async (agent: PreparedAgent, kind: number) => {
   const events = await queryEvents(
@@ -309,7 +312,7 @@ const relayPresence = async (
   configured: string[],
 ): Promise<RelayListPresence> => {
   const event = await latestOwnRelayList(agent, kind)
-  const published = event ? relayTags(event.tags) : []
+  const published = event ? relayTagValues(event.tags) : []
   return {
     kind: label,
     eventId: event?.id,
@@ -340,12 +343,12 @@ export const resolveRecipientDmRelays = async (agent: PreparedAgent, recipientPu
   const hints = uniq([...DIRECTORY_RELAYS, ...self, ...(cached?.relays ?? [])])
   const direct = await queryAuthorKind(agent, hints, recipientPubkey, KIND_DM_RELAYS)
   const outboxEvents = await queryAuthorKind(agent, hints, recipientPubkey, KIND_OUTBOX_RELAYS)
-  const outboxRelays = uniq(outboxEvents.flatMap(event => relayTags(event.tags)))
+  const outboxRelays = uniq(outboxEvents.flatMap(event => relayTagValues(event.tags)))
   const viaOutbox = await queryAuthorKind(agent, outboxRelays, recipientPubkey, KIND_DM_RELAYS)
   const merged = [...direct, ...viaOutbox].sort((a, b) => b.created_at - a.created_at)
 
   for (const event of merged) {
-    const relays = relayTags(event.tags)
+    const relays = relayTagValues(event.tags)
     if (relays.length === 0) continue
     recipientRelayCache.set(recipientPubkey, {relays, expiresAt: now + 10 * 60_000})
     return relays

@@ -235,6 +235,12 @@ export type TaskContinuation = {
   createdAt: string
 }
 
+export type TaskSource = {
+  kind: "dm" | "local" | "repo-event"
+  eventId?: string
+  from?: string
+}
+
 export type TaskItem = {
   id: string
   task: string
@@ -248,11 +254,7 @@ export type TaskItem = {
   parallel?: boolean
   recipients?: string[]
   continuation?: TaskContinuation
-  source?: {
-    kind: "dm" | "local" | "repo-event"
-    eventId?: string
-    from?: string
-  }
+  source?: TaskSource
 }
 
 export type AgentPaths = {

@@ -134,7 +134,8 @@ The runtime owns:
 
 - operator task intake DMs to the orchestrator
 - immediate acknowledgement
-- completion/blocker reporting
+- fast grammar dispatch and conversational DM fallback
+- important job reporting to DM senders and configured `reporting.reportTo` recipients
 - Nostr-announced repo target resolution
 
 Skills should not instruct agents to manually send operator DMs unless the task itself is about messaging.

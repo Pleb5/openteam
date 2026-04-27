@@ -65,7 +65,7 @@ Per task, `openteam` allocates:
 
 Control-plane responsibilities are split deliberately:
 
-- runtime-owned: orchestrator DM task intake, immediate acknowledgement, completion/blocker reporting, relay/profile seeding
+- runtime-owned: orchestrator DM task intake, immediate acknowledgement, fast grammar/freeform routing, important job reporting, relay/profile seeding
 - orchestrator-owned: target resolution, repository provisioning before handoff, worker selection, mode/model selection, and worker lifecycle
 - worker-owned: research briefs, code changes, browser interaction, app workflows, repo work, and task-specific Nostr operations when explicitly needed
 - workers do not accept operator DMs; their Nostr capability is for identity, signing, repository-event reads/writes, and browser signer flows
@@ -95,14 +95,18 @@ bun run src/cli.ts runs diagnose <run-id>
 bun run src/cli.ts runs evidence <run-id>
 bun run src/cli.ts runs cleanup-stale --dry-run
 bun run src/cli.ts browser attach qa
+bun run src/cli.ts service restart
 bun run src/cli.ts relay sync builder-01
 bun run src/cli.ts profile sync builder-01
 ```
 
 Running `scripts/openteam` with no arguments now:
 
-1. ensures `orchestrator-01` is running
+1. ensures the `orchestrator-01` user service is installed and running
 2. opens an operator-facing OpenCode console in the project root
+
+The foreground console does not own the Nostr DM listener.
+For code/config changes to openteam itself, restart the long-running listener with `openteam service restart`.
 
 That console is the preferred local entrypoint for freeform operator requests.
 
@@ -152,11 +156,17 @@ Use `openteam runs continue <run-id> --task "..."` for broader follow-up work on
 
 When `serve orchestrator-01` is running and DM relays, allowlist, and identity are configured:
 
-- inbound DM body becomes the task text
-- the orchestrator immediately replies `working on it`
-- the task is queued if the agent is already busy
-- final status is sent back by DM on success or failure
+- inbound operator DMs are accepted only from `reporting.allowFrom`
+- the orchestrator immediately replies `working on it` with the source DM event id
+- fast grammar commands are dispatched without invoking the conversational agent: `help`, `status`, `worker list`, `what is running?`, `stop <worker-name>`, `start <role> on <target>`, `watch <target> [as <role>]`, `research <target> and <task>`, `plan <target> and <goal>`, and `work on <target> ... and do <task>`
+- unmatched DMs fall back to the conversational orchestrator path, the same control style as the local TUI, and return only a concise operator-facing response
+- DM-originated jobs carry the sender as a report recipient through detached worker launches
+- TUI/CLI-originated jobs send important lifecycle DMs to `reporting.reportTo` when configured
+- important reports include launched/started, browser URL available, failed, needs-review/succeeded, and warning/critical run observations; routine phase noise and raw logs are not DM'd
 - outbound DMs are published to both the orchestrator's `dmRelays` and the recipient's discovered kind `10050` inbox relays
+
+`reporting.allowFrom` is an authority list, not a notification subscription list.
+Use `reporting.reportTo` for default job notifications from local TUI/CLI work.
 
 Worker agents do not publish or subscribe to operator DM control inboxes.
 They can still use Nostr repository relays for issue, comment, label, status, and PR workflows when the orchestrator assigned task requires it.
@@ -168,6 +178,8 @@ Managed repo contexts include `.openteam/repo-context.json`, and workers should 
 These buckets are configured primarily at the top level and inherited by workers by default.
 
 - `dmRelays`: the orchestrator's operator messaging relays; used for inbound DM polling and outbound operator-facing DMs
+- `allowFrom`: npubs authorized to issue orchestrator control DMs
+- `reportTo`: npubs that receive important job reports for local TUI/CLI-launched work; DM-launched work also reports to the sender
 - `outboxRelays`: the agent's own canonical relay list (`10002`); seeded at startup and used as part of relay-list publishing and general profile discoverability
 - `relayListBootstrapRelays`: bootstrap/directory relays used to publish and discover the agent's `10002` and `10050` relay-list events
 - `appDataRelays`: the agent's standard app-data relay set for general profile data
@@ -238,7 +250,7 @@ Practical edit points:
 - write relays, allowlists, and browser MCP command in `config/openteam.local.json`
 - write Git tokens and Nostr secrets in `config/openteam.secrets.env`
 - map GitHub/GitLab token hosts under `config.providers`; openteam can create/reuse fork repos there and injects matching Git smart-HTTP tokens through `GIT_ASKPASS` without embedding tokens in URLs
-- publish Nostr-git PRs with branch push plus `openteam repo publish pr ...`; personal `gh auth` is not part of the default openteam path and normal PR publication requires strong verification evidence
+- publish Nostr-git PRs with branch push plus `openteam repo publish pr ...`; personal `gh auth` is not part of the default openteam path, normal PR publication requires strong verification evidence, and `--target-branch` is only for the merge target branch
 - leave `identity.npub` blank if you want `openteam` to derive it from the secret key
 - use `reporting.appDataRelays` for your standard relay set and `nostr_git.gitDataRelays` for the active client's git-data fallback relays
 - use `nostr_git.repoAnnouncementRelays` for repository announcement fallback discovery

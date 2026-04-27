@@ -2,6 +2,7 @@ import {describe, expect, test} from "bun:test"
 import {mkdir, mkdtemp, writeFile} from "node:fs/promises"
 import {tmpdir} from "node:os"
 import path from "node:path"
+import {pullRequestTargetBranch} from "../src/commands/repo-publish.js"
 import {
   buildCommentEvent,
   buildPullRequestEvent,
@@ -14,6 +15,9 @@ import {
   KIND_GIT_PULL_REQUEST_UPDATE,
   KIND_GIT_STATUS_APPLIED,
   loadRepoPublishContext,
+  pullRequestCloneUrlsForTarget,
+  repoMaintainerPubkeys,
+  upstreamPullRequestNeedsClone,
 } from "../src/repo-publish.js"
 
 const repoAddr = "30617:owner-pubkey:repo"
@@ -122,7 +126,7 @@ describe("repo publish event builders", () => {
       subject: "Fix login flow",
       tipCommitOid: "tip123",
       clone: ["https://example.com/openteam/repo.git"],
-      branchName: "main",
+      targetBranch: "main",
       mergeBase: "base123",
       labels: ["bug"],
       recipients: ["maintainer"],
@@ -151,6 +155,58 @@ describe("repo publish event builders", () => {
     expect(hasTag(update.tags ?? [], ["P", "pr-author"])).toBe(true)
     expect(hasTag(update.tags ?? [], ["c", "tip456"])).toBe(true)
     expect(hasTag(update.tags ?? [], ["merge-base", "base456"])).toBe(true)
+  })
+
+  test("infers Nostr-git PR source clone URLs from upstream fork context", () => {
+    const upstream = {
+      ...validIdentity,
+      key: "30617:upstream-owner:repo",
+      ownerPubkey: "upstream-owner",
+      cloneUrls: ["https://example.com/upstream/repo.git"],
+    }
+    const fork = {
+      ...validIdentity,
+      key: "30617:fork-owner:repo",
+      ownerPubkey: "fork-owner",
+      cloneUrls: ["https://example.com/openteam/repo.git"],
+    }
+    const target = {
+      scope: "upstream" as const,
+      identity: upstream,
+      context: {
+        version: 1 as const,
+        agentId: "builder-01",
+        target: "nostr://npub1upstream/repo",
+        defaultScope: "upstream" as const,
+        repo: fork,
+        upstreamRepo: upstream,
+        policy: validPolicy,
+        upstreamPolicy: validPolicy,
+      },
+    }
+
+    expect(upstreamPullRequestNeedsClone(target)).toBe(true)
+    expect(pullRequestCloneUrlsForTarget(target)).toEqual(["https://example.com/openteam/repo.git"])
+    expect(pullRequestCloneUrlsForTarget(target, ["https://override.example.com/repo.git"])).toEqual(["https://override.example.com/repo.git"])
+  })
+
+  test("infers repo owner and maintainers as PR recipients", () => {
+    const owner = "0".repeat(64)
+    const maintainer = "1".repeat(64)
+    const ignored = "not-a-pubkey"
+
+    expect(repoMaintainerPubkeys({
+      ownerPubkey: owner,
+      rawTags: [
+        ["maintainers", maintainer, ignored],
+        ["maintainer", maintainer],
+      ],
+    })).toEqual([owner, maintainer])
+  })
+
+  test("rejects ambiguous legacy PR branch argument", () => {
+    expect(() => pullRequestTargetBranch(["--branch", "fix/source-branch"])).toThrow("--branch is ambiguous")
+    expect(pullRequestTargetBranch(["--target-branch", "main"])).toBe("main")
   })
 
   test("rejects repo publish contexts with a missing checkout", async () => {

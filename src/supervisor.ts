@@ -5,7 +5,8 @@ import path from "node:path"
 import {prepareAgent} from "./config.js"
 import {assertAppConfigValid} from "./config-validate.js"
 import {PROFILE_SYNC_DELAY_MS, sleep, syncGraspServers, syncOwnDmRelays, syncOwnOutboxRelays, syncProfileTokens} from "./nostr.js"
-import type {AppCfg, TaskMode} from "./types.js"
+import {encodeTaskContextEnv} from "./task-context.js"
+import type {AppCfg, TaskMode, TaskSource} from "./types.js"
 
 export type ManagedWorker = {
   name: string
@@ -18,6 +19,8 @@ export type ManagedWorker = {
   model?: string
   task?: string
   parallel?: boolean
+  recipients?: string[]
+  source?: TaskSource
   pid: number
   logFile: string
   startedAt: string
@@ -113,6 +116,8 @@ export const startWorker = async (
     mode?: TaskMode
     model?: string
     name?: string
+    recipients?: string[]
+    source?: TaskSource
   },
 ) => {
   assertAppConfigValid(app, {capability: "serve", agentId: args.agentId, mode: args.mode ?? app.config.repos[app.config.agents[args.agentId]?.repo || ""]?.mode})
@@ -153,6 +158,8 @@ export const startWorker = async (
     target: args.target,
     mode: args.mode,
     model: args.model,
+    recipients: args.recipients,
+    source: args.source,
     pid: child.pid!,
     logFile,
     startedAt: now(),
@@ -175,6 +182,8 @@ export const startJob = async (
     task: string
     name?: string
     parallel?: boolean
+    recipients?: string[]
+    source?: TaskSource
   },
 ) => {
   assertAppConfigValid(app, {capability: "launch", agentId: args.agentId, mode: args.mode ?? app.config.repos[app.config.agents[args.agentId]?.repo || ""]?.mode ?? "web"})
@@ -209,7 +218,7 @@ export const startJob = async (
 
   const child = spawn(script, cliArgs, {
     cwd: app.root,
-    env: {...process.env, OPENTEAM_CALLER_CWD: process.cwd()},
+    env: {...process.env, OPENTEAM_CALLER_CWD: process.cwd(), ...encodeTaskContextEnv(args)},
     detached: true,
     stdio: ["ignore", handle.fd, handle.fd],
   })
@@ -227,6 +236,8 @@ export const startJob = async (
     model: args.model,
     task: args.task,
     parallel: args.parallel,
+    recipients: args.recipients,
+    source: args.source,
     pid: child.pid!,
     logFile,
     startedAt: now(),

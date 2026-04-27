@@ -7,6 +7,7 @@ import net from "node:net"
 import path from "node:path"
 import process from "node:process"
 import {startBunker, type RunningBunker} from "./bunker.js"
+import {consolePrompt} from "./commands/console.js"
 import {prepareAgent} from "./config.js"
 import {detectDevEnv, wrapDevEnvCommand, type DevEnv} from "./dev-env.js"
 import {createDoneContract, doneContractPromptLines} from "./done-contract.js"
@@ -14,12 +15,13 @@ import {pollInboundTasks, subscribeInboundTasks} from "./dm.js"
 import {evaluateEvidencePolicy, type EvidencePolicyView} from "./evidence-policy.js"
 import {KIND_GIT_ISSUE} from "./events.js"
 import {detectOpenCodeHardFailure} from "./opencode-log.js"
-import {dispatchOperatorRequest} from "./orchestrator.js"
+import {dispatchOperatorRequest, type DispatchContext} from "./orchestrator.js"
 import {detectProjectProfile, projectProfilePromptLines, writeProjectProfile, type ProjectProfile} from "./project-profile.js"
 import {writeRepoPublishContext} from "./repo-publish.js"
 import {releaseRepoContext, resolveRepoAnnouncementTarget, resolveRepoRelayPolicy, resolveRepoTarget, type RepoRelayPolicy} from "./repo.js"
 import {continuationEvidenceForCarry, continuationPromptLines} from "./run-continuation.js"
 import {formatObservationEvent, observeRuns} from "./run-observer.js"
+import {encodeTaskContextEnv} from "./task-context.js"
 import {
   appendVerificationResultsFile,
   createVerificationPlan,
@@ -352,6 +354,7 @@ const compose = (
     `When you use browser, desktop, mobile, Nostr, or repo-native verification, record concise evidence through \`openteam verify record\` or \`openteam verify run\` before returning success.`,
     `If evidence is missing or weak, the run will finish as needs-review; continue verification or report a concrete blocker rather than claiming complete success.`,
     `For branch publication, use plain git against the configured origin and publish Nostr-git PR events through openteam repo publish pr; normal PR publication is blocked until evidence is strong, and you must not rely on gh auth or personal forge sessions.`,
+    `When publishing a Nostr-git PR, do not pass the worker/source branch as --branch; use --target-branch only for the merge target branch when needed. The helper infers source fork clone URLs from the repo context.`,
     `If the target app requires login, use the Remote Signer flow with the bunker URL above when appropriate.`,
     `Keep working until the task is handled end-to-end or you hit a concrete blocker.`,
   ].join("\n")
@@ -388,6 +391,7 @@ const composeCode = (
     `When you use repo-native, desktop, mobile, Nostr, or other verification, record concise evidence through \`openteam verify record\` or \`openteam verify run\` before returning success.`,
     `If evidence is missing or weak, the run will finish as needs-review; continue verification or report a concrete blocker rather than claiming complete success.`,
     `For branch publication, use plain git against the configured origin and publish Nostr-git PR events through openteam repo publish pr; normal PR publication is blocked until evidence is strong, and you must not rely on gh auth or personal forge sessions.`,
+    `When publishing a Nostr-git PR, do not pass the worker/source branch as --branch; use --target-branch only for the merge target branch when needed. The helper infers source fork clone URLs from the repo context.`,
     `Keep working until the task is handled end-to-end or you hit a concrete blocker.`,
   ].join("\n")
 }
@@ -822,10 +826,44 @@ const record = async (agent: PreparedAgent, item: TaskItem) => {
 
 const acceptsControlDms = (agent: PreparedAgent) => agent.agent.role === "orchestrator"
 
-const sendTaskReport = async (agent: PreparedAgent, body: string, recipients?: string[]) => {
-  if (!acceptsControlDms(agent)) return
-  await sendReport(agent, body, recipients)
+const uniqStrings = (items: Array<string | undefined>) => Array.from(new Set(items.filter(Boolean) as string[]))
+
+const configuredReportRecipients = (agent: PreparedAgent) =>
+  agent.agent.reporting.reportTo?.length
+    ? agent.agent.reporting.reportTo
+    : agent.app.config.reporting.reportTo
+
+const runtimeReportRecipients = (agent: PreparedAgent, recipients?: string[]) =>
+  uniqStrings([...(recipients ?? []), ...configuredReportRecipients(agent)])
+
+const taskDispatchContext = (item: TaskItem): DispatchContext => ({
+  recipients: item.recipients,
+  source: item.source,
+})
+
+const notificationAgent = async (agent: PreparedAgent) => {
+  if (acceptsControlDms(agent)) return agent
+  return prepareAgent(agent.app, "orchestrator-01").catch(() => agent)
 }
+
+const sendRuntimeReport = async (agent: PreparedAgent, body: string, recipients?: string[]) => {
+  const reporter = await notificationAgent(agent)
+  const reportTo = runtimeReportRecipients(reporter, recipients)
+  if (reportTo.length === 0) return
+  await sendReport(reporter, body, reportTo).catch(error => {
+    process.stderr.write(`runtime report failed: ${String(error)}\n`)
+  })
+}
+
+const sendTaskReport = async (agent: PreparedAgent, body: string, recipients?: string[]) => {
+  await sendRuntimeReport(agent, body, recipients)
+}
+
+const observationShouldReport = (event: Awaited<ReturnType<typeof observeRuns>>["events"][number]) =>
+  event.transitions.some(transition =>
+    (transition.field === "state" && transition.to === "stale") ||
+    (transition.field !== "state" && transition.severity !== "info"),
+  )
 
 export const enqueueTask = async (
   app: AppCfg,
@@ -1158,6 +1196,114 @@ export const assertResolvedContextReady = (resolved: ResolvedRepoTarget, agent: 
   }
 }
 
+const stripAnsi = (value: string) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "")
+
+const conciseOperatorLogTail = (log: string) => {
+  const lines = stripAnsi(log)
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line =>
+      line &&
+      !line.startsWith("$ ") &&
+      !line.startsWith("> ") &&
+      !line.startsWith("\u2699") &&
+      !line.startsWith("\u2192") &&
+      !line.startsWith("\u2731") &&
+      !line.startsWith("# Todos") &&
+      !/^\[[ x]\]/.test(line),
+    )
+  return lines.slice(-12).join("\n").slice(0, 2500)
+}
+
+const operatorMessageFromLog = async (logFile: string) => {
+  if (!existsSync(logFile)) return ""
+  const log = stripAnsi(await readFile(logFile, "utf8"))
+  const marker = "OPENTEAM_OPERATOR_MESSAGE:"
+  const index = log.lastIndexOf(marker)
+  if (index >= 0) {
+    return log.slice(index + marker.length).trim().slice(0, 2500)
+  }
+  return conciseOperatorLogTail(log)
+}
+
+const composeOrchestratorDmPrompt = async (app: AppCfg, agent: PreparedAgent, item: TaskItem) => {
+  const prompt = await consolePrompt(app)
+  return [
+    prompt,
+    "",
+    "This request arrived through the Nostr DM control plane.",
+    "Treat it like a normal operator request from the local console, but keep DM reporting sparse.",
+    "Use the local openteam CLI for worker lifecycle actions. The runtime has exported notification context in the environment, so child openteam commands will report important job events back to the right operator.",
+    "Do not manually send Nostr DMs; the runtime owns operator DM reporting.",
+    "Ask a concise clarifying question if the target, role, or desired outcome is ambiguous.",
+    "At the very end, write a concise operator-facing response prefixed exactly with OPENTEAM_OPERATOR_MESSAGE:.",
+    "",
+    `Operator request:\n${item.task}`,
+  ].join("\n")
+}
+
+const runConversationalOrchestratorTask = async (
+  app: AppCfg,
+  agent: PreparedAgent,
+  item: TaskItem,
+): Promise<LaunchResult> => {
+  const idTask = item.id || taskId(item.task)
+  const logFile = path.join(agent.paths.artifacts, `${idTask}-orchestrator-opencode.log`)
+  await mergeState(agent, {
+    running: true,
+    taskId: idTask,
+    task: item.task,
+    startedAt: now(),
+  })
+
+  const session = await runOpencodeSession(
+    agent,
+    app.root,
+    idTask,
+    await composeOrchestratorDmPrompt(app, agent, item),
+    logFile,
+    item.model,
+    async () => {
+      await mergeState(agent, {
+        running: true,
+        taskId: idTask,
+        task: item.task,
+        logFile,
+        startedAt: now(),
+        finishedAt: undefined,
+        state: "running",
+        runId: undefined,
+        runFile: undefined,
+      })
+    },
+    {
+      ...encodeTaskContextEnv(item),
+      OPENTEAM_REQUEST_SOURCE: item.source?.kind ?? "local",
+    },
+  )
+  const state: TaskItem["state"] = session.code === 0 ? "succeeded" : "failed"
+  const message = await operatorMessageFromLog(logFile)
+  await mergeState(agent, {running: false, state, finishedAt: now(), logFile})
+  await sendRuntimeReport(
+    agent,
+    message
+      ? `[${agent.id}] ${state} freeform request ${idTask}\n\n${message}`
+      : `[${agent.id}] ${state} freeform request ${idTask}\nlog: ${logFile}`,
+    item.recipients,
+  )
+
+  return {
+    id: idTask,
+    state,
+    task: item.task,
+    target: item.target || "",
+    mode: item.mode || "code",
+    branch: "",
+    url: "",
+    logFile,
+  }
+}
+
 export const runTask = async (
   app: AppCfg,
   id: string,
@@ -1168,56 +1314,43 @@ export const runTask = async (
   const base = await prepareAgent(app, id, item.runtimeId ? {runtimeId: item.runtimeId} : {})
 
   if (base.agent.role === "orchestrator") {
-    const dispatched = await dispatchOperatorRequest(app, item.task)
-    if (dispatched.handled) {
-      const result: LaunchResult = {
-        id: item.id || taskId(item.task),
-        state: "succeeded",
-        task: item.task,
-        target: item.target || "",
-        mode: item.mode || "code",
-        branch: "",
-        url: "",
-        logFile: "",
+    try {
+      const dispatched = await dispatchOperatorRequest(app, item.task, taskDispatchContext(item))
+      if (dispatched.handled) {
+        const result: LaunchResult = {
+          id: item.id || taskId(item.task),
+          state: "succeeded",
+          task: item.task,
+          target: item.target || "",
+          mode: item.mode || "code",
+          branch: "",
+          url: "",
+          logFile: "",
+        }
+
+        await sendRuntimeReport(
+          base,
+          dispatched.message
+            ? `[${base.id}] ${dispatched.message}`
+            : `[${base.id}] ${dispatched.summary}`,
+          item.recipients,
+        )
+
+        return result
       }
 
-      await sendReport(
+      return await runConversationalOrchestratorTask(app, base, item)
+    } catch (error) {
+      await sendRuntimeReport(
         base,
-        [`[${base.id}] ${dispatched.summary}`, JSON.stringify(dispatched.payload, null, 2)].join("\n\n"),
+        [
+          `[${base.id}] failed request ${item.id || taskId(item.task)}`,
+          `error: ${formatError(error)}`,
+        ].join("\n"),
         item.recipients,
       )
-
-      return result
+      throw error
     }
-
-    const result: LaunchResult = {
-      id: item.id || taskId(item.task),
-      state: "failed",
-      task: item.task,
-      target: item.target || "",
-      mode: item.mode || "code",
-      branch: "",
-      url: "",
-      logFile: "",
-    }
-
-    await sendReport(
-      base,
-      [
-        `[${base.id}] request not dispatched`,
-        "The orchestrator does not directly implement repository work.",
-        "Use an explicit control request such as:",
-        "- status",
-        "- start <role> on <target>",
-        "- watch <target> as <role>",
-        "- research <target> and <question>",
-        "- plan <target> and <goal>",
-        "- work on <target> as <role> [in <mode> mode] [with model <model>] and do <task>",
-      ].join("\n"),
-      item.recipients,
-    )
-
-    return result
   }
 
   const idTask = item.id
@@ -1351,9 +1484,18 @@ export const runTask = async (
         browserHeadless: agent.app.config.browser.headless,
       } : {}),
     })
-    if (item.source?.kind !== "dm") {
-      await sendTaskReport(agent, `[${agent.id}] starting task ${idTask}\n\n${item.task}`, item.recipients)
-    }
+    await sendTaskReport(
+      agent,
+      [
+        `[${agent.id}] started task ${idTask}`,
+        `run: ${runRecord.runId}`,
+        `target: ${resolved.target}`,
+        `mode: ${mode}`,
+        `context: ${contextId}`,
+        `checkout: ${checkout}`,
+      ].join("\n"),
+      item.recipients,
+    )
 
     const ready = await runPhase(runRecord, "provision-check", () => provisionIsCurrent(resolved.repo, checkout, mode))
     let provisionLogFile = provisionStateFile(checkout)
@@ -1397,6 +1539,7 @@ export const runTask = async (
           agent,
           [
             `[${agent.id}] failed task ${idTask}`,
+            `run: ${runRecord.runId}`,
             `provision log: ${provisionLogFile}`,
             `context: ${contextId}`,
             `checkout: ${checkout}`,
@@ -1461,6 +1604,15 @@ export const runTask = async (
         browser: browserRunInfo(agent, url),
       })
       await mergeState(agent, {url, logFile, browserProfile: path.join(agent.paths.browser, "profile"), browserArtifacts: path.join(agent.paths.artifacts, "playwright")})
+      await sendTaskReport(
+        agent,
+        [
+          `[${agent.id}] browser URL available for task ${idTask}`,
+          `run: ${runRecord.runId}`,
+          `url: ${url}`,
+        ].join("\n"),
+        item.recipients,
+      )
 
       try {
         const prompt = compose(agent, item.task, dev.url, effectiveRuntime, repoPolicy, defaultPublishScope, devEnv, projectProfile, doneContract, item.continuation)
@@ -1635,6 +1787,7 @@ export const runTask = async (
       agent,
       [
         `[${agent.id}] ${state} task ${idTask}`,
+        `run: ${runRecord.runId}`,
         `evidence: ${evidencePolicy.level}`,
         `PR eligible: ${evidencePolicy.prEligible ? "yes" : "no"}`,
         `recommended: ${evidencePolicy.recommendedAction}`,
@@ -1664,6 +1817,17 @@ export const runTask = async (
       runtimeId: agent.id,
       parallel: item.parallel,
     })
+    await sendTaskReport(
+      agent,
+      [
+        `[${agent.id}] failed task ${idTask}`,
+        `run: ${runRecord.runId}`,
+        contextId ? `context: ${contextId}` : "",
+        runRecord.logs?.opencode ? `log: ${runRecord.logs.opencode}` : "",
+        `error: ${formatError(error)}`,
+      ].filter(Boolean).join("\n"),
+      item.recipients,
+    )
     throw error
   } finally {
     if (contextId) {
@@ -1731,6 +1895,23 @@ const markSeen = async (agent: PreparedAgent, ids: string[]) => {
   await mergeState(agent, {seenDmIds: Array.from(new Set(next)).slice(-500)})
 }
 
+const rememberLiveDmId = (seen: Set<string>, id: string) => {
+  seen.add(id)
+  if (seen.size <= 1000) return
+
+  for (const value of seen) {
+    seen.delete(value)
+    if (seen.size <= 500) break
+  }
+}
+
+const claimLiveDmId = (seen: Set<string> | undefined, id: string) => {
+  if (!seen) return true
+  if (seen.has(id)) return false
+  rememberLiveDmId(seen, id)
+  return true
+}
+
 const acceptInbound = async (
   app: AppCfg,
   agent: PreparedAgent,
@@ -1755,24 +1936,30 @@ const acceptInbound = async (
   return file
 }
 
-const pollInbox = async (app: AppCfg, agent: PreparedAgent, defaults: Partial<TaskItem> = {}) => {
+const pollInbox = async (
+  app: AppCfg,
+  agent: PreparedAgent,
+  defaults: Partial<TaskItem> = {},
+  liveSeenDmIds?: Set<string>,
+) => {
   const state = await loadState(agent)
   const since = Math.max(0, (state.lastDmCheckAt ?? nowSec()) - 15)
-  const seenIds = new Set(state.seenDmIds ?? [])
+  const seenIds = new Set([...(state.seenDmIds ?? []), ...(liveSeenDmIds ?? [])])
   const inbound = await pollInboundTasks(agent, since, seenIds)
+  const fresh = inbound.filter(message => claimLiveDmId(liveSeenDmIds, message.id))
 
-  if (inbound.length === 0) {
+  if (fresh.length === 0) {
     await mergeState(agent, {lastDmCheckAt: nowSec()})
     return
   }
 
-  for (const message of inbound) {
+  for (const message of fresh) {
     await acceptInbound(app, agent, message.body, message.id, message.fromNpub, defaults)
   }
 
   await markSeen(
     agent,
-    inbound.map(item => item.id),
+    fresh.map(item => item.id),
   )
   await mergeState(agent, {lastDmCheckAt: nowSec()})
 }
@@ -1870,16 +2057,18 @@ export const serveAgent = async (app: AppCfg, id: string, defaults: Partial<Task
   let closed = false
   let broken = false
   let inbox = Promise.resolve()
+  const liveSeenDmIds = new Set<string>()
 
   const arm = async () => {
     const state = await loadState(agent)
-    const seenIds = new Set(state.seenDmIds ?? [])
+    const seenIds = new Set([...(state.seenDmIds ?? []), ...liveSeenDmIds])
 
     sub = await subscribeInboundTasks(
       agent,
       Math.max(0, (state.lastDmCheckAt ?? nowSec()) - 15),
       seenIds,
       message => {
+        if (!claimLiveDmId(liveSeenDmIds, message.id)) return
         inbox = inbox
           .then(async () => {
             await acceptInbound(app, agent, message.body, message.id, message.fromNpub, defaults)
@@ -1903,6 +2092,7 @@ export const serveAgent = async (app: AppCfg, id: string, defaults: Partial<Task
   }
 
   const cleanup = () => {
+    if (closed) return
     closed = true
     sub.close()
     runtime.bunker?.stop()
@@ -1913,7 +2103,7 @@ export const serveAgent = async (app: AppCfg, id: string, defaults: Partial<Task
 
   if (controlDms) {
     try {
-      await pollInbox(app, agent, defaults)
+      await pollInbox(app, agent, defaults, liveSeenDmIds)
     } catch (error) {
       process.stderr.write(`dm poll failed: ${String(error)}\n`)
     }
@@ -1926,68 +2116,70 @@ export const serveAgent = async (app: AppCfg, id: string, defaults: Partial<Task
     }
   }
 
-  for (;;) {
-    if (controlDms && broken) {
-      try {
-        await arm()
-      } catch (error) {
-        process.stderr.write(`dm subscription failed: ${String(error)}\n`)
-      }
-    }
-
-    if (controlDms) {
-      try {
-        await pollInbox(app, agent, defaults)
-      } catch (error) {
-        process.stderr.write(`dm fallback poll failed: ${String(error)}\n`)
-      }
-    }
-
-    if (repoWatch) {
-      try {
-        await pollRepoWatch(app, agent, repoWatch)
-      } catch (error) {
-        process.stderr.write(`repo watch poll failed: ${String(error)}\n`)
-      }
-    }
-
-    if (observeWorkerRuns) {
-      try {
-        const observed = await observeRuns(app, {limit: 100, emitInitial: false})
-        for (const event of observed.events) {
-          const body = formatObservationEvent(event)
-          process.stderr.write(`${body}\n`)
-          if (event.transitions.some(transition => transition.severity !== "info" || transition.field === "state")) {
-            await sendReport(agent, body).catch(error => {
-              process.stderr.write(`run observation report failed: ${String(error)}\n`)
-            })
-          }
+  try {
+    while (!closed) {
+      if (controlDms && broken) {
+        try {
+          await arm()
+        } catch (error) {
+          process.stderr.write(`dm subscription failed: ${String(error)}\n`)
         }
-      } catch (error) {
-        process.stderr.write(`run observation poll failed: ${String(error)}\n`)
       }
-    }
 
-    if (!active) {
-      const next = await nextQueued(agent)
-      if (next) {
-        const runningFile = path.join(agent.paths.history, `${next.item.id}.running.json`)
-        await rename(next.file, runningFile)
-        active = (async () => {
-          try {
-            const result = await runTask(app, id, next.item, runtime)
-            await record(agent, {...next.item, state: result.state})
-          } catch (error) {
-            await record(agent, {...next.item, state: "failed"})
-            process.stderr.write(`${String(error)}\n`)
-          } finally {
-            await rm(runningFile, {force: true})
-            active = undefined
+      if (controlDms) {
+        try {
+          await pollInbox(app, agent, defaults, liveSeenDmIds)
+        } catch (error) {
+          process.stderr.write(`dm fallback poll failed: ${String(error)}\n`)
+        }
+      }
+
+      if (repoWatch) {
+        try {
+          await pollRepoWatch(app, agent, repoWatch)
+        } catch (error) {
+          process.stderr.write(`repo watch poll failed: ${String(error)}\n`)
+        }
+      }
+
+      if (observeWorkerRuns) {
+        try {
+          const observed = await observeRuns(app, {limit: 100, emitInitial: false})
+          for (const event of observed.events) {
+            const body = formatObservationEvent(event)
+            process.stderr.write(`${body}\n`)
+            if (observationShouldReport(event)) {
+              await sendRuntimeReport(agent, body)
+            }
           }
-        })()
+        } catch (error) {
+          process.stderr.write(`run observation poll failed: ${String(error)}\n`)
+        }
       }
-    }
 
-    await new Promise(resolve => setTimeout(resolve, pollInterval))
+      if (!active) {
+        const next = await nextQueued(agent)
+        if (next) {
+          const runningFile = path.join(agent.paths.history, `${next.item.id}.running.json`)
+          await rename(next.file, runningFile)
+          active = (async () => {
+            try {
+              const result = await runTask(app, id, next.item, runtime)
+              await record(agent, {...next.item, state: result.state})
+            } catch (error) {
+              await record(agent, {...next.item, state: "failed"})
+              process.stderr.write(`${String(error)}\n`)
+            } finally {
+              await rm(runningFile, {force: true})
+              active = undefined
+            }
+          })()
+        }
+      }
+
+      await new Promise(resolve => setTimeout(resolve, pollInterval))
+    }
+  } finally {
+    cleanup()
   }
 }

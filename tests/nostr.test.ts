@@ -6,6 +6,7 @@ import {
   profileRelays,
   getSelfNpub,
   outboxRelays,
+  relayTagValues,
   relayListBootstrapRelays,
   relayListDiscoveryRelays,
   relayListPublishRelays,
@@ -155,5 +156,14 @@ describe("nostr relay selection", () => {
 
     agent.agent.reporting.allowFrom = ["npub1agentoverride0000000000000000000000000000000000000000000000000000"]
     expect(allowFrom(agent)).toEqual(["npub1agentoverride0000000000000000000000000000000000000000000000000000"])
+  })
+
+  test("reads DM relay list compatibility tags", () => {
+    expect(relayTagValues([
+      ["relay", "wss://dm.example.com"],
+      ["r", "wss://dm.example.com"],
+      ["r", "wss://other.example.com"],
+      ["p", "not-a-relay"],
+    ])).toEqual(["wss://dm.example.com", "wss://other.example.com"])
   })
 })

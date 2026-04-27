@@ -161,7 +161,7 @@ export type BuildPullRequestInput = {
   recipients?: string[]
   tipCommitOid: string
   clone?: string[]
-  branchName?: string
+  targetBranch?: string
   mergeBase?: string
   tags?: ExtraTags
 }
@@ -180,6 +180,8 @@ export type BuildPullRequestUpdateInput = {
 const nowSec = () => Math.floor(Date.now() / 1000)
 
 const uniq = (items: string[]) => Array.from(new Set(items.filter(Boolean)))
+
+const isPubkey = (value: string) => /^[0-9a-f]{64}$/i.test(value)
 
 const repoContextFile = (checkout: string) => path.join(checkout, ".openteam", "repo-context.json")
 
@@ -539,7 +541,7 @@ export const buildPullRequestEvent = ({
   recipients = [],
   tipCommitOid,
   clone = [],
-  branchName,
+  targetBranch,
   mergeBase,
   tags = [],
 }: BuildPullRequestInput): UnsignedRepoEvent => ({
@@ -553,7 +555,7 @@ export const buildPullRequestEvent = ({
     ...labels.map(label => ["t", label]),
     ["c", tipCommitOid],
     ...(clone.length > 0 ? [["clone", ...clone]] : []),
-    ...(branchName ? [["branch-name", branchName]] : []),
+    ...(targetBranch ? [["branch-name", targetBranch]] : []),
     ...(mergeBase ? [["merge-base", mergeBase]] : []),
     ...tags,
   ],
@@ -585,6 +587,28 @@ export const buildPullRequestUpdateEvent = ({
 })
 
 export const repoAddrForPublishTarget = (target: ResolvedRepoPublishTarget) => repoAddress(target.identity)
+
+export const repoMaintainerPubkeys = (identity: Pick<RepoIdentity, "ownerPubkey" | "rawTags">) => uniq([
+  identity.ownerPubkey,
+  ...identity.rawTags
+    .filter(tag => tag[0] === "maintainers" || tag[0] === "maintainer")
+    .flatMap(tag => tag.slice(1)),
+]).filter(isPubkey)
+
+export const pullRequestCloneUrlsForTarget = (
+  target: Pick<ResolvedRepoPublishTarget, "scope" | "identity" | "context">,
+  explicit: string[] = [],
+) => {
+  if (explicit.length > 0) return uniq(explicit)
+  if (target.scope !== "upstream") return []
+  const source = target.context?.repo
+  if (!source || source.key === target.identity.key) return []
+  return uniq(source.cloneUrls)
+}
+
+export const upstreamPullRequestNeedsClone = (
+  target: Pick<ResolvedRepoPublishTarget, "scope" | "identity" | "context">,
+) => target.scope === "upstream" && Boolean(target.context?.repo && target.context.repo.key !== target.identity.key)
 
 export const publishPolicySummary = (target: ResolvedRepoPublishTarget) => ({
   scope: target.scope,

@@ -1,3 +1,6 @@
 [Unit]
 Description=openteam agents target
 Wants=openteam-agent@orchestrator-01.service
+
+[Install]
+WantedBy=default.target

@@ -11,7 +11,7 @@ type Evt = {
 
 const sortAsc = <T extends {created_at: number}>(items: T[]) => items.sort((a, b) => a.created_at - b.created_at)
 
-const parse = (
+export const parseInboundDmEvent = (
   agent: PreparedAgent,
   allowed: Set<string>,
   self: string,
@@ -25,6 +25,7 @@ const parse = (
   try {
     const body = decryptFrom(agent, event.pubkey, event.content).trim()
     if (!body) return
+    seen.add(event.id)
     return {
       id: event.id,
       fromHex: event.pubkey,
@@ -35,6 +36,21 @@ const parse = (
   } catch {
     return
   }
+}
+
+export const parseInboundDmEvents = (
+  agent: PreparedAgent,
+  allowed: Set<string>,
+  self: string,
+  seen: Set<string>,
+  events: Evt[],
+) => {
+  const messages: InboundDm[] = []
+  for (const event of sortAsc(events)) {
+    const message = parseInboundDmEvent(agent, allowed, self, seen, event)
+    if (message) messages.push(message)
+  }
+  return messages
 }
 
 export const pollInboundTasks = async (
@@ -59,13 +75,7 @@ export const pollInboundTasks = async (
     }, secretKey(agent)),
   )
 
-  const messages: InboundDm[] = []
-  for (const event of events) {
-    const message = parse(agent, allowedHex, selfHex, seenIds, event)
-    if (message) messages.push(message)
-  }
-
-  return messages
+  return parseInboundDmEvents(agent, allowedHex, selfHex, seenIds, events)
 }
 
 export const subscribeInboundTasks = async (
@@ -96,7 +106,7 @@ export const subscribeInboundTasks = async (
     },
     secretKey(agent),
     event => {
-      const message = parse(agent, allowedHex, selfHex, seenIds, event as Evt)
+      const message = parseInboundDmEvent(agent, allowedHex, selfHex, seenIds, event as Evt)
       if (message) onmessage(message)
     },
     onclose,

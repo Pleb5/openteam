@@ -154,8 +154,8 @@ Important tags for PR `1618`:
 - `subject`
 - `t` labels
 - `c` tip commit OID
-- optional `clone`
-- optional `branch-name`
+- optional `clone` source fork URLs when the tip commit is not fetchable from the target repo
+- optional `branch-name` target branch to merge into, not the worker/source branch
 - optional `merge-base`
 - optional `p` recipients
 
@@ -173,6 +173,8 @@ When publishing raw PR events:
 
 - derive tag shape from the repo and current state, not memory alone
 - prefer the runtime helper: `openteam repo publish pr ...` or `openteam repo publish pr-update ...`
+- use `--target-branch <name>` only for the merge target branch; never pass the worker/source branch as `--branch` or NIP-34 `branch-name`
+- rely on the runtime helper to infer source fork clone URLs and repo owner/maintainer recipients from `.openteam/repo-context.json` when publishing upstream PRs
 - use `openteam repo policy` when you need to inspect the resolved repo relay policy
 - do not substitute DM, app-data, signer, or bootstrap relays for repo-side publishing
 

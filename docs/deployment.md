@@ -191,12 +191,24 @@ If you need headed mode on a server, you will need a graphical session or a virt
 
 ## systemd --user setup
 
-`openteam` ships user service files in:
+Use the CLI wrapper for normal installs and restarts:
+
+```bash
+openteam service install
+openteam service start
+openteam service status
+openteam service logs --tail
+```
+
+`openteam service install` writes generated user units for the current checkout to `~/.config/systemd/user/` and runs `systemctl --user daemon-reload`.
+`openteam service restart` is the normal command after modifying openteam code or configuration used by the long-running listener.
+
+The source unit files live in:
 
 - `systemd/openteam-agent@.service`
 - `systemd/openteam.target`
 
-Install them into the user systemd directory:
+Manual equivalent:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -233,7 +245,7 @@ journalctl --user -u openteam-agent@orchestrator-01 -f
 Enable at login:
 
 ```bash
-systemctl --user enable openteam.target
+openteam service enable
 ```
 
 ## Keep user services alive without login

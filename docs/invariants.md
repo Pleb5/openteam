@@ -16,6 +16,8 @@ These are runtime rules that must be enforced by code and tests, not only by age
 - The orchestrator is the only operator DM control-plane agent.
 - Worker DMs from operators are not accepted as instructions.
 - Worker Nostr inputs, such as triage issue events, are task inputs, not operator control.
+- Runtime-owned DM reporting uses the orchestrator identity; workers must not improvise operator status DMs.
+- `reporting.allowFrom` grants inbound DM authority, while `reporting.reportTo` controls default job report recipients.
 - Provisioning sessions may prepare the repo only; they must not launch, enqueue, start, stop, or watch workers.
 - Worker temp files, caches, repro clones, and generated artifacts should stay under checkout-local `.openteam/` runtime paths.
 - Worker Git pushes from managed checkouts must use openteam provider-token credentials for the fork remote, not ambient user credential helpers.

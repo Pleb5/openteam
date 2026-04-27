@@ -949,12 +949,22 @@ describe("runtime invariants", () => {
   })
 
   test("provision mode blocks worker-control commands", () => {
+    const previous = process.env.OPENTEAM_PHASE
     process.env.OPENTEAM_PHASE = "provision"
 
-    expect(() => assertControlAllowed("launch")).toThrow("worker-control commands are disabled")
-    expect(() => assertControlAllowed("work on repo")).toThrow("worker-control commands are disabled")
-    expect(() => assertControlAllowed("repo")).not.toThrow()
-    expect(() => assertControlAllowed("verify")).not.toThrow()
+    try {
+      expect(() => assertControlAllowed("launch")).toThrow("worker-control commands are disabled")
+      expect(() => assertControlAllowed("service")).toThrow("worker-control commands are disabled")
+      expect(() => assertControlAllowed("work on repo")).toThrow("worker-control commands are disabled")
+      expect(() => assertControlAllowed("repo")).not.toThrow()
+      expect(() => assertControlAllowed("verify")).not.toThrow()
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENTEAM_PHASE
+      } else {
+        process.env.OPENTEAM_PHASE = previous
+      }
+    }
   })
 
   test("provision logs detect recursive worker-control command attempts", () => {

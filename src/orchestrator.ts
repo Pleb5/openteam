@@ -1,15 +1,23 @@
-import type {AppCfg, TaskMode} from "./types.js"
-import {listWorkers, startJob, startWorker, stopWorker} from "./supervisor.js"
+import type {AppCfg, TaskItem, TaskMode} from "./types.js"
+import {startJob, startWorker, stopWorker} from "./supervisor.js"
+import {statusReport} from "./commands/status.js"
 
 type DispatchResult = {
   handled: boolean
   summary: string
   payload: unknown
+  message?: string
 }
 
 type WorkerRole = "builder" | "triager" | "qa" | "researcher"
 
+export type DispatchContext = {
+  recipients?: string[]
+  source?: TaskItem["source"]
+}
+
 export type ParsedOperatorRequest =
+  | {kind: "help"}
   | {kind: "status"}
   | {kind: "stop"; name: string}
   | {kind: "start"; role: WorkerRole; target: string; mode?: TaskMode; model?: string}
@@ -31,6 +39,63 @@ const parseMode = (value?: string): TaskMode | undefined => {
 }
 
 const clean = (value: string) => value.trim().replace(/^['"]|['"]$/g, "")
+
+const formatStatusReport = (report: Awaited<ReturnType<typeof statusReport>>) => {
+  const summary = report.summary
+  const lines = [
+    "status",
+    `managed workers: ${summary.liveManagedWorkers} live / ${summary.managedWorkers} total`,
+    `recent runs: ${summary.runningRuns} running, ${summary.staleRuns} stale / ${summary.recentRuns} total`,
+    `leases: ${summary.staleLeases} stale / ${summary.leasedContexts} leased`,
+  ]
+
+  if (report.workers.length > 0) {
+    lines.push(
+      "workers:",
+      ...report.workers.slice(0, 5).map(worker =>
+        `- ${worker.name}: ${worker.running ? "running" : "stopped"} ${worker.role}${worker.target ? ` on ${worker.target}` : ""}`,
+      ),
+    )
+    if (report.workers.length > 5) lines.push(`- ... ${report.workers.length - 5} more`)
+  }
+
+  if (report.staleRuns.length > 0) {
+    lines.push(`stale runs need attention: ${report.staleRuns.slice(0, 3).map(run => run.runId).join(", ")}`)
+  }
+
+  return lines.join("\n")
+}
+
+const formatWorkerEntry = (verb: "started" | "launched" | "stopped", entry: {
+  name: string
+  role?: string
+  target?: string
+  mode?: TaskMode
+  runtimeId?: string
+  logFile?: string
+}) => [
+  `${verb} ${entry.name}`,
+  entry.role ? `role: ${entry.role}` : "",
+  entry.target ? `target: ${entry.target}` : "",
+  entry.mode ? `mode: ${entry.mode}` : "",
+  entry.runtimeId ? `runtime: ${entry.runtimeId}` : "",
+  entry.logFile ? `log: ${entry.logFile}` : "",
+].filter(Boolean).join("\n")
+
+const helpMessage = () => [
+  "openteam DM commands",
+  "status",
+  "worker list",
+  "what is running?",
+  "stop <worker-name>",
+  "start <builder|triager|qa|researcher> on <target> [in web|code mode] [with model <model>]",
+  "watch <target> [as builder|triager|qa|researcher] [in web|code mode] [with model <model>]",
+  "research <target> [in web|code mode] [with model <model>] [in parallel] and <task>",
+  "plan <target> [in web|code mode] [with model <model>] [in parallel] and <goal>",
+  "work on <target> [as builder|triager|qa|researcher] [in web|code mode] [with model <model>] [in parallel] and do <task>",
+  "",
+  "Anything else falls back to the conversational orchestrator.",
+].join("\n")
 
 const parseWork = (input: string) => {
   const match = input.match(new RegExp(`^work on\\s+(.+?)(?:\\s+as\\s+${rolePattern})?(?:\\s+in\\s+(web|code)\\s+mode)?(?:\\s+with\\s+model\\s+(.+?))?(?:\\s+in\\s+parallel)?\\s+and\\s+do\\s+([\\s\\S]+)$`, "i"))
@@ -86,6 +151,10 @@ export const parseOperatorRequest = (request: string): ParsedOperatorRequest | u
   const trimmed = request.trim()
   if (!trimmed) return
 
+  if (/^(help|\?)$/i.test(trimmed)) {
+    return {kind: "help"}
+  }
+
   if (/^(status|worker list|what is running\??)$/i.test(trimmed)) {
     return {kind: "status"}
   }
@@ -108,7 +177,11 @@ export const parseOperatorRequest = (request: string): ParsedOperatorRequest | u
   if (work) return {kind: "work", ...work}
 }
 
-export const dispatchOperatorRequest = async (app: AppCfg, request: string): Promise<DispatchResult> => {
+export const dispatchOperatorRequest = async (
+  app: AppCfg,
+  request: string,
+  context: DispatchContext = {},
+): Promise<DispatchResult> => {
   const parsed = parseOperatorRequest(request)
   if (!request.trim()) {
     return {handled: false, summary: "empty request", payload: null}
@@ -118,14 +191,24 @@ export const dispatchOperatorRequest = async (app: AppCfg, request: string): Pro
     return {handled: false, summary: "request not matched by orchestrator control verbs", payload: null}
   }
 
+  if (parsed.kind === "help") {
+    return {handled: true, summary: "listed DM commands", payload: null, message: helpMessage()}
+  }
+
   if (parsed.kind === "status") {
-    const workers = await listWorkers(app)
-    return {handled: true, summary: `listed ${workers.length} managed workers`, payload: workers}
+    const report = await statusReport(app)
+    const summary = report.summary
+    return {
+      handled: true,
+      summary: `status: ${summary.liveManagedWorkers}/${summary.managedWorkers} managed workers live, ${summary.recentRuns} recent runs, ${summary.staleRuns} stale runs`,
+      payload: report,
+      message: formatStatusReport(report),
+    }
   }
 
   if (parsed.kind === "stop") {
     const entry = await stopWorker(app, parsed.name)
-    return {handled: true, summary: `stopped ${entry.name}`, payload: entry}
+    return {handled: true, summary: `stopped ${entry.name}`, payload: entry, message: formatWorkerEntry("stopped", entry)}
   }
 
   if (parsed.kind === "start") {
@@ -136,8 +219,10 @@ export const dispatchOperatorRequest = async (app: AppCfg, request: string): Pro
       target: parsed.target,
       mode: parsed.mode,
       model: parsed.model,
+      recipients: context.recipients,
+      source: context.source,
     })
-    return {handled: true, summary: `started ${entry.name}`, payload: entry}
+    return {handled: true, summary: `started ${entry.name}`, payload: entry, message: formatWorkerEntry("started", entry)}
   }
 
   if (parsed.kind === "watch") {
@@ -148,8 +233,10 @@ export const dispatchOperatorRequest = async (app: AppCfg, request: string): Pro
       target: parsed.target,
       mode: parsed.mode,
       model: parsed.model,
+      recipients: context.recipients,
+      source: context.source,
     })
-    return {handled: true, summary: `started ${entry.name}`, payload: entry}
+    return {handled: true, summary: `started ${entry.name}`, payload: entry, message: formatWorkerEntry("started", entry)}
   }
 
   if (parsed.kind === "research" || parsed.kind === "work") {
@@ -162,8 +249,10 @@ export const dispatchOperatorRequest = async (app: AppCfg, request: string): Pro
       model: parsed.model,
       task: parsed.task,
       parallel: parsed.parallel,
+      recipients: context.recipients,
+      source: context.source,
     })
-    return {handled: true, summary: `launched ${entry.name}`, payload: entry}
+    return {handled: true, summary: `launched ${entry.name}`, payload: entry, message: formatWorkerEntry("launched", entry)}
   }
 
   return {handled: false, summary: "request not matched by orchestrator control verbs", payload: null}

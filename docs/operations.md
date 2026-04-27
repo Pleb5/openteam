@@ -63,6 +63,7 @@ Short orchestrator requests from CLI:
 
 ```bash
 openteam "status"
+openteam "help"
 openteam "start triager on 30617:<owner-pubkey>:<repo-d-tag>"
 openteam "research nostr://<owner-npub>/<repo-d-tag> and identify the safest fix direction for issue <id>"
 openteam "plan nostr://<owner-npub>/<repo-d-tag> and produce a builder handoff for <goal>"
@@ -70,6 +71,16 @@ openteam "work on <repo-hint-or-alias> as builder in web mode and do investigate
 openteam "work on nostr://<owner-npub>/<repo-d-tag> as builder and do fix the failing test"
 openteam "work on nostr://<owner-npub>/<repo-d-tag> as builder in web mode in parallel and do investigate a separate issue"
 ```
+
+The same fast grammar is available over Nostr DM to `orchestrator-01` for allowlisted operators.
+Use `help` or `?` over DM to see the supported forms.
+If a DM does not match the fast grammar, openteam routes it to the conversational orchestrator path, similar to the local TUI, and sends back only a concise operator-facing response.
+
+DM reporting is intentionally sparse.
+DM-originated jobs report to the sender plus configured `reporting.reportTo` recipients.
+TUI/CLI-originated jobs report important lifecycle events to `reporting.reportTo` when configured.
+`reporting.allowFrom` authorizes inbound control DMs; it is not a notification subscription list.
+Expected DM reports are launch/start, browser URL availability, failed, needs-review/succeeded, and warning/critical run observations.
 
 Targets are Nostr-first.
 Aliases, local paths, git URLs, and folder names are only hints; openteam must resolve the target to a kind `30617` repository announcement before it creates or reuses a local context.
@@ -209,6 +220,8 @@ Worker process policy:
 - managed Git checkouts use an openteam repo-local credential helper for configured provider fork remotes
 - workers should use plain `git push origin <branch>` from the managed checkout and should not use `gh auth`, host-global credential helpers, or personal Git remotes for openteam fork publication
 - Nostr-git PR publication should use `openteam repo publish pr ...` after pushing the branch; global `gh auth` is not part of the default publication path
+- for NIP-34 PRs, `branch-name` means the target branch to merge into; use `--target-branch` for that and never pass the worker/source branch as `--branch`
+- when publishing an upstream PR from an orchestrator-owned fork, `openteam repo publish pr ...` infers source fork `clone` URLs and repo owner/maintainer `p` recipients from `.openteam/repo-context.json`
 - Normal `repo publish pr` and `repo publish pr-update` require strong evidence from the active run/checkout; use `--draft` or `--wip` only when incomplete verification is intentional
 - workers should treat GUI openers, system package installs, writes outside checkout/runtime, and broad destructive cleanup as blockers unless explicitly authorized
 
@@ -290,20 +303,27 @@ systemd/
 
 ### Recommended service workflow
 
-Install or copy user units, then use:
+Use the built-in service wrapper instead of manually backgrounding `serve`.
+`service start` and `service restart` refresh the generated user-systemd units from the current checkout before touching the service.
 
 ```bash
-systemctl --user daemon-reload
-systemctl --user start openteam-agent@orchestrator-01
-systemctl --user status openteam-agent@orchestrator-01
-journalctl --user -u openteam-agent@orchestrator-01 -f
+openteam service install
+openteam service start
+openteam service status
+openteam service logs --tail
 ```
 
-Enable the primary orchestrator service:
+After changing openteam code or configuration used by the long-running listener:
 
 ```bash
-systemctl --user enable openteam.target
-systemctl --user start openteam.target
+openteam service restart
+openteam service restart --tail
+```
+
+Enable the primary orchestrator service at login:
+
+```bash
+openteam service enable
 ```
 
 Keep services alive without interactive login:
@@ -380,7 +400,8 @@ Healthy startup usually means:
 - profile sync shows at least one accepted relay for the required profile data
 - the browser bootstrap task can log in through the managed bunker
 - the worker loop starts without repeated relay/auth errors
-- orchestrator subscription-first DM intake stays connected, with polling only as fallback
+- orchestrator subscription-first DM intake stays connected, with polling only as fallback, and duplicate relay delivery is not enqueued twice
+- important TUI/CLI job reports are sent to `reporting.reportTo` when configured
 
 ## Known Imperfect States
 

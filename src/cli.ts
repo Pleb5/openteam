@@ -13,6 +13,7 @@ import {
   relaySyncCommand,
 } from "./commands/profile.js"
 import {repoPolicyCommand, repoPublishCommand} from "./commands/repo-publish.js"
+import {serviceCommand} from "./commands/service.js"
 import {verifyCommand} from "./commands/verify.js"
 import {
   runsCleanupStale,
@@ -26,11 +27,12 @@ import {
 import {createContinuationTaskItem} from "./run-continuation.js"
 import {runsObserveCommand, runsWatchCommand} from "./run-observer.js"
 import {statusReport} from "./commands/status.js"
+import {recipientsFromEnv, sourceFromEnv} from "./task-context.js"
 import {runTask, enqueueTask, prepareOnly, serveAgent} from "./launcher.js"
 import {dispatchOperatorRequest} from "./orchestrator.js"
 import {refreshRuntimeStatus} from "./runtime-status.js"
 import {listWorkers, startWorker, stopWorker} from "./supervisor.js"
-import type {AppCfg, TaskMode} from "./types.js"
+import type {AppCfg, TaskItem, TaskMode} from "./types.js"
 import {
   destroyNostr,
   dmRelays,
@@ -80,8 +82,9 @@ const help = () => {
   repo publish label --label <label> [--target-id <event-id>] [--namespace <ns>] [--p <pubkey>] [--delete] [--dry-run]
   repo publish role-label --target-id <event-id> --role <assignee|reviewer> --p <pubkey> [--dry-run]
   repo publish status --root-id <event-id> --state <open|applied|closed|draft> [--content <text>] [--dry-run]
-  repo publish pr --tip <commit> [--subject <text>] [--clone <url>] [--branch <name>] [--draft|--wip] [--dry-run]
+  repo publish pr --tip <commit> [--subject <text>] [--clone <url>] [--target-branch <name>] [--draft|--wip] [--dry-run]
   repo publish pr-update --pr-id <event-id> --pr-author <pubkey> --tip <commit> [--draft|--wip] [--dry-run]
+  service install|start|stop|restart|status|logs|enable|disable
   relay sync <agentId>
   profile sync <agentId>
   tokens sync <agentId>  # alias for profile sync
@@ -93,6 +96,9 @@ const value = (args: string[], key: string) => {
   if (index === -1) return ""
   return args[index + 1] ?? ""
 }
+
+const values = (args: string[], key: string) =>
+  args.flatMap((item, index) => item === key ? [args[index + 1] ?? ""] : []).filter(Boolean)
 
 const flag = (args: string[], key: string) => args.includes(key)
 
@@ -127,12 +133,38 @@ const mode = (args: string[]): TaskMode | undefined => {
   return value
 }
 
-const taskOpts = (args: string[]) => ({
+const taskRecipients = (args: string[]) => {
+  const recipients = [...values(args, "--recipient"), ...recipientsFromEnv()]
+  return recipients.length > 0 ? Array.from(new Set(recipients)) : undefined
+}
+
+const taskSource = (args: string[]): TaskItem["source"] | undefined => {
+  const envSource = sourceFromEnv()
+  const kind = value(args, "--source-kind") || envSource?.kind || ""
+  if (!kind) return undefined
+  if (kind !== "dm" && kind !== "local" && kind !== "repo-event") {
+    throw new Error(`invalid --source-kind ${kind}`)
+  }
+  return {
+    kind,
+    eventId: value(args, "--source-event-id") || envSource?.eventId,
+    from: value(args, "--source-from") || envSource?.from,
+  }
+}
+
+const taskOpts = (args: string[]): Partial<TaskItem> => ({
   target: value(args, "--target") || undefined,
   mode: mode(args),
   model: value(args, "--model") || undefined,
   runtimeId: value(args, "--runtime-id") || undefined,
   parallel: flag(args, "--parallel") || undefined,
+  recipients: taskRecipients(args),
+  source: taskSource(args),
+})
+
+const dispatchContext = (args: string[]) => ({
+  recipients: taskRecipients(args),
+  source: taskSource(args),
 })
 
 type CapabilityCheck = {
@@ -253,9 +285,9 @@ const main = async () => {
     return
   }
 
-  const known = new Set(["doctor", "console", "prepare", "launch", "enqueue", "serve", "worker", "runs", "browser", "verify", "repo", "relay", "profile", "tokens", "git"])
+  const known = new Set(["doctor", "console", "prepare", "launch", "enqueue", "serve", "worker", "runs", "browser", "verify", "repo", "service", "relay", "profile", "tokens", "git"])
   if (!known.has(cmd)) {
-    const handled = await dispatchOperatorRequest(app, args.join(" "))
+    const handled = await dispatchOperatorRequest(app, args.join(" "), dispatchContext(args))
     if (handled.handled) {
       console.log(JSON.stringify(handled, null, 2))
       return
@@ -408,6 +440,11 @@ const main = async () => {
 
   if (cmd === "repo" && sub === "publish") {
     await repoPublishCommand(app, must(args[2] ?? "", "repo publish helper"), args)
+    return
+  }
+
+  if (cmd === "service") {
+    await serviceCommand(app, sub, args)
     return
   }
 

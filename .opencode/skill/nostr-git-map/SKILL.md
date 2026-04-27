@@ -100,8 +100,8 @@ Important tags:
 - `subject`
 - `t` labels
 - `c` tip commit oid
-- optional `clone`
-- optional `branch-name`
+- optional `clone` source fork URLs when the tip commit is not fetchable from the target repo
+- optional `branch-name` target branch to merge into, not the source branch
 - optional `merge-base`
 - optional `p` recipients
 

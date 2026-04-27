@@ -11,12 +11,15 @@ import {
   buildRoleLabelEvent,
   buildStatusEvent,
   parseRawRepoEvent,
+  pullRequestCloneUrlsForTarget,
   publishPolicySummary,
   publishRepoEvent,
+  repoMaintainerPubkeys,
   repoAddrForPublishTarget,
   resolveRepoPublishTarget,
   type ExtraTags,
   type RepoPublishScope,
+  upstreamPullRequestNeedsClone,
 } from "../repo-publish.js"
 import {readVerificationResults} from "../verification.js"
 import type {AppCfg, TaskRunRecord} from "../types.js"
@@ -131,6 +134,40 @@ const draftLabels = (args: string[]) => [
 ]
 
 const draftTagExtras = (args: string[]) => draftLabels(args).map(label => ["t", label])
+
+export const pullRequestTargetBranch = (args: string[]) => {
+  const legacy = value(args, "--branch")
+  if (legacy) {
+    throw new Error([
+      "--branch is ambiguous and no longer maps to NIP-34 branch-name.",
+      "Use --target-branch for the merge target branch.",
+      "Do not pass the worker/source branch as branch-name; the source is represented by --tip plus source fork --clone URLs.",
+    ].join(" "))
+  }
+  return value(args, "--target-branch") || undefined
+}
+
+const pullRequestRecipients = (
+  target: Awaited<ReturnType<typeof resolveRepoPublishTarget>>,
+  args: string[],
+) => unique([
+  ...values(args, "--p"),
+  ...repoMaintainerPubkeys(target.identity),
+])
+
+const pullRequestCloneUrls = (
+  target: Awaited<ReturnType<typeof resolveRepoPublishTarget>>,
+  args: string[],
+) => {
+  const clone = pullRequestCloneUrlsForTarget(target, values(args, "--clone"))
+  if (upstreamPullRequestNeedsClone(target) && clone.length === 0) {
+    throw new Error([
+      "upstream PR publication needs source fork clone URLs.",
+      "The active repo context does not contain clone URLs for the orchestrator-owned fork; pass --clone <url> or repair the repo context.",
+    ].join(" "))
+  }
+  return clone
+}
 
 const pullRequestPublicationPolicy = async (
   target: Awaited<ReturnType<typeof resolveRepoPublishTarget>>,
@@ -265,6 +302,8 @@ export const repoPublishCommand = async (app: AppCfg, kind: string, args: string
 
   if (kind === "pr") {
     const publicationPolicy = await assertPullRequestPublicationAllowed(target, args, opts.dryRun)
+    const recipients = pullRequestRecipients(target, args)
+    const clone = pullRequestCloneUrls(target, args)
     const result = await publishRepoEvent(app, buildPullRequestEvent({
       repoAddr,
       subject: value(args, "--subject") || undefined,
@@ -273,10 +312,10 @@ export const repoPublishCommand = async (app: AppCfg, kind: string, args: string
         ...values(args, "--label"),
         ...draftLabels(args),
       ]),
-      recipients: values(args, "--p"),
+      recipients,
       tipCommitOid: must(value(args, "--tip"), "--tip"),
-      clone: values(args, "--clone"),
-      branchName: value(args, "--branch") || undefined,
+      clone,
+      targetBranch: pullRequestTargetBranch(args),
       mergeBase: value(args, "--merge-base") || undefined,
       tags,
     }), opts)
@@ -289,13 +328,15 @@ export const repoPublishCommand = async (app: AppCfg, kind: string, args: string
 
   if (kind === "pr-update") {
     const publicationPolicy = await assertPullRequestPublicationAllowed(target, args, opts.dryRun)
+    const recipients = pullRequestRecipients(target, args)
+    const clone = pullRequestCloneUrls(target, args)
     const result = await publishRepoEvent(app, buildPullRequestUpdateEvent({
       repoAddr,
       pullRequestEventId: must(value(args, "--pr-id"), "--pr-id"),
       pullRequestAuthorPubkey: must(value(args, "--pr-author"), "--pr-author"),
-      recipients: values(args, "--p"),
+      recipients,
       tipCommitOid: must(value(args, "--tip"), "--tip"),
-      clone: values(args, "--clone"),
+      clone,
       mergeBase: value(args, "--merge-base") || undefined,
       tags: [...tags, ...draftTagExtras(args)],
     }), opts)

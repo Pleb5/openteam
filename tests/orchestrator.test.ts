@@ -1,5 +1,43 @@
 import {describe, expect, test} from "bun:test"
-import {parseOperatorRequest} from "../src/orchestrator.js"
+import {mkdtemp} from "node:fs/promises"
+import {tmpdir} from "node:os"
+import path from "node:path"
+import {dispatchOperatorRequest, parseOperatorRequest} from "../src/orchestrator.js"
+import type {AppCfg} from "../src/types.js"
+
+const makeApp = (runtimeRoot: string): AppCfg => ({
+  root: process.cwd(),
+  config: {
+    runtimeRoot,
+    opencode: {binary: "opencode", model: "", agent: "build"},
+    browser: {
+      headless: false,
+      executablePath: "/usr/bin/chromium",
+      mcp: {name: "playwright", command: [], environment: {}},
+    },
+    providers: {},
+    repos: {},
+    reporting: {
+      dmRelays: [],
+      outboxRelays: [],
+      relayListBootstrapRelays: [],
+      appDataRelays: [],
+      signerRelays: [],
+      allowFrom: [],
+      reportTo: [],
+      pollIntervalMs: 5000,
+    },
+    nostr_git: {
+      graspServers: [],
+      gitDataRelays: [],
+      repoAnnouncementRelays: [],
+      forkGitOwner: "",
+      forkRepoPrefix: "",
+      forkCloneUrlTemplate: "",
+    },
+    agents: {},
+  },
+})
 
 describe("orchestrator operator request parsing", () => {
   test("parses researcher work requests", () => {
@@ -42,5 +80,26 @@ describe("orchestrator operator request parsing", () => {
       parallel: false,
       task: "Produce a research-backed implementation plan: produce a builder handoff",
     })
+  })
+
+  test("status dispatch uses operator runtime status", async () => {
+    const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
+    const result = await dispatchOperatorRequest(app, "status")
+
+    expect(result.handled).toBe(true)
+    expect(result.summary).toBe("status: 0/0 managed workers live, 0 recent runs, 0 stale runs")
+    expect(result.message).toContain("managed workers: 0 live / 0 total")
+    expect(result.message).toContain("recent runs: 0 running, 0 stale / 0 total")
+  })
+
+  test("help dispatch returns fast DM command grammar", async () => {
+    const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
+    const result = await dispatchOperatorRequest(app, "help")
+
+    expect(result.handled).toBe(true)
+    expect(result.summary).toBe("listed DM commands")
+    expect(result.message).toContain("openteam DM commands")
+    expect(result.message).toContain("work on <target>")
+    expect(result.message).toContain("Anything else falls back")
   })
 })

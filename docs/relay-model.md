@@ -202,6 +202,7 @@ Discovery/inspection targets:
 Advertised contents:
 
 - `dmRelays`
+- both `relay` and `r` relay URL tags are emitted for compatibility with NIP-17/NIP-51 client stacks; openteam accepts either form when reading
 
 Publish targets:
 
@@ -232,6 +233,10 @@ Mechanics:
 - subscription-first
 - polling fallback/catch-up
 - orchestrator-only; workers never accept instructions through this path
+- sender must be allowlisted in `reporting.allowFrom`
+- event ids are remembered so duplicate relay delivery or subscription/poll overlap does not enqueue the same DM twice
+- fast grammar is attempted first for `help`, `status`, `stop`, `start`, `watch`, `research`, `plan`, and `work on ... and do ...`
+- unmatched DMs are handled by the conversational orchestrator path and should return a concise operator-facing response
 
 ### Outbound operator DMs
 
@@ -241,6 +246,18 @@ Publish to:
 - the recipient's discovered `10050` inbox relays
 
 This gives redundancy without conflating relay identity with recipient discovery.
+
+Recipients:
+
+- DM-originated work reports to the DM sender and configured `reporting.reportTo` recipients
+- TUI/CLI-originated work reports important lifecycle events to `reporting.reportTo` when configured
+- `reporting.allowFrom` is authority only; it does not automatically subscribe an npub to reports
+
+Notification policy:
+
+- report launched/started, browser URL available, failed, needs-review/succeeded, and warning/critical run observations
+- suppress routine phase changes, tool chatter, and raw JSON/log output
+- workers do not send operator DMs directly; runtime reporting uses the orchestrator identity
 
 ## Profile Sync
 

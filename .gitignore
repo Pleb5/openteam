@@ -4,6 +4,7 @@ dist/
 .idea/
 .vscode/
 .codex
+.openteam/
 config/openteam.local.json
 config/openteam.secrets.env
 runtime/

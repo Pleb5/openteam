@@ -80,6 +80,7 @@ Purpose:
 
 - kind: `10050`
 - advertised contents: `dmRelays`
+- relay URL tags: writes both `relay` and `r` forms for client compatibility; reads both forms
 - publish targets: `outboxRelays + relayListBootstrapRelays`
 
 Purpose:
@@ -97,13 +98,18 @@ Use:
 
 - inbound task intake
 - immediate acknowledgement
-- completion/blocker reporting
+- fast deterministic operator commands such as `help`, `status`, `start`, `stop`, `watch`, `research`, `plan`, and `work on ... and do ...`
+- freeform operator requests that fall back to the conversational orchestrator path when no fast grammar matches
+- sparse job reporting: launched/started, browser URL, failed, needs-review/succeeded, and warning/critical observations
 
 Scope:
 
 - orchestrator only
 - workers must not accept instructions by DM
 - worker Nostr usage is limited to assigned repository workflows, identity/profile sync, and signer/browser needs
+- `allowFrom` controls who may instruct the orchestrator
+- `reportTo` controls default notification recipients for TUI/CLI-originated work
+- DM-originated work reports to the sender plus configured report recipients
 
 Read path:
 
@@ -114,6 +120,12 @@ Write path:
 
 - own `dmRelays`
 - recipient-discovered `10050` inbox relays
+
+Reporting policy:
+
+- runtime-owned, not worker-authored
+- no routine phase spam or raw log dumps
+- detached worker jobs receive task source/recipient context so final reports can be routed back to the DM sender
 
 Encryption:
 
@@ -185,6 +197,8 @@ These are not all runtime-owned, but they are central to agent skills.
 
 - `1618` pull request
 - `1619` pull request update
+- `c` identifies the source tip commit; `clone` identifies where that source commit can be fetched when it lives on an orchestrator fork
+- `branch-name` is the target branch to merge into, not the worker/source branch
 
 ### Status
 
