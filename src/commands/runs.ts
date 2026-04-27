@@ -391,6 +391,13 @@ const runListView = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
     baseAgentId: record.baseAgentId,
     role: record.role,
     target: record.target,
+    subject: record.subject ? {
+      kind: record.subject.kind,
+      eventId: record.subject.encodedEvent ?? record.subject.eventId,
+      repo: record.subject.repo?.key ?? record.subject.repoTarget,
+      path: record.subject.path,
+      tipCommit: record.subject.tipCommit,
+    } : undefined,
     mode: record.mode,
     startedAt: record.startedAt,
     finishedAt: record.finishedAt,

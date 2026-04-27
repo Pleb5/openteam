@@ -232,6 +232,7 @@ export type TaskContinuation = {
   prBlockers: string[]
   carryEvidence: boolean
   evidenceResults: VerificationRunnerResult[]
+  subject?: ResolvedTaskSubject
   createdAt: string
 }
 
@@ -239,6 +240,13 @@ export type TaskSource = {
   kind: "dm" | "local" | "repo-event"
   eventId?: string
   from?: string
+}
+
+export type TaskSubject = {
+  kind: "repo-pr-event"
+  eventId: string
+  repoTarget?: string
+  path?: string
 }
 
 export type TaskItem = {
@@ -255,6 +263,7 @@ export type TaskItem = {
   recipients?: string[]
   continuation?: TaskContinuation
   source?: TaskSource
+  subject?: TaskSubject
 }
 
 export type AgentPaths = {
@@ -357,6 +366,31 @@ export type ResolvedRepoTarget = {
   target: string
 }
 
+export type ResolvedTaskSubject = {
+  kind: "repo-pr-event"
+  eventId: string
+  encodedEvent?: string
+  repoTarget?: string
+  environmentCheckout?: string
+  path?: string
+  checkout?: string
+  repo?: {
+    key: string
+    ownerNpub: string
+    identifier: string
+  }
+  relays?: string[]
+  eventKind?: number
+  eventAuthor?: string
+  baseCommit?: string
+  tipCommit?: string
+  targetBranch?: string
+  cloneUrls?: string[]
+  fetched?: boolean
+  checkedOut?: boolean
+  warnings?: string[]
+}
+
 export type PreparedAgent = {
   app: AppCfg
   id: string
@@ -379,6 +413,7 @@ export type LaunchResult = {
   verificationResults?: Array<Pick<VerificationRunnerResult, "id" | "kind" | "state" | "evidenceType" | "source" | "note" | "blocker" | "error" | "logFile" | "artifacts" | "screenshots" | "url" | "flow">>
   task: string
   target: string
+  subject?: ResolvedTaskSubject
   mode: TaskMode
   contextId?: string
   checkout?: string
@@ -410,6 +445,7 @@ export type TaskRunRecord = {
   task: string
   source?: TaskItem["source"]
   continuation?: TaskContinuation
+  subject?: ResolvedTaskSubject
   model?: string
   target?: string
   mode?: TaskMode
@@ -522,6 +558,7 @@ export type AgentRuntimeState = {
   durationMs?: number
   mode?: TaskMode
   target?: string
+  subject?: ResolvedTaskSubject
   baseAgentId?: string
   runtimeId?: string
   parallel?: boolean

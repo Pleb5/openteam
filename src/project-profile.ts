@@ -55,6 +55,7 @@ const packageJsonInfo = async (checkout: string) => {
   try {
     const parsed = JSON.parse(await readFile(file, "utf8")) as {
       packageManager?: string
+      workspaces?: unknown
       scripts?: Record<string, string>
       dependencies?: Record<string, string>
       devDependencies?: Record<string, string>
@@ -83,6 +84,21 @@ const hasPackageDependency = (
   }
   return Object.keys(deps).some(name => pattern.test(name))
 }
+
+const workspaceProtocolDependencies = (
+  pkg: Awaited<ReturnType<typeof packageJsonInfo>>,
+) => {
+  const deps = {
+    ...(pkg?.dependencies ?? {}),
+    ...(pkg?.devDependencies ?? {}),
+  }
+  return Object.entries(deps)
+    .filter(([, version]) => version.startsWith("workspace:"))
+    .map(([name]) => name)
+}
+
+const hasDeclaredWorkspace = (checkout: string, pkg: Awaited<ReturnType<typeof packageJsonInfo>>) =>
+  has(checkout, "pnpm-workspace.yaml") || Boolean(pkg?.workspaces)
 
 const addSignal = (signals: ProjectSignal[], stack: string, file: string, reason: string) => {
   signals.push({stack, file, reason})
@@ -118,6 +134,10 @@ export const detectProjectProfile = async (checkout: string, devEnv: DevEnv): Pr
     if (pkg?.scripts?.test) addCommand(commands, "node test", [manager, "run", "test"], "package.json scripts.test detected")
     if (pkg?.scripts?.build) addCommand(commands, "node build", [manager, "run", "build"], "package.json scripts.build detected")
     if (pkg?.scripts?.dev) addCommand(commands, "node dev", [manager, "run", "dev"], "package.json scripts.dev detected")
+    const workspaceDeps = workspaceProtocolDependencies(pkg)
+    if (workspaceDeps.length > 0 && !hasDeclaredWorkspace(checkout, pkg)) {
+      blockers.push(`package.json uses workspace: dependencies (${workspaceDeps.slice(0, 5).join(", ")}${workspaceDeps.length > 5 ? ", ..." : ""}) but this checkout has no workspace manifest; verify from the containing workspace or restore the missing workspace packages before installing.`)
+    }
   }
   if (has(checkout, "pnpm-workspace.yaml")) {
     addSignal(signals, "node", "pnpm-workspace.yaml", "pnpm workspace")
@@ -243,6 +263,7 @@ export const projectProfilePromptLines = (profile?: ProjectProfile) => {
     `Detected project stacks: ${profile.stacks.join(", ") || "none"}`,
     `Docs/check first: ${profile.docs.slice(0, 8).join(", ") || "none detected"}`,
     `Likely validation commands, hints only: ${commands.join("; ") || "none detected"}`,
+    `Known provisioning blockers: ${profile.blockers.slice(0, 5).join(" | ") || "none detected"}`,
     `Repo docs, declared scripts, and declared development environments override openteam project-profile hints.`,
   ]
 }

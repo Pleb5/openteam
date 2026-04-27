@@ -51,6 +51,7 @@ export const createRunContinuation = (
     prBlockers: policy.prBlockers,
     carryEvidence,
     evidenceResults: record.verification?.results ?? [],
+    subject: record.subject,
     createdAt: now(),
   }
 }
@@ -98,6 +99,12 @@ export const createContinuationTaskItem = (
     mode: record.mode,
     model: options.model || record.model,
     continuation,
+    subject: record.subject ? {
+      kind: record.subject.kind,
+      eventId: record.subject.encodedEvent ?? record.subject.eventId,
+      repoTarget: record.subject.repoTarget,
+      path: record.subject.path,
+    } : undefined,
     source: {kind: "local"},
   }
 }
@@ -122,6 +129,7 @@ export const continuationPromptLines = (continuation?: TaskContinuation) => {
     continuation.carryEvidence
       ? `Prior successful verification results have been carried into this checkout as context; failed or blocked prior results remain prompt context only. Add new evidence for what you verify now.`
       : `Prior verification results were not carried forward; record fresh evidence for this run.`,
+    continuation.subject ? `Prior review subject: ${continuation.subject.kind} ${continuation.subject.encodedEvent ?? continuation.subject.eventId}${continuation.subject.path ? ` at ${continuation.subject.path}` : ""}` : "",
     ...results.map(result => `Prior evidence: ${result}`),
   ].filter(Boolean)
 }

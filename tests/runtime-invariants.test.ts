@@ -22,6 +22,7 @@ import {resolveRepoTarget} from "../src/repo.js"
 import {continuationEvidenceForCarry, continuationPromptLines, createContinuationTaskItem} from "../src/run-continuation.js"
 import {observeRun, observeRuns} from "../src/run-observer.js"
 import {refreshRuntimeStatus} from "../src/runtime-status.js"
+import {resolveTaskSubject, subjectPromptLines} from "../src/subject.js"
 import {
   appendVerificationResultsFile,
   createVerificationPlan,
@@ -655,6 +656,12 @@ describe("runtime invariants", () => {
         checkout: path.join(runtimeRoot, "repos", "contexts", "repo", "ctx1", "checkout"),
         branch: "openteam/test",
       },
+      subject: {
+        kind: "repo-pr-event",
+        eventId: "5aaffa847ca00c7990b00f9566ca84643d2a27b23d68ea04ae8429cc2540dff0",
+        path: "libs/nostr-git-ui",
+        checkout: path.join(runtimeRoot, "repos", "contexts", "repo", "ctx1", "checkout", "libs", "nostr-git-ui"),
+      },
       doneContract: createDoneContract("builder", "web", "Fix repo card light theme UI"),
       verification: {
         plan: createVerificationPlan(app, "web", {stacks: ["web"]}),
@@ -685,13 +692,16 @@ describe("runtime invariants", () => {
 
     expect(item.agentId).toBe("builder-01")
     expect(item.mode).toBe("web")
+    expect(item.subject?.path).toBe("libs/nostr-git-ui")
     expect(item.continuation?.contextId).toBe("ctx1")
+    expect(item.continuation?.subject?.path).toBe("libs/nostr-git-ui")
     expect(item.continuation?.evidenceResults).toHaveLength(2)
     expect(continuationEvidenceForCarry(item.continuation)).toHaveLength(1)
     expect(noCarry.continuation?.evidenceResults).toHaveLength(2)
     expect(continuationEvidenceForCarry(noCarry.continuation)).toHaveLength(0)
     expect(item.task).toContain("repair the missing or weak verification evidence")
     expect(prompt.join(" ")).toContain("Prior missing evidence")
+    expect(prompt.join(" ")).toContain("Prior review subject")
     expect(prompt.join(" ")).toContain("browser:succeeded")
     expect(prompt.join(" ")).toContain("repo-native:failed")
   })
@@ -834,6 +844,175 @@ describe("runtime invariants", () => {
         createdAt: "2026-04-25T00:00:00.000Z",
       },
     })).rejects.toThrow("is busy")
+  })
+
+  test("task subjects resolve to submodule paths inside the environment checkout", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = path.join(runtimeRoot, "parent-checkout")
+    const childPath = "libs/nostr-git-ui"
+    const childUrl = "https://github.com/budabit-agent-gh/nostr-git-ui.git"
+    await mkdir(path.join(checkout, childPath), {recursive: true})
+    await writeFile(path.join(checkout, ".gitmodules"), [
+      `[submodule "${childPath}"]`,
+      `\tpath = ${childPath}`,
+      `\turl = ${childUrl}`,
+      "",
+    ].join("\n"))
+    const app = makeApp(runtimeRoot)
+    const parentKey = `30617:${ownerPubkey}:flotilla-budabit`
+    const childKey = `30617:${ownerPubkey}:nostr-git-ui`
+    await writeRegistry(app, {
+      version: 1,
+      forks: {},
+      contexts: {},
+      repos: {
+        [parentKey]: {
+          key: parentKey,
+          ownerPubkey,
+          ownerNpub,
+          identifier: "flotilla-budabit",
+          announcementEventId: "parent-event",
+          announcedAt: 1,
+          relays: ["wss://parent.example.com"],
+          cloneUrls: [],
+          rawTags: [["d", "flotilla-budabit"]],
+        },
+        [childKey]: {
+          key: childKey,
+          ownerPubkey,
+          ownerNpub,
+          identifier: "nostr-git-ui",
+          announcementEventId: "child-event",
+          announcedAt: 1,
+          relays: ["wss://child.example.com"],
+          cloneUrls: [childUrl],
+          rawTags: [["d", "nostr-git-ui"], ["clone", childUrl]],
+        },
+      },
+    })
+    const agent = await prepareAgent(app, "builder-01")
+    const environment: ResolvedRepoTarget = {
+      repo: app.config.repos.app,
+      identity: {
+        key: parentKey,
+        ownerPubkey,
+        ownerNpub,
+        identifier: "flotilla-budabit",
+        announcementEventId: "parent-event",
+        announcedAt: 1,
+        relays: ["wss://parent.example.com"],
+        cloneUrls: [],
+        rawTags: [["d", "flotilla-budabit"]],
+      },
+      context: {
+        id: "ctx-parent",
+        repoKey: parentKey,
+        path: runtimeRoot,
+        checkout,
+        mirror: "/tmp/mirror.git",
+        mode: "code",
+        baseRef: "HEAD",
+        baseCommit: "abc123",
+        branch: "openteam/test",
+        state: "leased",
+        createdAt: "2026-04-25T00:00:00.000Z",
+        updatedAt: "2026-04-25T00:00:00.000Z",
+      },
+      target: "flotilla-budabit",
+    }
+
+    const subject = await resolveTaskSubject({
+      app,
+      agent,
+      environment,
+      checkout,
+      subject: {
+        kind: "repo-pr-event",
+        eventId: "5aaffa847ca00c7990b00f9566ca84643d2a27b23d68ea04ae8429cc2540dff0",
+        repoTarget: "nostr-git-ui",
+      },
+    })
+
+    expect(subject.environmentCheckout).toBe(checkout)
+    expect(subject.path).toBe(childPath)
+    expect(subject.checkout).toBe(path.join(checkout, childPath))
+    expect(subject.repo?.key).toBe(childKey)
+    expect(subjectPromptLines(subject).join("\n")).toContain("Run provisioning, dependency installation, and verification from the environment checkout root")
+  })
+
+  test("task subject resolution fails before worker launch when the subject submodule is absent", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = path.join(runtimeRoot, "parent-checkout")
+    await mkdir(checkout, {recursive: true})
+    await writeFile(path.join(checkout, ".gitmodules"), [
+      `[submodule "libs/other"]`,
+      "\tpath = libs/other",
+      "\turl = https://github.com/example/other.git",
+      "",
+    ].join("\n"))
+    const app = makeApp(runtimeRoot)
+    const parentKey = `30617:${ownerPubkey}:flotilla-budabit`
+    const childKey = `30617:${ownerPubkey}:nostr-git-ui`
+    await writeRegistry(app, {
+      version: 1,
+      forks: {},
+      contexts: {},
+      repos: {
+        [childKey]: {
+          key: childKey,
+          ownerPubkey,
+          ownerNpub,
+          identifier: "nostr-git-ui",
+          announcementEventId: "child-event",
+          announcedAt: 1,
+          relays: [],
+          cloneUrls: ["https://github.com/budabit-agent-gh/nostr-git-ui.git"],
+          rawTags: [["d", "nostr-git-ui"]],
+        },
+      },
+    })
+    const agent = await prepareAgent(app, "builder-01")
+    const environment: ResolvedRepoTarget = {
+      repo: app.config.repos.app,
+      identity: {
+        key: parentKey,
+        ownerPubkey,
+        ownerNpub,
+        identifier: "flotilla-budabit",
+        announcementEventId: "parent-event",
+        announcedAt: 1,
+        relays: [],
+        cloneUrls: [],
+        rawTags: [["d", "flotilla-budabit"]],
+      },
+      context: {
+        id: "ctx-parent",
+        repoKey: parentKey,
+        path: runtimeRoot,
+        checkout,
+        mirror: "/tmp/mirror.git",
+        mode: "code",
+        baseRef: "HEAD",
+        baseCommit: "abc123",
+        branch: "openteam/test",
+        state: "leased",
+        createdAt: "2026-04-25T00:00:00.000Z",
+        updatedAt: "2026-04-25T00:00:00.000Z",
+      },
+      target: "flotilla-budabit",
+    }
+
+    await expect(resolveTaskSubject({
+      app,
+      agent,
+      environment,
+      checkout,
+      subject: {
+        kind: "repo-pr-event",
+        eventId: "5aaffa847ca00c7990b00f9566ca84643d2a27b23d68ea04ae8429cc2540dff0",
+        repoTarget: "nostr-git-ui",
+      },
+    })).rejects.toThrow("not present as a submodule")
   })
 
   test("operator status reports stale leases and writes runtime status", async () => {
@@ -1039,6 +1218,26 @@ describe("runtime invariants", () => {
     expect(profile.likelyCommands.some(item => item.command.join(" ") === "go test ./...")).toBe(true)
     expect(profile.likelyCommands.some(item => item.command.join(" ") === "pnpm run check")).toBe(true)
     expect(profile.guidance.join(" ")).toContain("override")
+  })
+
+  test("project profile flags standalone checkouts with workspace protocol dependencies", async () => {
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    await writeFile(path.join(checkout, "package.json"), JSON.stringify({
+      scripts: {
+        test: "vitest run",
+      },
+      dependencies: {
+        "@nostr-git/core": "workspace:*",
+      },
+      packageManager: "pnpm@10.0.0",
+    }))
+    await writeFile(path.join(checkout, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")
+
+    const profile = await detectProjectProfile(checkout, {kind: "none", commandPrefix: []})
+
+    expect(profile.likelyCommands.some(item => item.command.join(" ") === "pnpm run test")).toBe(true)
+    expect(profile.blockers.join(" ")).toContain("workspace: dependencies")
+    expect(profile.blockers.join(" ")).toContain("containing workspace")
   })
 
   test("verification plan records local runners without executing them", async () => {

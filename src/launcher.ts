@@ -22,6 +22,7 @@ import {writeRepoPublishContext} from "./repo-publish.js"
 import {releaseRepoContext, resolveRepoAnnouncementTarget, resolveRepoRelayPolicy, resolveRepoTarget, type RepoRelayPolicy} from "./repo.js"
 import {continuationEvidenceForCarry, continuationPromptLines} from "./run-continuation.js"
 import {formatObservationEvent, observeRuns} from "./run-observer.js"
+import {prepareTaskSubject, resolveTaskSubject, subjectPromptLines} from "./subject.js"
 import {encodeTaskContextEnv} from "./task-context.js"
 import {
   appendVerificationResultsFile,
@@ -48,7 +49,7 @@ import {
   syncOwnOutboxRelays,
   syncProfileTokens,
 } from "./nostr.js"
-import type {AppCfg, LaunchResult, PreparedAgent, TaskItem, AgentRuntimeState, RepoCfg, ResolvedRepoTarget, TaskMode, TaskRunPhase, TaskRunRecord} from "./types.js"
+import type {AppCfg, LaunchResult, PreparedAgent, TaskItem, AgentRuntimeState, RepoCfg, ResolvedRepoTarget, ResolvedTaskSubject, TaskMode, TaskRunPhase, TaskRunRecord} from "./types.js"
 
 type AgentRuntime = {
   bunker?: RunningBunker
@@ -173,35 +174,35 @@ const devEnvShimTools = [
   "prettier",
 ]
 
-const devEnvShim = (tool: string, devEnv: DevEnv) => {
-  const prelude = [
-    "#!/usr/bin/env bash",
-    "set -euo pipefail",
-    'shim_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"',
-    'checkout_dir="$(cd -- "$shim_dir/../.." && pwd)"',
-    'clean_path=""',
-    'IFS=: read -r -a path_parts <<< "${PATH:-}"',
-    'for path_part in "${path_parts[@]}"; do',
-    '  [[ "$path_part" == "$shim_dir" || -z "$path_part" ]] && continue',
-    '  if [[ -z "$clean_path" ]]; then',
-    '    clean_path="$path_part"',
-    "  else",
-    '    clean_path="$clean_path:$path_part"',
-    "  fi",
-    "done",
-    'export PATH="$clean_path"',
-  ]
+const checkoutToolShimPrelude = [
+  "#!/usr/bin/env bash",
+  "set -euo pipefail",
+  'shim_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"',
+  'checkout_dir="$(cd -- "$shim_dir/../.." && pwd)"',
+  'clean_path=""',
+  'IFS=: read -r -a path_parts <<< "${PATH:-}"',
+  'for path_part in "${path_parts[@]}"; do',
+  '  [[ "$path_part" == "$shim_dir" || -z "$path_part" ]] && continue',
+  '  if [[ -z "$clean_path" ]]; then',
+  '    clean_path="$path_part"',
+  "  else",
+  '    clean_path="$clean_path:$path_part"',
+  "  fi",
+  "done",
+  'export PATH="$clean_path"',
+]
 
+const devEnvShim = (tool: string, devEnv: DevEnv) => {
   if (devEnv.kind === "nix-flake") {
     return [
-      ...prelude,
+      ...checkoutToolShimPrelude,
       `exec nix develop "$checkout_dir" --command ${tool} "$@"`,
       "",
     ].join("\n")
   }
 
   return [
-    ...prelude,
+    ...checkoutToolShimPrelude,
     'args=""',
     'for arg in "$@"; do',
     '  printf -v quoted "%q" "$arg"',
@@ -212,12 +213,46 @@ const devEnvShim = (tool: string, devEnv: DevEnv) => {
   ].join("\n")
 }
 
-const writeDevEnvToolShims = async (checkout: string, devEnv: DevEnv) => {
-  if (devEnv.kind === "none") return
+const packageManagerShim = (tool: string) => [
+  ...checkoutToolShimPrelude,
+  `if command -v ${tool} >/dev/null 2>&1; then`,
+  `  exec ${tool} "$@"`,
+  "fi",
+  "if command -v corepack >/dev/null 2>&1; then",
+  `  exec corepack ${tool} "$@"`,
+  "fi",
+  `echo "openteam: ${tool} is not installed and corepack is unavailable in this checkout environment" >&2`,
+  "exit 127",
+  "",
+].join("\n")
+
+const packageJsonPackageManager = async (checkout: string) => {
+  const file = path.join(checkout, "package.json")
+  if (!existsSync(file)) return ""
+  try {
+    const parsed = JSON.parse(await readFile(file, "utf8")) as {packageManager?: string}
+    return parsed.packageManager ?? ""
+  } catch {
+    return ""
+  }
+}
+
+const checkoutPackageManagerShimTools = async (checkout: string) => {
+  const packageManager = await packageJsonPackageManager(checkout)
+  return [
+    ...(packageManager.startsWith("pnpm@") || existsSync(path.join(checkout, "pnpm-lock.yaml")) ? ["pnpm"] : []),
+    ...(packageManager.startsWith("yarn@") || existsSync(path.join(checkout, "yarn.lock")) ? ["yarn"] : []),
+  ]
+}
+
+const writeCheckoutToolShims = async (checkout: string, devEnv: DevEnv) => {
   const {bin} = await ensureCheckoutRuntimeDirs(checkout)
-  await Promise.all(devEnvShimTools.map(async tool => {
+  const shims = devEnv.kind === "none"
+    ? (await checkoutPackageManagerShimTools(checkout)).map(tool => ({tool, content: packageManagerShim(tool)}))
+    : devEnvShimTools.map(tool => ({tool, content: devEnvShim(tool, devEnv)}))
+  await Promise.all(shims.map(async ({tool, content}) => {
     const file = path.join(bin, tool)
-    await writeFile(file, devEnvShim(tool, devEnv), {mode: 0o755})
+    await writeFile(file, content, {mode: 0o755})
     await chmod(file, 0o755)
   }))
 }
@@ -356,18 +391,20 @@ const syncProjectSkills = async (agent: PreparedAgent, checkout: string) => {
   await cp(src, dest, {recursive: true})
 }
 
-const bootstrapPrompt = (agent: PreparedAgent, task: string, projectProfile?: ProjectProfile) => {
+const bootstrapPrompt = (agent: PreparedAgent, task: string, projectProfile?: ProjectProfile, subject?: ResolvedTaskSubject) => {
   return [
     `You are ${agent.id}, a ${agent.meta.role} worker in openteam.`,
     `Read the attached bootstrap files first and follow them.`,
     `You are running in provisioning mode, not orchestration mode.`,
     ...projectProfilePromptLines(projectProfile),
+    ...subjectPromptLines(subject),
     `Before any worker is allowed to begin product work, you must make sure this repository environment is capable of fulfilling the requested task.`,
     `Inspect project documentation, lockfiles, workspace files, submodule configuration, and development instructions before choosing commands.`,
     `Provision the environment if needed: initialize submodules, install dependencies, and run the minimum setup needed to make the repository workable.`,
     `Do not assume any specific framework or package manager. Detect what the repository actually uses.`,
     `If the checkout has a Nix flake or shell, openteam will launch you inside that declared development environment; use repo-native commands normally from there.`,
     `For Nix-managed checkouts, openteam also puts checkout-local tool shims in .openteam/bin first on PATH so plain commands such as pnpm, node, and playwright resolve through the declared environment.`,
+    `For non-Nix Node checkouts, openteam may put checkout-local package-manager shims in .openteam/bin so pnpm/yarn can fall back through corepack when the host binary is not installed.`,
     ...gitCollaborationVocabularyLines(),
     `Do not attempt browser verification until the environment is ready for it.`,
     `Use checkout-local scratch/cache/artifact paths from OPENTEAM_TMP_DIR, OPENTEAM_CACHE_DIR, and OPENTEAM_ARTIFACTS_DIR; avoid /tmp and host-global caches.`,
@@ -391,6 +428,18 @@ const repoRelayContext = (policy?: RepoRelayPolicy, defaultPublishScope = "repo"
   ]
 }
 
+const subjectEnv = (subject?: ResolvedTaskSubject): Record<string, string> => subject
+  ? {
+    OPENTEAM_SUBJECT_KIND: subject.kind,
+    OPENTEAM_SUBJECT_EVENT_ID: subject.eventId,
+    OPENTEAM_SUBJECT_REPO: subject.repo?.key ?? subject.repoTarget ?? "",
+    OPENTEAM_SUBJECT_PATH: subject.path ?? "",
+    OPENTEAM_SUBJECT_CHECKOUT: subject.checkout ?? "",
+    OPENTEAM_SUBJECT_TIP: subject.tipCommit ?? "",
+    OPENTEAM_SUBJECT_BASE: subject.baseCommit ?? "",
+  }
+  : {}
+
 const compose = (
   agent: PreparedAgent,
   task: string,
@@ -402,6 +451,7 @@ const compose = (
   projectProfile?: ProjectProfile,
   doneContract?: TaskRunRecord["doneContract"],
   continuation?: TaskItem["continuation"],
+  subject?: ResolvedTaskSubject,
 ) => {
   const grasp = graspServers(agent)
   return [
@@ -415,6 +465,7 @@ const compose = (
     grasp.length > 0 ? `Configured GRASP relays: ${grasp.join(", ")}` : `Configured GRASP relays: none`,
     `Detected repo dev environment: ${devEnv?.kind ?? "none"}${devEnv?.source ? ` (${devEnv.source})` : ""}`,
     ...projectProfilePromptLines(projectProfile),
+    ...subjectPromptLines(subject),
     ...doneContractPromptLines(doneContract),
     ...continuationPromptLines(continuation),
     ...gitCollaborationVocabularyLines(),
@@ -447,6 +498,7 @@ const composeCode = (
   projectProfile?: ProjectProfile,
   doneContract?: TaskRunRecord["doneContract"],
   continuation?: TaskItem["continuation"],
+  subject?: ResolvedTaskSubject,
 ) => {
   return [
     `You are ${agent.id}, a ${agent.meta.role} worker in openteam.`,
@@ -455,6 +507,7 @@ const composeCode = (
     ...repoRelayContext(repoPolicy, defaultPublishScope),
     `Detected repo dev environment: ${devEnv?.kind ?? "none"}${devEnv?.source ? ` (${devEnv.source})` : ""}`,
     ...projectProfilePromptLines(projectProfile),
+    ...subjectPromptLines(subject),
     ...doneContractPromptLines(doneContract),
     ...continuationPromptLines(continuation),
     `Verification tools: run \`openteam verify list\` to inspect available capabilities, \`openteam verify run <runner-id>\` for configured local command/native checks, \`openteam verify record <runner-id> --type <browser|nostr|desktop|mobile|manual> --state succeeded --note "..."\` for structured agentic evidence, and \`openteam verify artifact <path> --type <type>\` for artifacts.`,
@@ -741,6 +794,7 @@ const runProvisioningPhase = async (
   onStart?: (pid: number | undefined) => Promise<void> | void,
   devEnv?: DevEnv,
   projectProfile?: ProjectProfile,
+  subject?: ResolvedTaskSubject,
 ) => {
   const orchestrator = await prepareAgent(app, "orchestrator-01")
   const control: PreparedAgent = {...orchestrator, repo}
@@ -749,7 +803,7 @@ const runProvisioningPhase = async (
     control,
     checkout,
     `${path.basename(path.dirname(checkout))}-provision`,
-    bootstrapPrompt(control, task, projectProfile),
+    bootstrapPrompt(control, task, projectProfile, subject),
     logFile,
     model,
     onStart,
@@ -1036,6 +1090,12 @@ const createRunRecord = async (agent: PreparedAgent, item: TaskItem) => {
     task: item.task,
     source: item.source,
     continuation: item.continuation,
+    subject: item.subject ? {
+      kind: item.subject.kind,
+      eventId: item.subject.eventId,
+      repoTarget: item.subject.repoTarget,
+      path: item.subject.path,
+    } : undefined,
     model: item.model,
     target: item.target,
     mode: item.mode,
@@ -1071,6 +1131,7 @@ const updateRunRecord = async (record: TaskRunRecord, patch: Partial<TaskRunReco
   }
   if (patch.repo) record.repo = patch.repo
   if (patch.context) record.context = patch.context
+  if (patch.subject) record.subject = patch.subject
   if (patch.devEnv) record.devEnv = patch.devEnv
   if (patch.projectProfile) record.projectProfile = patch.projectProfile
   if (patch.target !== undefined) record.target = patch.target
@@ -1443,6 +1504,7 @@ export const runTask = async (
   let runError: unknown
   let taskError: unknown
   let cleanupError: unknown
+  let resolvedSubject: ResolvedTaskSubject | undefined
 
   try {
     const resolved = await runPhase(
@@ -1493,9 +1555,32 @@ export const runTask = async (
     )
 
     await runPhase(runRecord, "prepare-checkout", () => prepareCheckout(agent, checkout))
+    if (item.subject) {
+      resolvedSubject = await runPhase(
+        runRecord,
+        "resolve-subject",
+        () => resolveTaskSubject({app, agent, environment: resolved, checkout, subject: item.subject!}),
+        {
+          kind: item.subject.kind,
+          repoTarget: item.subject.repoTarget,
+          path: item.subject.path,
+        },
+      )
+      await updateRunRecord(runRecord, {subject: resolvedSubject})
+      resolvedSubject = await runPhase(
+        runRecord,
+        "prepare-subject",
+        () => prepareTaskSubject(agent, resolvedSubject!),
+        {
+          eventId: resolvedSubject.eventId,
+          path: resolvedSubject.path,
+        },
+      )
+      await updateRunRecord(runRecord, {subject: resolvedSubject})
+    }
     const devEnv = await runPhase(runRecord, "detect-dev-env", () => detectDevEnv(checkout))
     await updateRunRecord(runRecord, {devEnv})
-    await runPhase(runRecord, "write-dev-env-shims", () => writeDevEnvToolShims(checkout, devEnv), {devEnv: devEnv.kind, source: devEnv.source})
+    await runPhase(runRecord, "write-tool-shims", () => writeCheckoutToolShims(checkout, devEnv), {devEnv: devEnv.kind, source: devEnv.source})
     const projectProfile = await runPhase(runRecord, "detect-project-profile", () => detectProjectProfile(checkout, devEnv))
     const projectProfileFile = await runPhase(runRecord, "write-project-profile", () => writeProjectProfile(checkout, projectProfile))
     const verificationPlan = await runPhase(runRecord, "plan-verification", () => Promise.resolve(createVerificationPlan(app, mode, projectProfile)))
@@ -1549,6 +1634,7 @@ export const runTask = async (
       runFile: runRecord.runFile,
       mode,
       target: resolved.target,
+      subject: resolvedSubject,
       baseAgentId: agent.configId,
       runtimeId: agent.id,
       parallel: item.parallel,
@@ -1584,7 +1670,7 @@ export const runTask = async (
       const provision = await runPhase(
         runRecord,
         "provision",
-        () => runProvisioningPhase(app, resolved.repo, checkout, item.task, item.model, pid => updateRunRecord(runRecord, {process: {provisionPid: pid}}), devEnv, projectProfile),
+        () => runProvisioningPhase(app, resolved.repo, checkout, item.task, item.model, pid => updateRunRecord(runRecord, {process: {provisionPid: pid}}), devEnv, projectProfile, resolvedSubject),
       )
       provisionLogFile = provision.logFile
       await updateRunRecord(runRecord, {logs: {provision: provisionLogFile}})
@@ -1695,7 +1781,7 @@ export const runTask = async (
       )
 
       try {
-        const prompt = compose(agent, item.task, dev.url, effectiveRuntime, repoPolicy, defaultPublishScope, devEnv, projectProfile, doneContract, item.continuation)
+        const prompt = compose(agent, item.task, dev.url, effectiveRuntime, repoPolicy, defaultPublishScope, devEnv, projectProfile, doneContract, item.continuation, resolvedSubject)
         const session = await runPhase(
           runRecord,
           "opencode-worker",
@@ -1703,6 +1789,7 @@ export const runTask = async (
             OPENTEAM_RUN_ID: runRecord.runId,
             OPENTEAM_RUN_FILE: runRecord.runFile,
             OPENTEAM_DEV_URL: dev.url,
+            ...subjectEnv(resolvedSubject),
           }, devEnv),
           {logFile},
         )
@@ -1793,13 +1880,14 @@ export const runTask = async (
         }, {pid: dev.child.pid})
       }
     } else {
-      const prompt = composeCode(agent, item.task, repoPolicy, defaultPublishScope, devEnv, projectProfile, doneContract, item.continuation)
+      const prompt = composeCode(agent, item.task, repoPolicy, defaultPublishScope, devEnv, projectProfile, doneContract, item.continuation, resolvedSubject)
       const session = await runPhase(
         runRecord,
         "opencode-worker",
         () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, item.model, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}}), {
           OPENTEAM_RUN_ID: runRecord.runId,
           OPENTEAM_RUN_FILE: runRecord.runFile,
+          ...subjectEnv(resolvedSubject),
         }, devEnv),
         {logFile},
       )
@@ -1844,6 +1932,7 @@ export const runTask = async (
       })),
       task: item.task,
       target: resolved.target,
+      subject: resolvedSubject,
       mode,
       contextId,
       checkout,

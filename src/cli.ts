@@ -52,8 +52,8 @@ const help = () => {
   status
   console prompt
   prepare <agentId|role>
-  launch <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--mode <web|code>] [--model <provider/model>] [--parallel] [--runtime-id <id>]
-  enqueue <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--mode <web|code>] [--model <provider/model>]
+  launch <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>] [--parallel] [--runtime-id <id>]
+  enqueue <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>]
   serve [agentId|role]   # defaults to orchestrator-01 when omitted
   worker start <agentId|role> [--target <nostr-repo|hint|alias>] [--mode <web|code>] [--model <provider/model>] [--name <worker-name>]
   worker stop <worker-name>
@@ -152,6 +152,20 @@ const taskSource = (args: string[]): TaskItem["source"] | undefined => {
   }
 }
 
+const taskSubject = (args: string[]): TaskItem["subject"] | undefined => {
+  const eventId = value(args, "--subject-event")
+  const repoTarget = value(args, "--subject-target")
+  const subjectPath = value(args, "--subject-path")
+  if (!eventId && !repoTarget && !subjectPath) return undefined
+  if (!eventId) throw new Error("missing --subject-event")
+  return {
+    kind: "repo-pr-event",
+    eventId,
+    repoTarget: repoTarget || undefined,
+    path: subjectPath || undefined,
+  }
+}
+
 const taskOpts = (args: string[]): Partial<TaskItem> => ({
   target: value(args, "--target") || undefined,
   mode: mode(args),
@@ -160,6 +174,7 @@ const taskOpts = (args: string[]): Partial<TaskItem> => ({
   parallel: flag(args, "--parallel") || undefined,
   recipients: taskRecipients(args),
   source: taskSource(args),
+  subject: taskSubject(args),
 })
 
 const dispatchContext = (args: string[]) => ({

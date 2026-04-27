@@ -15,6 +15,37 @@ The expected loop is:
 Deterministic CI is still useful, but it is not the main openteam mechanism.
 openteam's advantage is long-running async worker jobs with real tools, real accounts, real repo access, Nostr observability, and evidence that the operator can inspect later.
 
+## Current Capability Inventory
+
+The existing verification system already gives workers these capabilities:
+
+- per-run `.openteam/project-profile.json` with detected docs, stacks, likely commands, and setup blockers
+- per-run `.openteam/verification-plan.json` with selected runner metadata
+- `repo-native` command evidence through `openteam verify run repo-native`
+- stack-triggered runner selection for web, desktop, Electron, Tauri, GTK, Qt, Android, and iOS candidates
+- Nix/dev-env wrapping for provisioning, workers, dev servers, and verification runner commands
+- managed command logs under `.openteam/artifacts/verification/`
+- worker evidence recording with `openteam verify record`
+- browser evidence recording with `openteam verify browser`
+- generic artifact recording with `openteam verify artifact`
+- URL health checks for browser evidence when requested
+- Playwright MCP capability planning for web-mode browser validation
+- explicit `desktop-command` runner metadata for configured desktop smoke/build/test commands
+- guarded mobile-native runner blockers for Android ADB and iOS simulator, disabled by default
+- run evidence collection into run records after worker handoff
+- failed or blocked worker verification evidence fails the run
+- missing or weak evidence turns otherwise successful work into `needs-review`
+- `runs evidence`, `runs observe`, and `runs watch` views for evidence level, missing evidence, and PR eligibility
+- PR publication gating on strong evidence unless draft/WIP publication is explicit
+- evidence repair and continuation flows that carry prior successful evidence forward
+
+Current gaps:
+
+- CLI products are treated as repo-native commands, not as interactive software with terminal transcripts and behavioral assertions.
+- Desktop software can be represented by configured commands, but openteam does not yet manage a GUI session, capture window state, take desktop screenshots, or drive interactions.
+- Browser verification has a good agentic path through Playwright MCP, but equivalent CLI and desktop flows still need first-class worker commands.
+- Mobile-native runners exist only as guardrails and are not part of the next focus.
+
 ## Phase 1: Runner Foundation
 
 Status: implemented as planning and observability only.
@@ -178,6 +209,144 @@ Mobile-native guard policy:
 - `ios-simulator` only runs when enabled, the host is macOS, `xcrun` is on PATH, a simulator is already booted, and an explicit command is configured.
 - mobile runners never install Android Studio, Xcode, emulators, SDKs, system packages, or write outside the managed checkout/runtime.
 
+## Phase 5: CLI Product Verification
+
+Status: next low-hanging phase.
+
+CLI applications need a product-verification path separate from plain build/test commands.
+The goal is to let a worker prove command-line behavior with a reproducible transcript, input script, exit status, and task-specific assertions.
+
+Add a `cli` evidence type and a `cli-session` runner kind.
+The runner should execute inside the same checkout, environment, temp/cache directories, and dev-env wrapper as `repo-native`.
+It should write artifacts under `.openteam/artifacts/verification/cli/`.
+
+Worker-facing commands:
+
+```bash
+openteam verify cli --flow "login rejects invalid token" -- npm run app -- login --token bad
+openteam verify cli --flow "wizard creates config" --stdin-file .openteam/artifacts/verification/cli/wizard-input.txt --expect "created" -- ./bin/myapp init
+openteam verify cli --runner cli-smoke --flow "help output lists repo commands" --expect "repo publish" -- openteam --help
+```
+
+Phase 5 scope:
+
+- run arbitrary task-scoped CLI commands after `--`
+- optionally attach the evidence to a configured runner id
+- record command, cwd, environment summary, exit code, signal, timeout, and duration
+- record stdout/stderr transcript paths as artifacts
+- support `--stdin` and `--stdin-file` for simple interactive prompts
+- support `--expect <regex>` and `--reject <regex>` assertions against the transcript
+- support `--cwd <relative-path>` while still requiring the path to stay inside the checkout
+- support `--timeout-ms`
+- mark assertion mismatch as failed evidence, not a vague note
+- count successful CLI evidence as both agentic evidence and command evidence for CLI-oriented implementation, bug-fix, and QA tasks
+
+Keep Phase 5 deliberately pipe-based.
+It should cover most CLI tools, one-shot commands, REPLs with scripted stdin, and setup wizards that do not require terminal control sequences.
+Full terminal UI verification belongs in Phase 6 because it needs a pseudo-terminal.
+
+Implementation notes:
+
+- Extend `VerificationEvidenceType` with `cli`.
+- Extend `VerificationRunnerKind` with `cli-session`.
+- Add `openteam verify cli`.
+- Reuse the existing command runner's log, timeout, dev-env wrapping, and result append behavior.
+- Add transcript artifact fields rather than overloading `logFile` for every stream.
+- Teach project-profile detection to surface likely CLI entrypoints from package bins, Cargo binaries, Go commands, Python console scripts, and repo docs when easy.
+
+## Phase 6: Terminal UI and Desktop GUI Sessions
+
+Status: design target after Phase 5.
+
+This phase should give agents a real local UI verification surface for terminal UIs and desktop applications without letting workers call random GUI openers directly.
+The worker asks openteam to manage the session; openteam owns launch, artifact paths, cleanup, and evidence shape.
+
+Add a local capability probe:
+
+```bash
+openteam verify capabilities
+```
+
+The probe should report availability for:
+
+- display environment: `DISPLAY`, `WAYLAND_DISPLAY`, or headless/virtual display command
+- terminal session support: `script`, `node-pty`, or another configured PTY backend
+- window listing: `wmctrl`, `xdotool`, compositor-specific alternatives, or platform-specific APIs
+- screenshot capture: `gnome-screenshot`, `grim`, `spectacle`, ImageMagick `import`, `screencapture`, or configured command
+- desktop input: `xdotool`, platform automation, or configured command
+- accessibility snapshot: AT-SPI, platform accessibility APIs, or configured command
+
+Terminal UI commands:
+
+```bash
+openteam verify terminal --flow "search filters rows" -- ./target/debug/my-tui
+openteam verify terminal --stdin-file .openteam/artifacts/verification/tui/keys.txt --expect-screen "3 results" -- cargo run --bin app
+```
+
+Desktop GUI commands:
+
+```bash
+openteam verify desktop launch desktop-command --flow "settings dialog opens"
+openteam verify desktop screenshot --session <session-id> --note "Main window after importing fixture"
+openteam verify desktop record --session <session-id> --state succeeded --note "Opened real fixture and verified row count in the desktop window."
+openteam verify desktop stop --session <session-id>
+```
+
+Phase 6 scope:
+
+- launch a configured desktop command in a managed verification session
+- keep process ids, logs, display metadata, and cleanup metadata under `.openteam/artifacts/verification/desktop/`
+- set checkout-local home/config/cache directories where supported so app state is isolated
+- wait for a process, window title, socket, log line, or configured readiness command
+- capture one or more screenshots as artifacts
+- record window title/class/id metadata when available
+- record display and automation blockers explicitly when local GUI capability is unavailable
+- support terminal UI PTY transcript capture with a stable terminal size
+- let workers record manual observations against a managed session when automated interaction is unavailable
+
+Phase 6 should not install GUI packages, start system services, boot mobile simulators, or write app state outside the managed checkout/runtime.
+If a desktop task requires missing host GUI capability, the runner records `blocked` evidence with the missing tool or display.
+
+## Phase 7: Desktop Interaction Recipes
+
+Status: later local enhancement.
+
+Once launch and screenshots are reliable, add small, explicit interaction primitives instead of pretending openteam has a universal GUI brain.
+
+Useful primitives:
+
+- click by coordinates inside the captured window
+- type text
+- send hotkeys
+- wait for window title/text/log pattern
+- take screenshot before and after an interaction
+- attach a repo fixture file to the app by configured path or drag/drop command when the platform supports it
+- record accessibility tree snippets when a local API is available
+
+Stack recipes should stay opt-in and explicit:
+
+- Electron: configured app command plus window-title readiness and screenshots
+- Tauri: configured dev/build/run command plus window-title readiness and screenshots
+- GTK/Qt: configured binary command plus window metadata and screenshots
+- Java/Swing/JavaFX: configured command plus window metadata and screenshots
+- terminal TUIs: PTY backend plus transcript/screen assertions
+
+The first useful desktop target is evidence capture, not universal automation.
+Workers can still use direct human-style observation when the session is visible, but they should record structured evidence through `openteam verify desktop ...`.
+
+## Low-Hanging Implementation Queue
+
+Recommended order:
+
+1. Add `cli` evidence type, `cli-session` runner kind, and `openteam verify cli`.
+2. Add `openteam verify capabilities` so workers can discover local terminal/desktop affordances before trying a GUI flow.
+3. Add `desktop-session` metadata on top of the existing `desktop-command` runner: launch, logs, PID, readiness, screenshot artifact, stop.
+4. Add PTY-backed `openteam verify terminal` for terminal UI apps when a local PTY backend is available.
+5. Add a small desktop screenshot command that records display/window metadata and a screenshot artifact without interaction.
+6. Add optional desktop input commands only behind detected/configured local automation tools.
+7. Update done-contract and evidence-policy wording so CLI and desktop tasks require CLI/desktop evidence rather than generic manual notes.
+8. Add config examples for Electron, Tauri, GTK/Qt, and CLI tools in `config/openteam.local.example.json`.
+
 ## Boundary
 
 Keep these simple and local:
@@ -186,8 +355,12 @@ Keep these simple and local:
 - Nix/dev-env wrapping
 - Playwright MCP for single-browser validation
 - explicit local desktop-app verification commands, including Electron, Tauri, GTK, Qt, and similar desktop stacks
-- Android ADB checks against already-available local emulator/device
-- iOS simulator checks against already-available local macOS simulator
+- CLI product verification with transcripts, scripted stdin, and assertions
+- terminal UI verification with a local PTY backend when available
+- desktop GUI launch, screenshot, logs, window metadata, and explicit local automation when available
+
+Mobile-native verification remains guarded and parked.
+Do not spend the next phases on Android ADB, iOS simulators, device farms, or mobile-native app tooling.
 
 ## Evidence Contract
 
