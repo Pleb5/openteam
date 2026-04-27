@@ -1401,6 +1401,71 @@ const createContext = async (
   return lease(context, agent, item, mode)
 }
 
+const resolveContinuationContext = async (
+  app: AppCfg,
+  registry: RepoRegistry,
+  agent: PreparedAgent,
+  item: TaskItem,
+  profile: TargetProfile,
+): Promise<ResolvedRepoTarget | undefined> => {
+  const contextId = item.continuation?.contextId
+  if (!contextId) return
+
+  const context = registry.contexts[contextId]
+  if (!context) {
+    throw new Error(`continuation context not found: ${contextId}`)
+  }
+  if (context.state !== "idle") {
+    throw new Error(`continuation context ${contextId} is busy; stop the active run or wait until the context is idle before continuing`)
+  }
+  if (!existsSync(context.checkout)) {
+    throw new Error(`continuation context ${contextId} checkout is missing: ${context.checkout}`)
+  }
+
+  const requestedMode = item.mode ?? context.mode
+  if (requestedMode !== context.mode) {
+    throw new Error(`continuation context ${contextId} was created for ${context.mode} mode; relaunch with --mode ${context.mode} or start a new run`)
+  }
+
+  const identity = registry.repos[context.repoKey]
+  if (!identity) {
+    throw new Error(`continuation context ${contextId} references unknown repo ${context.repoKey}`)
+  }
+  const upstreamIdentity = context.upstreamRepoKey ? registry.repos[context.upstreamRepoKey] : undefined
+  if (context.upstreamRepoKey && !upstreamIdentity) {
+    throw new Error(`continuation context ${contextId} references unknown upstream repo ${context.upstreamRepoKey}`)
+  }
+  const fork = context.upstreamRepoKey
+    ? registry.forks[context.upstreamRepoKey]
+    : Object.values(registry.forks).find(item => item.forkKey === identity.key)
+  const remoteUrls = uniq([
+    ...(fork?.forkCloneUrls ?? []),
+    ...(fork?.forkCloneUrl ? [fork.forkCloneUrl] : []),
+    ...identity.cloneUrls,
+    ...(upstreamIdentity?.cloneUrls ?? []),
+  ])
+  await configureContextGitAuth(app, context.checkout, remoteUrls, fork?.authUsername)
+
+  const leased = lease(context, agent, item, context.mode)
+  registry.contexts[context.id] = leased
+  registry.repos[identity.key] = identity
+  if (upstreamIdentity) registry.repos[upstreamIdentity.key] = upstreamIdentity
+  await saveRepoRegistry(app, registry)
+
+  return {
+    repo: {
+      ...profile.profile,
+      root: leased.checkout,
+      baseBranch: leased.branch,
+    },
+    identity,
+    upstreamIdentity,
+    fork,
+    context: leased,
+    target: profile.label || identity.key,
+  }
+}
+
 export const resolveRepoTarget = async (
   app: AppCfg,
   agent: PreparedAgent,
@@ -1408,6 +1473,10 @@ export const resolveRepoTarget = async (
 ): Promise<ResolvedRepoTarget> => {
   return withRepoRegistryLock(app, async () => {
     const profile = targetProfile(app, agent, item.target)
+    const registry = await loadRepoRegistry(app)
+    const continuation = await resolveContinuationContext(app, registry, agent, item, profile)
+    if (continuation) return continuation
+
     const mode = item.mode ?? profile.profile.mode ?? "web"
     const upstreamIdentity = await resolveRepoIdentity(app, profile)
     const upstreamSources = cloneSources(upstreamIdentity, profile.hint)
@@ -1425,8 +1494,8 @@ export const resolveRepoTarget = async (
     const mirror = workingMirror.mirror
     const baseRef = upstreamIdentity.defaultBranch || identity.defaultBranch || profile.profile.baseBranch || "HEAD"
     const baseCommit = resolveBaseCommit(mirror, baseRef)
-    const registry = await loadRepoRegistry(app)
-    const active = Object.values(registry.contexts).find(context => context.repoKey === identity.key && context.state === "leased")
+    const nextRegistry = await loadRepoRegistry(app)
+    const active = Object.values(nextRegistry.contexts).find(context => context.repoKey === identity.key && context.state === "leased")
 
     if (active && !item.parallel) {
       throw new Error(`repo context ${active.id} is busy for ${identity.key}; enqueue the work or rerun with explicit parallel mode`)
@@ -1434,7 +1503,7 @@ export const resolveRepoTarget = async (
 
     const reusable = item.parallel || active
       ? undefined
-      : Object.values(registry.contexts).find(context =>
+      : Object.values(nextRegistry.contexts).find(context =>
         context.repoKey === identity.key &&
         context.mode === mode &&
         context.baseCommit === baseCommit &&
@@ -1448,13 +1517,13 @@ export const resolveRepoTarget = async (
 
     await configureContextGitAuth(app, context.checkout, [source, ...(working.upstream ? [upstreamSource] : [])], working.authUsername)
 
-    registry.repos[upstreamIdentity.key] = upstreamIdentity
-    registry.repos[identity.key] = identity
+    nextRegistry.repos[upstreamIdentity.key] = upstreamIdentity
+    nextRegistry.repos[identity.key] = identity
     if (working.fork) {
-      registry.forks[working.fork.upstreamKey] = working.fork
+      nextRegistry.forks[working.fork.upstreamKey] = working.fork
     }
-    registry.contexts[context.id] = context
-    await saveRepoRegistry(app, registry)
+    nextRegistry.contexts[context.id] = context
+    await saveRepoRegistry(app, nextRegistry)
 
     return {
       repo: {

@@ -92,6 +92,7 @@ bun run src/cli.ts worker start triager --target <repo-hint-or-alias> --mode cod
 bun run src/cli.ts worker list
 bun run src/cli.ts runs list --limit 10
 bun run src/cli.ts runs diagnose <run-id>
+bun run src/cli.ts runs evidence <run-id>
 bun run src/cli.ts runs cleanup-stale --dry-run
 bun run src/cli.ts browser attach qa
 bun run src/cli.ts relay sync builder-01
@@ -127,6 +128,13 @@ Worker processes receive checkout-local temp/cache/artifact env vars under `.ope
 If a checkout declares a Nix dev environment with `.envrc`, `flake.nix`, `shell.nix`, or `default.nix`, openteam runs provisioning, worker OpenCode, and web dev-server processes through it and records the selected `devEnv` in the run record.
 openteam also writes `.openteam/project-profile.json` with detected project hints such as Rust, Node, Go, Python, Gradle/Android, Swift/iOS, docs, and likely validation commands.
 Those hints are a checklist only; repo docs, declared scripts, and declared dev environments override them.
+openteam also writes `.openteam/verification-plan.json` with the local verification runners selected for the run.
+Workers use `openteam verify list`, `openteam verify run <runner-id>`, `openteam verify browser ...`, `openteam verify artifact ...`, and `openteam verify record <runner-id> ...` during their own loop to record structured verification evidence.
+The launcher collects worker-produced evidence from `.openteam/verification-results.json`; failed or blocked worker evidence fails the run.
+Automatic post-worker runner execution is disabled by default with `verification.autoRunAfterWorker: false`.
+If evidence is missing or weak after a successful worker phase, the run finishes as `needs-review` instead of plain `succeeded`.
+Normal `repo publish pr` / `pr-update` publication is blocked until `openteam runs evidence <run-id>` reports `PR eligible: yes`, unless draft/WIP publication is explicit.
+Mobile-native runner tools are guarded and disabled by default; they never install SDKs, emulators, or system packages.
 For live web tasks, `openteam browser attach <agent-or-role>` health-checks the dev URL before reporting it as live or offering an open command.
 Web runs track `workerState` separately from `verificationState`; a builder can complete the OpenCode task phase but still fail final web-runtime verification.
 If final dev-server verification fails after a successful worker phase, openteam restarts the dev server once and verifies again before deciding success or `failureCategory: "dev-server-unhealthy"`.
@@ -134,7 +142,11 @@ If final dev-server verification fails after a successful worker phase, openteam
 They also report `state: failed` over stored `succeeded` when the OpenCode log contains a hard infrastructure failure such as a provider `server_error` or sandbox permission rejection.
 They also report effective failed state when `workerState` or `verificationState` failed.
 Use `openteam runs show <run-id> --raw` only when you need the unmodified run file.
+Use `openteam runs observe <run-id>` for a compact live snapshot and `openteam runs watch --active` for transition polling.
+The long-running orchestrator service runs the same observer and persists last-seen transitions in `runtime/orchestrator/observations.json`.
 If a run looks active but the process, URL, or logs disagree, use `openteam runs diagnose <run-id>` and `openteam runs cleanup-stale --dry-run` before cleaning stale leases.
+Use `openteam runs repair-evidence <run-id>` to relaunch the same idle repo context with prior successful evidence, missing-evidence guidance, and PR blockers in the worker prompt.
+Use `openteam runs continue <run-id> --task "..."` for broader follow-up work on the same context; busy contexts are refused rather than hijacked.
 
 ## DM workflow
 
@@ -226,7 +238,7 @@ Practical edit points:
 - write relays, allowlists, and browser MCP command in `config/openteam.local.json`
 - write Git tokens and Nostr secrets in `config/openteam.secrets.env`
 - map GitHub/GitLab token hosts under `config.providers`; openteam can create/reuse fork repos there and injects matching Git smart-HTTP tokens through `GIT_ASKPASS` without embedding tokens in URLs
-- publish Nostr-git PRs with branch push plus `openteam repo publish pr ...`; personal `gh auth` is not part of the default openteam path
+- publish Nostr-git PRs with branch push plus `openteam repo publish pr ...`; personal `gh auth` is not part of the default openteam path and normal PR publication requires strong verification evidence
 - leave `identity.npub` blank if you want `openteam` to derive it from the secret key
 - use `reporting.appDataRelays` for your standard relay set and `nostr_git.gitDataRelays` for the active client's git-data fallback relays
 - use `nostr_git.repoAnnouncementRelays` for repository announcement fallback discovery
@@ -281,7 +293,9 @@ Task run history lives under:
 ./runtime/runs/
 ```
 
-Each run record captures the resolved Nostr repo/fork/context, final result, `workerState`, `verificationState`, `failureCategory`, `durationMs`, phase timings, log files, and browser observability paths.
+Each run record captures the resolved Nostr repo/fork/context, final result, `workerState`, `verificationState`, `failureCategory`, `durationMs`, phase timings, log files, browser observability paths, and worker-produced `verification.results`.
+Each run also stores a done contract describing required evidence, success policy, and PR policy for the role/task class.
+Use `openteam runs evidence <run-id>` for the compact evidence view, including grouped repo-native, browser, Nostr, desktop, mobile, manual, and runtime evidence.
 New run records also capture known runner, provisioning, worker, dev-server, and bunker PIDs where available.
 `runs diagnose` uses those PIDs plus dev URL health, log freshness, and context lease state to detect stale records.
 `runtime/status.json` is generated by `status` and stale-run cleanup commands as a compact operational snapshot. It is not authoritative state; use run records and `runtime/repos/registry.json` for source-of-truth debugging.
@@ -296,6 +310,7 @@ In that phase, the CLI rejects worker-control commands such as `launch`, `enqueu
 - `docs/invariants.md`
 - `docs/skills.md`
 - `docs/operations.md`
+- `docs/local-verification.md`
 - `docs/deployment.md`
 - `docs/tenex-lessons-plan.md`
 

@@ -6,17 +6,32 @@ import {tmpdir} from "node:os"
 import path from "node:path"
 import {browserInspection} from "../src/commands/browser.js"
 import {acceptsControlDms} from "../src/commands/profile.js"
-import {stopRunRecord, summarizeRuns} from "../src/commands/runs.js"
+import {runEvidenceView, stopRunRecord, summarizeRuns} from "../src/commands/runs.js"
 import {statusReport} from "../src/commands/status.js"
+import {verifyCommand} from "../src/commands/verify.js"
 import {prepareAgent} from "../src/config.js"
 import {assertControlAllowed} from "../src/control-guard.js"
 import {detectDevEnv, wrapDevEnvCommand} from "../src/dev-env.js"
+import {createDoneContract} from "../src/done-contract.js"
+import {evaluateEvidencePolicy, prPublicationDecision} from "../src/evidence-policy.js"
 import {configureCheckoutGitAuth, gitCredentialFromStdin} from "../src/git-auth.js"
 import {assertResolvedContextReady, checkoutRuntimeEnv, provisionWorkerControlCommand} from "../src/launcher.js"
 import {detectOpenCodeHardFailure, detectWorkerVerificationBlockers} from "../src/opencode-log.js"
 import {detectProjectProfile, writeProjectProfile} from "../src/project-profile.js"
 import {resolveRepoTarget} from "../src/repo.js"
+import {continuationEvidenceForCarry, continuationPromptLines, createContinuationTaskItem} from "../src/run-continuation.js"
+import {observeRun, observeRuns} from "../src/run-observer.js"
 import {refreshRuntimeStatus} from "../src/runtime-status.js"
+import {
+  appendVerificationResultsFile,
+  createVerificationPlan,
+  manualVerificationResult,
+  readVerificationResults,
+  runLocalVerificationRunners,
+  runVerificationRunner,
+  verificationHasFailure,
+  writeVerificationPlan,
+} from "../src/verification.js"
 import type {AppCfg, RepoRegistry, ResolvedRepoTarget, TaskItem, TaskRunRecord} from "../src/types.js"
 import {getPublicKey, nip19} from "nostr-tools"
 
@@ -360,6 +375,159 @@ describe("runtime invariants", () => {
     expect(summary.failureCategory).toBeUndefined()
   })
 
+  test("done contracts classify task evidence expectations", () => {
+    const contract = createDoneContract("builder", "web", "Fix the broken repo card light theme UI")
+
+    expect(contract.taskClass).toBe("ui-web")
+    expect(contract.requiredEvidence.join(" ")).toContain("browser")
+    expect(contract.prPolicy).toContain("UI evidence")
+  })
+
+  test("run evidence view summarizes worker-produced evidence", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const record = runRecord(app, {
+      state: "succeeded",
+      workerState: "succeeded",
+      doneContract: createDoneContract("builder", "web", "Fix browser UI bug"),
+      verification: {
+        plan: createVerificationPlan(app, "web", {stacks: ["web"]}),
+        results: [
+          {
+            id: "browser",
+            kind: "playwright-mcp",
+            state: "succeeded",
+            source: "worker",
+            note: "Verified the UI flow in browser.",
+            artifacts: [".openteam/artifacts/screenshot.png"],
+          },
+          {
+            id: "repo-native",
+            kind: "command",
+            state: "succeeded",
+            source: "worker",
+            logFile: ".openteam/artifacts/verification/repo-native.log",
+          },
+        ],
+      },
+    })
+
+    const evidence = runEvidenceView(record)
+
+    expect(evidence.level).toBe("strong")
+    expect(evidence.summary.succeeded).toBe(2)
+    expect(evidence.artifacts).toContain(".openteam/artifacts/screenshot.png")
+    expect(evidence.prPolicy).toContain("UI evidence")
+    expect(evidence.prEligible).toBe(true)
+  })
+
+  test("builder success without verification evidence needs review and cannot publish PR", () => {
+    const contract = createDoneContract("builder", "code", "Fix helper crash")
+    const policy = evaluateEvidencePolicy(contract, [])
+    const publication = prPublicationDecision(policy)
+
+    expect(policy.level).toBe("none")
+    expect(policy.finalStateForSuccessfulWorker).toBe("needs-review")
+    expect(policy.prEligible).toBe(false)
+    expect(publication.allowed).toBe(false)
+    expect(policy.missingEvidence.length).toBeGreaterThan(0)
+  })
+
+  test("failed verification evidence blocks PR publication", () => {
+    const contract = createDoneContract("builder", "code", "Fix helper crash")
+    const policy = evaluateEvidencePolicy(contract, [{
+      id: "repo-native",
+      kind: "command",
+      state: "failed",
+      source: "worker",
+      error: "cargo test failed",
+    }])
+
+    expect(policy.level).toBe("failed")
+    expect(policy.finalStateForSuccessfulWorker).toBe("needs-review")
+    expect(prPublicationDecision(policy).allowed).toBe(false)
+  })
+
+  test("strong builder evidence allows normal PR publication", () => {
+    const contract = createDoneContract("builder", "code", "Fix helper crash")
+    const policy = evaluateEvidencePolicy(contract, [
+      {
+        id: "repo-native",
+        kind: "command",
+        state: "succeeded",
+        source: "worker",
+        logFile: ".openteam/artifacts/verification/repo-native.log",
+      },
+      {
+        id: "manual-behavior",
+        kind: "command",
+        state: "succeeded",
+        source: "worker",
+        note: "Reproduced the helper crash before the fix and verified the helper returns expected output after the fix.",
+      },
+    ])
+
+    expect(policy.level).toBe("strong")
+    expect(policy.finalStateForSuccessfulWorker).toBe("succeeded")
+    expect(policy.prEligible).toBe(true)
+    expect(prPublicationDecision(policy).allowed).toBe(true)
+  })
+
+  test("UI web work needs browser and repo-native evidence for normal PR publication", () => {
+    const contract = createDoneContract("builder", "web", "Fix button colors")
+    const browserOnly = evaluateEvidencePolicy(contract, [{
+      id: "browser",
+      kind: "playwright-mcp",
+      state: "succeeded",
+      source: "worker",
+      note: "Verified button colors in browser.",
+    }])
+    const complete = evaluateEvidencePolicy(contract, [
+      {
+        id: "browser",
+        kind: "playwright-mcp",
+        state: "succeeded",
+        source: "worker",
+        note: "Verified button colors in browser.",
+      },
+      {
+        id: "repo-native",
+        kind: "command",
+        state: "succeeded",
+        source: "worker",
+        logFile: ".openteam/artifacts/verification/repo-native.log",
+      },
+    ])
+
+    expect(browserOnly.level).toBe("weak")
+    expect(browserOnly.prEligible).toBe(false)
+    expect(complete.level).toBe("strong")
+    expect(complete.prEligible).toBe(true)
+  })
+
+  test("draft PR publication can be explicit when evidence is incomplete", () => {
+    const contract = createDoneContract("builder", "code", "Start risky refactor")
+    const policy = evaluateEvidencePolicy(contract, [])
+
+    expect(prPublicationDecision(policy).allowed).toBe(false)
+    expect(prPublicationDecision(policy, {draft: true}).allowed).toBe(true)
+  })
+
+  test("research evidence does not make normal PR publication eligible", () => {
+    const contract = createDoneContract("researcher", "code", "Research a dependency upgrade")
+    const policy = evaluateEvidencePolicy(contract, [{
+      id: "research-note",
+      kind: "command",
+      state: "succeeded",
+      source: "worker",
+      note: "Inspected docs and events; recommended builder handoff.",
+    }])
+
+    expect(policy.level).toBe("strong")
+    expect(policy.prEligible).toBe(false)
+    expect(prPublicationDecision(policy).allowed).toBe(false)
+  })
+
   test("runtime status file records stale leases and cleanup metadata", async () => {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
     const app = makeApp(runtimeRoot)
@@ -385,6 +553,287 @@ describe("runtime invariants", () => {
     expect(saved.leases.staleContexts[0]?.id).toBe("ctx1")
     expect(saved.cleanup.lastCleanupDryRunAt).toBe("2026-04-25T01:00:00.000Z")
     expect(saved.cleanup.lastCleanupCount).toBe(1)
+  })
+
+  test("run observer persists snapshots and emits state/evidence transitions", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const first = runRecord(app, {
+      state: "needs-review",
+      workerState: "succeeded",
+      verificationState: "needs-review",
+      failureCategory: "verification-evidence-missing",
+      process: {},
+      phases: [{name: "opencode-worker", state: "succeeded"}],
+      doneContract: createDoneContract("builder", "code", "Fix helper crash"),
+      verification: {
+        plan: createVerificationPlan(app, "code", {stacks: []}),
+        results: [],
+      },
+    })
+    await writeRun(first)
+
+    const initial = await observeRuns(app, {emitInitial: false})
+    expect(initial.events).toHaveLength(0)
+    expect(initial.state.runs[first.runId]?.state).toBe("needs-review")
+
+    const second = {
+      ...first,
+      state: "succeeded" as const,
+      verificationState: "succeeded" as const,
+      failureCategory: undefined,
+      verification: {
+        ...first.verification!,
+        results: [
+          {
+            id: "repo-native",
+            kind: "command" as const,
+            state: "succeeded" as const,
+            evidenceType: "repo-native" as const,
+            source: "worker" as const,
+            logFile: ".openteam/artifacts/verification/repo-native.log",
+          },
+          {
+            id: "manual-behavior",
+            kind: "command" as const,
+            state: "succeeded" as const,
+            evidenceType: "manual" as const,
+            source: "worker" as const,
+            note: "Reproduced the helper crash and verified the fixed helper output.",
+          },
+        ],
+      },
+    }
+    await writeRun(second)
+
+    const observed = await observeRuns(app, {emitInitial: false})
+    const fields = observed.events.flatMap(event => event.transitions.map(transition => transition.field))
+
+    expect(fields).toContain("state")
+    expect(fields).toContain("evidenceLevel")
+    expect(fields).toContain("prEligible")
+    expect(observed.state.runs[first.runId]?.state).toBe("succeeded")
+    expect(observed.state.runs[first.runId]?.evidenceLevel).toBe("strong")
+    expect(observed.state.runs[first.runId]?.prEligible).toBe(true)
+  })
+
+  test("run observer single-run snapshot exposes recommended action", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const record = runRecord(app, {
+      state: "needs-review",
+      workerState: "succeeded",
+      verificationState: "needs-review",
+      process: {},
+      phases: [{name: "opencode-worker", state: "succeeded"}],
+      doneContract: createDoneContract("builder", "web", "Fix light theme"),
+      verification: {
+        plan: createVerificationPlan(app, "web", {stacks: ["web"]}),
+        results: [],
+      },
+    })
+    await writeRun(record)
+
+    const snapshot = await observeRun(app, record.runId)
+
+    expect(snapshot.state).toBe("needs-review")
+    expect(snapshot.evidenceLevel).toBe("none")
+    expect(snapshot.prEligible).toBe(false)
+    expect(snapshot.recommendedAction).toContain("continue")
+  })
+
+  test("continuation task reuses prior run context and carries evidence guidance", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const record = runRecord(app, {
+      state: "needs-review",
+      workerState: "succeeded",
+      verificationState: "needs-review",
+      mode: "web",
+      context: {
+        id: "ctx1",
+        checkout: path.join(runtimeRoot, "repos", "contexts", "repo", "ctx1", "checkout"),
+        branch: "openteam/test",
+      },
+      doneContract: createDoneContract("builder", "web", "Fix repo card light theme UI"),
+      verification: {
+        plan: createVerificationPlan(app, "web", {stacks: ["web"]}),
+        results: [
+          {
+            id: "browser",
+            kind: "playwright-mcp",
+            state: "succeeded",
+            evidenceType: "browser",
+            source: "worker",
+            note: "Verified visible card colors in browser.",
+          },
+          {
+            id: "repo-native",
+            kind: "command",
+            state: "failed",
+            evidenceType: "repo-native",
+            source: "worker",
+            error: "check failed before evidence repair",
+          },
+        ],
+      },
+    })
+
+    const item = createContinuationTaskItem(record, {kind: "repair-evidence"})
+    const noCarry = createContinuationTaskItem(record, {kind: "repair-evidence", carryEvidence: false})
+    const prompt = continuationPromptLines(item.continuation)
+
+    expect(item.agentId).toBe("builder-01")
+    expect(item.mode).toBe("web")
+    expect(item.continuation?.contextId).toBe("ctx1")
+    expect(item.continuation?.evidenceResults).toHaveLength(2)
+    expect(continuationEvidenceForCarry(item.continuation)).toHaveLength(1)
+    expect(noCarry.continuation?.evidenceResults).toHaveLength(2)
+    expect(continuationEvidenceForCarry(noCarry.continuation)).toHaveLength(0)
+    expect(item.task).toContain("repair the missing or weak verification evidence")
+    expect(prompt.join(" ")).toContain("Prior missing evidence")
+    expect(prompt.join(" ")).toContain("browser:succeeded")
+    expect(prompt.join(" ")).toContain("repo-native:failed")
+  })
+
+  test("continuation resolution leases the prior idle context without rediscovery", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    const repoKey = `30617:${ownerPubkey}:repo`
+    const registryFile = await writeRegistry(app, {
+      version: 1,
+      forks: {},
+      repos: {
+        [repoKey]: {
+          key: repoKey,
+          ownerPubkey,
+          ownerNpub,
+          identifier: "repo",
+          announcementEventId: "event",
+          announcedAt: 1,
+          relays: [],
+          cloneUrls: [],
+          rawTags: [["d", "repo"]],
+        },
+      },
+      contexts: {
+        ctx1: {
+          id: "ctx1",
+          repoKey,
+          path: path.dirname(checkout),
+          checkout,
+          mirror: "/tmp/mirror.git",
+          mode: "code",
+          baseRef: "HEAD",
+          baseCommit: "abc123",
+          branch: "openteam/test",
+          state: "idle",
+          createdAt: "2026-04-25T00:00:00.000Z",
+          updatedAt: "2026-04-25T00:00:00.000Z",
+        },
+      },
+    })
+    const agent = await prepareAgent(app, "builder-01")
+    const resolved = await resolveRepoTarget(app, agent, {
+      id: "task-b",
+      task: "continue",
+      createdAt: "",
+      state: "queued",
+      agentId: "builder-01",
+      target: "unresolvable-hint",
+      mode: "code",
+      continuation: {
+        version: 1,
+        kind: "continue",
+        fromRunId: "builder-01-task-a",
+        contextId: "ctx1",
+        priorState: "needs-review",
+        missingEvidence: [],
+        prBlockers: [],
+        carryEvidence: false,
+        evidenceResults: [],
+        createdAt: "2026-04-25T00:00:00.000Z",
+      },
+    })
+    const registry = JSON.parse(await readFile(registryFile, "utf8")) as RepoRegistry
+
+    expect(resolved.context.id).toBe("ctx1")
+    expect(resolved.target).toBe("unresolvable-hint")
+    expect(registry.contexts.ctx1.state).toBe("leased")
+    expect(registry.contexts.ctx1.lease?.jobId).toBe("task-b")
+    expect(registry.contexts.ctx1.lease?.workerId).toBe("builder-01")
+  })
+
+  test("continuation resolution refuses a busy prior context", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    const repoKey = `30617:${ownerPubkey}:repo`
+    await writeRegistry(app, {
+      version: 1,
+      forks: {},
+      repos: {
+        [repoKey]: {
+          key: repoKey,
+          ownerPubkey,
+          ownerNpub,
+          identifier: "repo",
+          announcementEventId: "event",
+          announcedAt: 1,
+          relays: [],
+          cloneUrls: [],
+          rawTags: [["d", "repo"]],
+        },
+      },
+      contexts: {
+        ctx1: {
+          id: "ctx1",
+          repoKey,
+          path: path.dirname(checkout),
+          checkout,
+          mirror: "/tmp/mirror.git",
+          mode: "code",
+          baseRef: "HEAD",
+          baseCommit: "abc123",
+          branch: "openteam/test",
+          state: "leased",
+          lease: {
+            workerId: "builder-01",
+            role: "builder",
+            jobId: "active-task",
+            mode: "code",
+            leasedAt: "2026-04-25T00:00:00.000Z",
+          },
+          createdAt: "2026-04-25T00:00:00.000Z",
+          updatedAt: "2026-04-25T00:00:00.000Z",
+        },
+      },
+    })
+    const agent = await prepareAgent(app, "builder-01")
+
+    await expect(resolveRepoTarget(app, agent, {
+      id: "task-b",
+      task: "continue",
+      createdAt: "",
+      state: "queued",
+      agentId: "builder-01",
+      mode: "code",
+      continuation: {
+        version: 1,
+        kind: "continue",
+        fromRunId: "builder-01-task-a",
+        contextId: "ctx1",
+        priorState: "needs-review",
+        missingEvidence: [],
+        prBlockers: [],
+        carryEvidence: false,
+        evidenceResults: [],
+        createdAt: "2026-04-25T00:00:00.000Z",
+      },
+    })).rejects.toThrow("is busy")
   })
 
   test("operator status reports stale leases and writes runtime status", async () => {
@@ -505,6 +954,7 @@ describe("runtime invariants", () => {
     expect(() => assertControlAllowed("launch")).toThrow("worker-control commands are disabled")
     expect(() => assertControlAllowed("work on repo")).toThrow("worker-control commands are disabled")
     expect(() => assertControlAllowed("repo")).not.toThrow()
+    expect(() => assertControlAllowed("verify")).not.toThrow()
   })
 
   test("provision logs detect recursive worker-control command attempts", () => {
@@ -553,8 +1003,13 @@ describe("runtime invariants", () => {
         check: "tsc --noEmit",
         build: "vite build",
       },
+      devDependencies: {
+        electron: "latest",
+      },
       packageManager: "pnpm@10.0.0",
     }))
+    await mkdir(path.join(checkout, "src-tauri"), {recursive: true})
+    await writeFile(path.join(checkout, "src-tauri", "tauri.conf.json"), "{}\n")
     await writeFile(path.join(checkout, "flake.nix"), "{}\n")
 
     const devEnv = await detectDevEnv(checkout)
@@ -567,10 +1022,283 @@ describe("runtime invariants", () => {
     expect(profile.stacks).toContain("rust")
     expect(profile.stacks).toContain("go")
     expect(profile.stacks).toContain("node")
+    expect(profile.stacks).toContain("desktop")
+    expect(profile.stacks).toContain("electron")
+    expect(profile.stacks).toContain("tauri")
     expect(profile.likelyCommands.some(item => item.command.join(" ") === "cargo check")).toBe(true)
     expect(profile.likelyCommands.some(item => item.command.join(" ") === "go test ./...")).toBe(true)
     expect(profile.likelyCommands.some(item => item.command.join(" ") === "pnpm run check")).toBe(true)
     expect(profile.guidance.join(" ")).toContain("override")
+  })
+
+  test("verification plan records local runners without executing them", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    const app = makeApp(runtimeRoot)
+
+    const plan = createVerificationPlan(app, "web", {stacks: ["node", "web"]})
+    const file = await writeVerificationPlan(checkout, plan)
+    const saved = JSON.parse(await readFile(file, "utf8")) as typeof plan
+
+    expect(plan.selectedRunnerIds).toContain("repo-native")
+    expect(plan.selectedRunnerIds).toContain("browser")
+    expect(plan.runners.find(runner => runner.id === "browser")?.kind).toBe("playwright-mcp")
+    expect(plan.runners.find(runner => runner.id === "browser")?.configured).toBe(true)
+    expect(saved.version).toBe(1)
+    expect(saved.mode).toBe("web")
+  })
+
+  test("local verification command runner writes structured results and logs", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    const app = makeApp(runtimeRoot)
+    app.config.verification = {
+      defaultRunners: {code: ["repo-native"]},
+      runners: {
+        "repo-native": {
+          kind: "command",
+          enabled: true,
+          local: true,
+          modes: ["code"],
+          command: ["sh", "-c", "true"],
+        },
+      },
+    }
+
+    const plan = createVerificationPlan(app, "code", {stacks: []})
+    const results = await runLocalVerificationRunners({checkout, plan})
+
+    expect(results).toHaveLength(1)
+    expect(results[0]?.state).toBe("succeeded")
+    expect(results[0]?.logFile).toBeTruthy()
+    expect(existsSync(results[0]!.logFile!)).toBe(true)
+    expect(verificationHasFailure(results)).toBeUndefined()
+  })
+
+  test("local verification command failures are reported as run-blocking results", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    const app = makeApp(runtimeRoot)
+    app.config.verification = {
+      defaultRunners: {code: ["repo-native"]},
+      runners: {
+        "repo-native": {
+          kind: "command",
+          enabled: true,
+          local: true,
+          modes: ["code"],
+          command: ["sh", "-c", "exit 7"],
+        },
+      },
+    }
+
+    const plan = createVerificationPlan(app, "code", {stacks: []})
+    const results = await runLocalVerificationRunners({checkout, plan})
+
+    expect(results[0]?.state).toBe("failed")
+    expect(results[0]?.exitCode).toBe(7)
+    expect(verificationHasFailure(results)?.id).toBe("repo-native")
+  })
+
+  test("worker-invoked verification runner appends evidence for orchestrator collection", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    const app = makeApp(runtimeRoot)
+    app.config.verification = {
+      autoRunAfterWorker: false,
+      defaultRunners: {code: ["repo-native"]},
+      runners: {
+        "repo-native": {
+          kind: "command",
+          enabled: true,
+          local: true,
+          modes: ["code"],
+          command: ["sh", "-c", "true"],
+        },
+      },
+    }
+    const plan = createVerificationPlan(app, "code", {stacks: []})
+    await writeVerificationPlan(checkout, plan)
+
+    const results = await runVerificationRunner({checkout, plan, runnerId: "repo-native", source: "worker"})
+    await appendVerificationResultsFile(checkout, results)
+    const saved = await readVerificationResults(checkout)
+
+    expect(saved[0]?.id).toBe("repo-native")
+    expect(saved[0]?.source).toBe("worker")
+    expect(saved[0]?.state).toBe("succeeded")
+  })
+
+  test("workers can record agentic verification evidence without running a command", async () => {
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
+    const plan = createVerificationPlan(app, "web", {stacks: ["web"]})
+    const runner = plan.runners.find(item => item.id === "browser")!
+
+    const result = manualVerificationResult(runner, {
+      state: "succeeded",
+      note: "Verified login flow in browser with worker Nostr account.",
+      artifacts: [".openteam/artifacts/playwright/session.json"],
+    })
+    await appendVerificationResultsFile(checkout, [result])
+    const saved = await readVerificationResults(checkout)
+
+    expect(saved[0]?.id).toBe("browser")
+    expect(saved[0]?.state).toBe("succeeded")
+    expect(saved[0]?.note).toContain("login flow")
+  })
+
+  test("verify browser records structured browser evidence", async () => {
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
+    await writeVerificationPlan(checkout, createVerificationPlan(app, "web", {stacks: ["web"]}))
+
+    const originalLog = console.log
+    console.log = () => undefined
+    try {
+      await verifyCommand(app, "browser", [
+        "verify",
+        "browser",
+        "--checkout",
+        checkout,
+        "--flow",
+        "light theme repo grid",
+        "--url",
+        "http://127.0.0.1:18471/repos",
+        "--screenshot",
+        ".openteam/artifacts/playwright/light-theme.png",
+        "--console",
+        "No console errors during repo-grid inspection.",
+        "--network",
+        "No failed git metadata requests.",
+      ])
+    } finally {
+      console.log = originalLog
+    }
+    const saved = await readVerificationResults(checkout)
+    const record = runRecord(app, {
+      state: "succeeded",
+      workerState: "succeeded",
+      doneContract: createDoneContract("builder", "web", "Fix light theme repo grid"),
+      verification: {
+        plan: createVerificationPlan(app, "web", {stacks: ["web"]}),
+        results: [
+          ...saved,
+          {
+            id: "repo-native",
+            kind: "command",
+            state: "succeeded",
+            evidenceType: "repo-native",
+            source: "worker",
+            logFile: ".openteam/artifacts/verification/repo-native.log",
+          },
+        ],
+      },
+    })
+    const evidence = runEvidenceView(record)
+
+    expect(saved[0]?.id).toBe("browser")
+    expect(saved[0]?.evidenceType).toBe("browser")
+    expect(saved[0]?.flow).toBe("light theme repo grid")
+    expect(saved[0]?.screenshots).toContain(".openteam/artifacts/playwright/light-theme.png")
+    expect(evidence.groupSummary.browser).toBe(1)
+    expect(evidence.level).toBe("strong")
+    expect(evidence.prEligible).toBe(true)
+  })
+
+  test("verify artifact records structured Nostr event evidence", async () => {
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
+    await writeVerificationPlan(checkout, createVerificationPlan(app, "code", {stacks: []}))
+
+    const originalLog = console.log
+    console.log = () => undefined
+    try {
+      await verifyCommand(app, "artifact", [
+        "verify",
+        "artifact",
+        ".openteam/artifacts/nostr/comment.json",
+        "--checkout",
+        checkout,
+        "--type",
+        "nostr",
+        "--runner",
+        "repo-comment",
+        "--event-id",
+        "nevent1example",
+        "--note",
+        "Published repo-visible issue comment with repro verdict.",
+      ])
+    } finally {
+      console.log = originalLog
+    }
+    const saved = await readVerificationResults(checkout)
+
+    expect(saved[0]?.id).toBe("repo-comment")
+    expect(saved[0]?.evidenceType).toBe("nostr")
+    expect(saved[0]?.artifacts).toContain(".openteam/artifacts/nostr/comment.json")
+    expect(saved[0]?.eventIds).toContain("nevent1example")
+  })
+
+  test("browser verification runner is explicit agentic evidence instead of a silent command", async () => {
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
+    const plan = createVerificationPlan(app, "web", {stacks: ["web"]})
+
+    const results = await runVerificationRunner({checkout, plan, runnerId: "browser", source: "worker"})
+
+    expect(results[0]?.id).toBe("browser")
+    expect(results[0]?.state).toBe("skipped")
+    expect(results[0]?.skippedReason).toContain("verify record browser")
+  })
+
+  test("verification plan can surface explicit desktop runner capability", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    app.config.verification = {
+      defaultRunners: {code: ["repo-native"]},
+      runners: {
+        "desktop-command": {
+          kind: "desktop-command",
+          enabled: true,
+          local: true,
+          modes: ["code"],
+          stacks: ["desktop", "tauri"],
+        },
+      },
+    }
+
+    const plan = createVerificationPlan(app, "code", {stacks: ["tauri"]})
+
+    expect(plan.selectedRunnerIds).toContain("repo-native")
+    expect(plan.selectedRunnerIds).toContain("desktop-command")
+    expect(plan.runners.find(runner => runner.id === "desktop-command")?.kind).toBe("desktop-command")
+    expect(plan.runners.find(runner => runner.id === "desktop-command")?.configured).toBe(true)
+  })
+
+  test("guarded iOS verification blocks when local simulator capability is unavailable", async () => {
+    if (process.platform === "darwin") return
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    const app = makeApp(runtimeRoot)
+    app.config.verification = {
+      defaultRunners: {code: ["ios-simulator"]},
+      runners: {
+        "ios-simulator": {
+          kind: "ios-simulator",
+          enabled: true,
+          local: true,
+          modes: ["code"],
+          command: ["sh", "-c", "true"],
+        },
+      },
+    }
+
+    const plan = createVerificationPlan(app, "code", {stacks: ["ios"]})
+    const results = await runLocalVerificationRunners({checkout, plan})
+
+    expect(results[0]?.state).toBe("blocked")
+    expect(results[0]?.blocker).toContain("macOS")
   })
 
   test("detects legacy nix-shell environments", async () => {

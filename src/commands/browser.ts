@@ -13,6 +13,8 @@ const must = (value: string, label: string) => {
   return value
 }
 
+const shellQuote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`
+
 const agentIdForRef = (app: AppCfg, value?: string, fallback = "") => {
   const raw = value || fallback
   if (!raw) throw new Error("missing agentId or role")
@@ -123,6 +125,9 @@ export const browserInspection = async (app: AppCfg, ref: string) => {
     devEnvSource: runRecord?.devEnv?.source ?? state.devEnvSource,
     projectProfile: runRecord?.projectProfile?.path ?? state.projectProfile,
     projectStacks: runRecord?.projectProfile?.stacks ?? state.projectStacks,
+    verificationPlan: runRecord?.verification?.planPath ?? state.verificationPlan,
+    verificationRunners: runRecord?.verification?.plan.runners.map(runner => `${runner.id}:${runner.configured ? "configured" : "unavailable"}`) ?? state.verificationRunners,
+    verificationResults: runRecord?.verification?.results?.map(result => `${result.id}:${result.state}`),
     url,
     checkout: state.checkout,
     logFile: state.logFile,
@@ -136,6 +141,7 @@ export const browserInspection = async (app: AppCfg, ref: string) => {
     commands: {
       openUrl: liveWebRun ? `xdg-open ${url}` : undefined,
       tailLog: state.logFile ? `tail -f ${state.logFile}` : undefined,
+      recordBrowserEvidence: state.checkout && url ? `cd ${shellQuote(state.checkout)} && openteam verify browser --flow "<flow>" --url ${shellQuote(url)} --dev-health --note "<what was verified>" --screenshot <path>` : undefined,
       openProfileAfterRun: `${app.config.browser.executablePath || "chromium"} --user-data-dir ${browserProfile}`,
     },
   }
@@ -177,6 +183,9 @@ const printBrowserInspection = (info: Awaited<ReturnType<typeof browserInspectio
   console.log(`dev env: ${info.devEnv ?? "none"}${info.devEnvSource ? ` (${info.devEnvSource})` : ""}`)
   if (info.projectStacks?.length) console.log(`project stacks: ${info.projectStacks.join(", ")}`)
   if (info.projectProfile) console.log(`project profile: ${info.projectProfile}`)
+  if (info.verificationPlan) console.log(`verification plan: ${info.verificationPlan}`)
+  if (info.verificationRunners?.length) console.log(`verification runners: ${info.verificationRunners.join(", ")}`)
+  if (info.verificationResults?.length) console.log(`verification results: ${info.verificationResults.join(", ")}`)
   console.log(`url: ${info.url || "(none)"}`)
   console.log(`checkout: ${info.checkout ?? "(none)"}`)
   console.log(`log: ${info.logFile ?? "(none)"}`)
@@ -187,6 +196,7 @@ const printBrowserInspection = (info: Awaited<ReturnType<typeof browserInspectio
   console.log(`playwright artifacts: ${info.browserArtifacts}`)
   if (info.commands.openUrl) console.log(`open current app URL: ${info.commands.openUrl}`)
   if (info.commands.tailLog) console.log(`tail worker log: ${info.commands.tailLog}`)
+  if (info.commands.recordBrowserEvidence) console.log(`record browser evidence: ${info.commands.recordBrowserEvidence}`)
   console.log(`open worker profile after run: ${info.commands.openProfileAfterRun}`)
   if (info.liveWebRun) {
     console.log("note: do not open the worker profile while Playwright is using it; use the URL/log/artifacts for live observation.")

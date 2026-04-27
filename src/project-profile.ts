@@ -73,6 +73,17 @@ const packageManagerCommand = (checkout: string, packageManager?: string) => {
   return "npm"
 }
 
+const hasPackageDependency = (
+  pkg: Awaited<ReturnType<typeof packageJsonInfo>>,
+  pattern: RegExp,
+) => {
+  const deps = {
+    ...(pkg?.dependencies ?? {}),
+    ...(pkg?.devDependencies ?? {}),
+  }
+  return Object.keys(deps).some(name => pattern.test(name))
+}
+
 const addSignal = (signals: ProjectSignal[], stack: string, file: string, reason: string) => {
   signals.push({stack, file, reason})
 }
@@ -111,6 +122,19 @@ export const detectProjectProfile = async (checkout: string, devEnv: DevEnv): Pr
   if (has(checkout, "pnpm-workspace.yaml")) {
     addSignal(signals, "node", "pnpm-workspace.yaml", "pnpm workspace")
   }
+  if (hasPackageDependency(pkg, /^electron$/)) {
+    addSignal(signals, "electron", "package.json", "Electron desktop app dependency")
+    addSignal(signals, "desktop", "package.json", "Desktop app candidate")
+  }
+  if (
+    has(checkout, "src-tauri/tauri.conf.json") ||
+    has(checkout, "src-tauri/Cargo.toml") ||
+    has(checkout, "tauri.conf.json") ||
+    hasPackageDependency(pkg, /^@tauri-apps\//)
+  ) {
+    addSignal(signals, "tauri", has(checkout, "src-tauri/tauri.conf.json") ? "src-tauri/tauri.conf.json" : "package.json", "Tauri desktop app candidate")
+    addSignal(signals, "desktop", has(checkout, "src-tauri/tauri.conf.json") ? "src-tauri/tauri.conf.json" : "package.json", "Desktop app candidate")
+  }
 
   if (has(checkout, "go.mod")) {
     addSignal(signals, "go", "go.mod", "Go module")
@@ -148,6 +172,15 @@ export const detectProjectProfile = async (checkout: string, devEnv: DevEnv): Pr
     blockers.push("Xcode project builds require macOS/Xcode availability.")
   }
   if (has(checkout, "Podfile")) addSignal(signals, "ios", "Podfile", "CocoaPods project")
+
+  if (has(checkout, "meson.build")) {
+    addSignal(signals, "desktop", "meson.build", "Native desktop build candidate")
+    addSignal(signals, "gtk", "meson.build", "GTK/meson desktop candidate")
+  }
+  if (has(checkout, "CMakeLists.txt")) {
+    addSignal(signals, "desktop", "CMakeLists.txt", "Native desktop CMake build candidate")
+    addSignal(signals, "qt", "CMakeLists.txt", "Qt/CMake desktop candidate")
+  }
 
   if (has(checkout, ".devcontainer/devcontainer.json")) {
     addSignal(signals, "devcontainer", ".devcontainer/devcontainer.json", "Dev Container environment declaration")

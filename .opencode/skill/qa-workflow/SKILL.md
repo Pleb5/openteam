@@ -26,6 +26,10 @@ The QA role should reduce uncertainty about real behavior.
 ## Primary tools
 
 - use the browser first for UI and behavior questions
+- use `.openteam/verification-plan.json` as a checklist of configured local verification capabilities when it exists
+- use `openteam verify run <runner-id>`, `openteam verify browser ...`, `openteam verify artifact ...`, or `openteam verify record <runner-id> ...` to leave structured evidence from browser, live Nostr, GUI, repo-native, or native-device checks
+- for browser evidence, include flow name, URL, screenshot/artifact path, and console/network observations when relevant
+- record pass/fail/flaky/blocked evidence before returning to the orchestrator
 - use code inspection only to explain or narrow observations, not to replace them
 - use `nak` for issue-thread reading or repository-visible follow-up when the task actually calls for it
 - prefer shared skills first:

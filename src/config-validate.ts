@@ -1,5 +1,6 @@
 import {existsSync} from "node:fs"
 import {nip19} from "nostr-tools"
+import {effectiveVerificationConfig} from "./verification.js"
 import type {AgentCfg, AppCfg, ProviderCfg, TaskMode} from "./types.js"
 
 export type ConfigValidationCapability =
@@ -253,6 +254,47 @@ const capabilityIssues = (app: AppCfg, options: ConfigValidationOptions) => {
   return issues
 }
 
+const verificationIssues = (app: AppCfg) => {
+  const issues: ConfigValidationIssue[] = []
+  const config = effectiveVerificationConfig(app)
+  const validKinds = new Set(["command", "playwright-mcp", "desktop-command", "android-adb", "ios-simulator"])
+  const validModes = new Set(["code", "web"])
+
+  if (config.autoRunAfterWorker !== undefined && typeof config.autoRunAfterWorker !== "boolean") {
+    issues.push(issue("error", "verification-auto-run-invalid", "verification.autoRunAfterWorker must be boolean"))
+  }
+
+  for (const [mode, runnerIds] of Object.entries(config.defaultRunners)) {
+    if (!validModes.has(mode)) {
+      issues.push(issue("error", "verification-default-mode-invalid", `verification.defaultRunners contains invalid mode '${mode}'`))
+    }
+    for (const id of runnerIds ?? []) {
+      if (!config.runners[id]) {
+        issues.push(issue("error", "verification-runner-missing", `verification.defaultRunners.${mode} references unknown runner '${id}'`))
+      }
+    }
+  }
+
+  for (const [id, runner] of Object.entries(config.runners)) {
+    if (!validKinds.has(runner.kind)) {
+      issues.push(issue("error", "verification-runner-kind-invalid", `verification runner '${id}' has invalid kind '${runner.kind}'`))
+    }
+    for (const mode of runner.modes ?? []) {
+      if (!validModes.has(mode)) {
+        issues.push(issue("error", "verification-runner-mode-invalid", `verification runner '${id}' has invalid mode '${mode}'`))
+      }
+    }
+    if (runner.timeoutMs !== undefined && (!Number.isFinite(runner.timeoutMs) || runner.timeoutMs <= 0)) {
+      issues.push(issue("error", "verification-runner-timeout-invalid", `verification runner '${id}' has invalid timeoutMs`))
+    }
+    if (runner.kind === "playwright-mcp" && runner.enabled && app.config.browser.mcp.command.length === 0) {
+      issues.push(issue("warning", "verification-browser-runner-unavailable", `verification runner '${id}' is enabled but browser.mcp.command is not configured`))
+    }
+  }
+
+  return issues
+}
+
 export const validateAppConfig = (app: AppCfg, options: ConfigValidationOptions = {}) => {
   const issues = [
     ...relayBucketIssues(app),
@@ -262,6 +304,7 @@ export const validateAppConfig = (app: AppCfg, options: ConfigValidationOptions 
     ...repoPathIssues(app),
     ...forkIssues(app, options),
     ...capabilityIssues(app, options),
+    ...verificationIssues(app),
   ]
 
   return {

@@ -13,6 +13,55 @@
       "environment": {}
     }
   },
+  "verification": {
+    "autoRunAfterWorker": false,
+    "defaultRunners": {
+      "code": ["repo-native"],
+      "web": ["repo-native", "browser"]
+    },
+    "runners": {
+      "repo-native": {
+        "kind": "command",
+        "enabled": true,
+        "local": true,
+        "description": "Repo-native checks selected from project docs, declared scripts, and the project profile.",
+        "modes": ["code", "web"],
+        "stacks": []
+      },
+      "browser": {
+        "kind": "playwright-mcp",
+        "enabled": true,
+        "local": true,
+        "description": "Local Playwright MCP validation against the openteam-managed browser/dev-server runtime.",
+        "modes": ["web"],
+        "stacks": ["web", "node"]
+      },
+      "desktop-command": {
+        "kind": "desktop-command",
+        "enabled": true,
+        "local": true,
+        "description": "Local desktop-app verification through explicit repo-native commands with managed logs, timeouts, and cleanup.",
+        "modes": ["code"],
+        "stacks": ["desktop", "electron", "tauri", "gtk", "qt"]
+      },
+      "android-adb": {
+        "kind": "android-adb",
+        "enabled": false,
+        "local": true,
+        "description": "Guarded local Android emulator/device verification through ADB or repo-native Android test commands.",
+        "modes": ["code"],
+        "stacks": ["android"]
+      },
+      "ios-simulator": {
+        "kind": "ios-simulator",
+        "enabled": false,
+        "local": true,
+        "description": "Guarded local iOS simulator verification through simctl/xcodebuild or repo-native iOS test commands.",
+        "modes": ["code"],
+        "stacks": ["ios", "swift"]
+      }
+    }
+  },
   "providers": {},
   "repos": {
     "control": {

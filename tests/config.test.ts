@@ -168,4 +168,27 @@ describe("config helpers", () => {
     expect(result.errors.some(item => item.code === "profile-relays-empty")).toBe(true)
     expect(result.errors.some(item => item.code === "provider-tokens-empty")).toBe(true)
   })
+
+  test("validates verification runner references", () => {
+    const result = validateAppConfig(app({
+      verification: {
+        defaultRunners: {code: ["missing-runner"]},
+        runners: {},
+      },
+    }))
+
+    expect(result.errors.some(item => item.code === "verification-runner-missing")).toBe(true)
+  })
+
+  test("warns when enabled browser verification has no MCP command", () => {
+    const result = validateAppConfig(app({
+      browser: {
+        headless: false,
+        executablePath: "/usr/bin/chromium",
+        mcp: {name: "playwright", command: [], environment: {}},
+      },
+    }))
+
+    expect(result.warnings.some(item => item.code === "verification-browser-runner-unavailable")).toBe(true)
+  })
 })

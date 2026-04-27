@@ -180,6 +180,13 @@ When publishing raw PR events:
 
 When the task touches UI, the browser is the source of truth.
 
+- Treat `.openteam/verification-plan.json` as a checklist of configured local verification capabilities.
+- Use `openteam verify list`, `openteam verify run <runner-id>`, `openteam verify browser ...`, `openteam verify artifact ...`, or `openteam verify record <runner-id> ...` to leave structured evidence before returning success.
+- For browser evidence, prefer `openteam verify browser --flow "<flow>" --url "$OPENTEAM_DEV_URL" --screenshot <path> --console "<summary>" --network "<summary>" --dev-health`.
+- Do not claim a configured runner executed unless `verification.results` or your own artifact/log evidence proves it.
+- Normal PR publication is blocked unless evidence is strong; use `openteam runs evidence <run-id>` when unsure.
+- If evidence is missing or weak, expect the run to finish as `needs-review` and leave the repo state for orchestrator/operator follow-up.
+- Do not publish a PR unless strong verification evidence exists, unless the task explicitly asks for draft/WIP output.
 - trust the browser over assumptions in code
 - check visible behavior, console, and network when relevant
 - do not claim success until the UI behavior is observed

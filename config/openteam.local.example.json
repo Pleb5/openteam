@@ -27,6 +27,24 @@
       "visibility": "public"
     }
   },
+  "verification": {
+    "autoRunAfterWorker": false,
+    "defaultRunners": {
+      "code": ["repo-native"],
+      "web": ["repo-native", "browser"]
+    },
+    "runners": {
+      "desktop-command": {
+        "enabled": true
+      },
+      "android-adb": {
+        "enabled": false
+      },
+      "ios-simulator": {
+        "enabled": false
+      }
+    }
+  },
   "reporting": {
     "dmRelays": [
       "wss://relay.example.com"

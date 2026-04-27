@@ -91,6 +91,19 @@ The same canonical Nostr repo is serialized by default; use the explicit `in par
 Current one-off job limits are deliberately small: builder 2, researcher 2, qa 1, triager 1.
 If a managed checkout declares a development environment with `.envrc` `use flake`, `flake.nix`, `shell.nix`, or `default.nix`, openteam launches provisioning, worker OpenCode sessions, and web dev servers through that environment.
 Detected dev environment details are recorded in run records as `devEnv`.
+openteam also writes `.openteam/verification-plan.json` for each managed run.
+The plan records which local verification runners are selected and whether they are configured.
+Workers use `openteam verify list`, `openteam verify run <runner-id>`, `openteam verify browser ...`, `openteam verify artifact ...`, and `openteam verify record <runner-id> ...` during their own task loop.
+`openteam verify run` executes through the detected dev environment and writes logs under `.openteam/artifacts/verification/`.
+`openteam verify browser` records browser flow, URL, screenshot, console/network summary, and optional dev-health evidence after the worker uses Playwright MCP or another browser tool.
+`openteam verify artifact` records a structured artifact such as a screenshot, Nostr event JSON, desktop log, or mobile output.
+`openteam verify record` records other agentic evidence from browser, desktop GUI, live Nostr, repo, or native-device checks.
+The launcher collects `.openteam/verification-results.json` after the worker phase; failed or blocked worker evidence fails the run.
+Automatic post-worker runner execution is disabled by default with `verification.autoRunAfterWorker: false`.
+If the worker exits successfully but evidence is missing or weak, the final run state is `needs-review` instead of `succeeded`.
+Normal Nostr-git PR publication is blocked until `openteam runs evidence <run-id>` reports `PR eligible: yes`, unless draft/WIP publication is explicit.
+Mobile-native runners are guarded and disabled by default.
+Existing web-mode dev-server health checks continue to run as runtime sanity checks, not as a substitute for worker browser verification.
 For Nix flakes, openteam uses `nix develop --command ...`; for legacy Nix shells it uses `nix-shell --run ...`.
 openteam also writes `.openteam/project-profile.json` in each checkout.
 The profile records detected stack hints such as Rust, Node, Go, Python, Gradle/Android, Swift/iOS, tool-version files, docs to inspect, and likely validation commands.
@@ -156,6 +169,11 @@ bun run src/cli.ts runs list --limit 10
 bun run src/cli.ts runs show <run-id>
 bun run src/cli.ts runs show <run-id> --raw
 bun run src/cli.ts runs diagnose <run-id>
+bun run src/cli.ts runs evidence <run-id>
+bun run src/cli.ts runs observe <run-id>
+bun run src/cli.ts runs watch --active
+bun run src/cli.ts runs continue <run-id> --task "finish the remaining work and verify it"
+bun run src/cli.ts runs repair-evidence <run-id>
 bun run src/cli.ts runs cleanup-stale --dry-run
 bun run src/cli.ts runs cleanup-stale
 bun run src/cli.ts runs stop <run-id>
@@ -169,6 +187,13 @@ Web runs also separate `workerState` from `verificationState`.
 `verificationState: "failed"` with `failureCategory: "dev-server-unhealthy"` means the task phase completed but the dev server could not be verified at the end of the run.
 Use `runs show --raw` only when you need the unmodified run record.
 Use `runs diagnose` for detailed evidence when a worker appears idle, its logs stop moving, or its dev URL is unreachable.
+Use `runs evidence` for the operator-facing evidence contract summary: done contract, required evidence, missing evidence, grouped verification results, artifacts, PR eligibility, and recommended next action.
+Use `runs observe` for a compact single-run observation snapshot: effective state, active phase, live PID signals, dev URL health, evidence level, PR eligibility, and recommended action.
+Use `runs watch` to poll recent runs and print only transitions; the long-running orchestrator service runs the same observer and persists state to `runtime/orchestrator/observations.json`.
+Use `runs continue <run-id>` to launch a focused continuation from the same idle repo context.
+Use `runs repair-evidence <run-id>` when a worker likely finished the edit but evidence is missing, weak, or blocked.
+Continuation refuses a busy context, carries prior successful verification results into the checkout by default, and injects prior missing evidence / PR blockers into the worker prompt.
+Failed or blocked prior results are kept as prompt context only so an evidence-repair run can replace them with fresh evidence.
 Diagnosis checks recorded process PIDs, dev/browser URL health, recent log activity, and repo-context lease state.
 `runs cleanup-stale --dry-run` shows which records would be marked stale and which repo contexts would be released.
 The non-dry-run cleanup marks only stale records terminal and releases their leases; it does not delete repo checkouts.
@@ -184,6 +209,7 @@ Worker process policy:
 - managed Git checkouts use an openteam repo-local credential helper for configured provider fork remotes
 - workers should use plain `git push origin <branch>` from the managed checkout and should not use `gh auth`, host-global credential helpers, or personal Git remotes for openteam fork publication
 - Nostr-git PR publication should use `openteam repo publish pr ...` after pushing the branch; global `gh auth` is not part of the default publication path
+- Normal `repo publish pr` and `repo publish pr-update` require strong evidence from the active run/checkout; use `--draft` or `--wip` only when incomplete verification is intentional
 - workers should treat GUI openers, system package installs, writes outside checkout/runtime, and broad destructive cleanup as blockers unless explicitly authorized
 
 Inspect or attach to a worker browser context:
@@ -323,7 +349,8 @@ Durable run records:
 runtime/runs/<agentId>-<taskId>.json
 ```
 
-Each run record stores task identity, target, resolved repo/fork/context, detected dev environment, project-profile summary, log paths, browser profile/artifact paths, start/finish time, `durationMs`, final result, worker state, verification state, failure category, and phase timings for target resolution, provisioning, dev-server startup, worker execution, verification, and cleanup.
+Each run record stores task identity, target, resolved repo/fork/context, detected dev environment, project-profile summary, log paths, browser profile/artifact paths, start/finish time, `durationMs`, final result, worker state, verification state, failure category, and phase timings for target resolution, provisioning, dev-server startup, worker execution, verification evidence collection, and cleanup.
+New run records also store a done contract plus the selected local verification plan and worker-produced runner results under `verification`.
 New run records also store known process PIDs for the runner, provisioning OpenCode session, worker OpenCode session, dev server, and bunker where available.
 Those PIDs are diagnostic evidence only; stale-run reconciliation also checks URL health and log freshness.
 For web-mode runs, openteam monitors the dev server while the worker is active.

@@ -8,12 +8,16 @@ Default behavior:
 - reproduce before changing code when the task is bug-shaped
 - prefer minimal correct edits
 - verify with repo-native checks first, then browser validation when UI behavior matters
+- use `openteam verify list`, `openteam verify run <runner-id>`, `openteam verify browser ...`, `openteam verify artifact ...`, or `openteam verify record <runner-id> ...` to leave structured evidence from repo-native, browser, GUI, Nostr, or native-device verification
 - leave the repo in a clean, reviewable state
 
 Operating rules:
 
 - do not invent product scope beyond the task
 - do not skip verification because a change seems obvious
+- do not return success without concise evidence of what you verified and what remains risky
+- expect the run to finish as `needs-review` instead of `succeeded` when evidence is missing or weak
+- publish PRs only after `openteam runs evidence <run-id>` would classify the evidence as strong, unless the task explicitly asks for draft/WIP output
 - if the browser reveals a mismatch between UI and code assumptions, trust the browser
 - push branches from the managed checkout with plain `git push origin <branch>`; do not use personal `gh auth`, host-global credential helpers, or alternate remotes for openteam forks
 - publish pull-request intent through `openteam repo publish pr ...` for Nostr-git repositories instead of depending on `gh auth`

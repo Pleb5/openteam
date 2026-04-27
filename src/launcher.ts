@@ -9,13 +9,28 @@ import process from "node:process"
 import {startBunker, type RunningBunker} from "./bunker.js"
 import {prepareAgent} from "./config.js"
 import {detectDevEnv, wrapDevEnvCommand, type DevEnv} from "./dev-env.js"
+import {createDoneContract, doneContractPromptLines} from "./done-contract.js"
 import {pollInboundTasks, subscribeInboundTasks} from "./dm.js"
+import {evaluateEvidencePolicy, type EvidencePolicyView} from "./evidence-policy.js"
 import {KIND_GIT_ISSUE} from "./events.js"
 import {detectOpenCodeHardFailure} from "./opencode-log.js"
 import {dispatchOperatorRequest} from "./orchestrator.js"
 import {detectProjectProfile, projectProfilePromptLines, writeProjectProfile, type ProjectProfile} from "./project-profile.js"
 import {writeRepoPublishContext} from "./repo-publish.js"
 import {releaseRepoContext, resolveRepoAnnouncementTarget, resolveRepoRelayPolicy, resolveRepoTarget, type RepoRelayPolicy} from "./repo.js"
+import {continuationEvidenceForCarry, continuationPromptLines} from "./run-continuation.js"
+import {formatObservationEvent, observeRuns} from "./run-observer.js"
+import {
+  appendVerificationResultsFile,
+  createVerificationPlan,
+  effectiveVerificationConfig,
+  readVerificationResults,
+  resetVerificationResults,
+  runLocalVerificationRunners,
+  verificationHasFailure,
+  verificationPlanSummary,
+  writeVerificationPlan,
+} from "./verification.js"
 import {
   graspServers,
   getSelfNpub,
@@ -306,6 +321,8 @@ const compose = (
   defaultPublishScope = "repo",
   devEnv?: DevEnv,
   projectProfile?: ProjectProfile,
+  doneContract?: TaskRunRecord["doneContract"],
+  continuation?: TaskItem["continuation"],
 ) => {
   const grasp = graspServers(agent)
   return [
@@ -319,7 +336,10 @@ const compose = (
     grasp.length > 0 ? `Configured GRASP relays: ${grasp.join(", ")}` : `Configured GRASP relays: none`,
     `Detected repo dev environment: ${devEnv?.kind ?? "none"}${devEnv?.source ? ` (${devEnv.source})` : ""}`,
     ...projectProfilePromptLines(projectProfile),
+    ...doneContractPromptLines(doneContract),
+    ...continuationPromptLines(continuation),
     ...repoRelayContext(repoPolicy, defaultPublishScope),
+    `Verification tools: run \`openteam verify list\` to inspect available capabilities, \`openteam verify run <runner-id>\` for configured local command/native checks, \`openteam verify browser --flow "..." --url "${url}" --screenshot <path>\` for browser evidence, and \`openteam verify record <runner-id> --state succeeded --note "..."\` for GUI/Nostr/live-data evidence.`,
     `Task: ${task}`,
     `The repository environment has been provisioned by the orchestrator before handoff. Start cleanly from the prepared repo context.`,
     `Use checkout-local scratch space such as .openteam/tmp for repro clones or temporary files; avoid /tmp unless the operator explicitly grants broader filesystem access.`,
@@ -329,7 +349,9 @@ const compose = (
     `If the environment still appears broken, stop with a concrete blocker instead of trying to redesign provisioning yourself.`,
     `Operator task-status DMs are handled by openteam runtime; focus on the task itself unless the task explicitly requires Nostr messaging work.`,
     `Use the browser MCP if available to verify UI behavior before you claim success.`,
-    `For branch publication, use plain git against the configured origin and publish Nostr-git PR events through openteam repo publish pr; do not rely on gh auth or personal forge sessions.`,
+    `When you use browser, desktop, mobile, Nostr, or repo-native verification, record concise evidence through \`openteam verify record\` or \`openteam verify run\` before returning success.`,
+    `If evidence is missing or weak, the run will finish as needs-review; continue verification or report a concrete blocker rather than claiming complete success.`,
+    `For branch publication, use plain git against the configured origin and publish Nostr-git PR events through openteam repo publish pr; normal PR publication is blocked until evidence is strong, and you must not rely on gh auth or personal forge sessions.`,
     `If the target app requires login, use the Remote Signer flow with the bunker URL above when appropriate.`,
     `Keep working until the task is handled end-to-end or you hit a concrete blocker.`,
   ].join("\n")
@@ -342,6 +364,8 @@ const composeCode = (
   defaultPublishScope = "repo",
   devEnv?: DevEnv,
   projectProfile?: ProjectProfile,
+  doneContract?: TaskRunRecord["doneContract"],
+  continuation?: TaskItem["continuation"],
 ) => {
   return [
     `You are ${agent.id}, a ${agent.meta.role} worker in openteam.`,
@@ -349,6 +373,9 @@ const composeCode = (
     ...repoRelayContext(repoPolicy, defaultPublishScope),
     `Detected repo dev environment: ${devEnv?.kind ?? "none"}${devEnv?.source ? ` (${devEnv.source})` : ""}`,
     ...projectProfilePromptLines(projectProfile),
+    ...doneContractPromptLines(doneContract),
+    ...continuationPromptLines(continuation),
+    `Verification tools: run \`openteam verify list\` to inspect available capabilities, \`openteam verify run <runner-id>\` for configured local command/native checks, \`openteam verify record <runner-id> --type <browser|nostr|desktop|mobile|manual> --state succeeded --note "..."\` for structured agentic evidence, and \`openteam verify artifact <path> --type <type>\` for artifacts.`,
     `Task: ${task}`,
     `This run is code-first, not browser-first. Do not assume a dev server or browser is required unless the task proves otherwise.`,
     `The repository environment has been provisioned by the orchestrator before handoff. Start cleanly from the prepared repo context.`,
@@ -358,7 +385,9 @@ const composeCode = (
     `Do not run destructive cleanup such as broad rm -rf or git reset --hard unless the task explicitly requires it and the scope is clear.`,
     `If the environment still appears broken, stop with a concrete blocker instead of trying to redesign provisioning yourself.`,
     `Operator task-status DMs are handled by openteam runtime; focus on the task itself unless the task explicitly requires Nostr messaging work.`,
-    `For branch publication, use plain git against the configured origin and publish Nostr-git PR events through openteam repo publish pr; do not rely on gh auth or personal forge sessions.`,
+    `When you use repo-native, desktop, mobile, Nostr, or other verification, record concise evidence through \`openteam verify record\` or \`openteam verify run\` before returning success.`,
+    `If evidence is missing or weak, the run will finish as needs-review; continue verification or report a concrete blocker rather than claiming complete success.`,
+    `For branch publication, use plain git against the configured origin and publish Nostr-git PR events through openteam repo publish pr; normal PR publication is blocked until evidence is strong, and you must not rely on gh auth or personal forge sessions.`,
     `Keep working until the task is handled end-to-end or you hit a concrete blocker.`,
   ].join("\n")
 }
@@ -814,7 +843,10 @@ export const enqueueTask = async (
     target: overrides.target,
     mode: overrides.mode,
     model: overrides.model,
+    runtimeId: overrides.runtimeId,
+    parallel: overrides.parallel,
     recipients: overrides.recipients,
+    continuation: overrides.continuation,
     source: overrides.source ?? {kind: "local"},
   }
 
@@ -886,6 +918,7 @@ const createRunRecord = async (agent: PreparedAgent, item: TaskItem) => {
     role: agent.agent.role,
     task: item.task,
     source: item.source,
+    continuation: item.continuation,
     model: item.model,
     target: item.target,
     mode: item.mode,
@@ -914,6 +947,11 @@ const updateRunRecord = async (record: TaskRunRecord, patch: Partial<TaskRunReco
   if (patch.browser) {
     record.browser = {...record.browser, ...patch.browser}
   }
+  if (patch.verification) {
+    record.verification = record.verification
+      ? {...record.verification, ...patch.verification}
+      : patch.verification
+  }
   if (patch.repo) record.repo = patch.repo
   if (patch.context) record.context = patch.context
   if (patch.devEnv) record.devEnv = patch.devEnv
@@ -921,6 +959,7 @@ const updateRunRecord = async (record: TaskRunRecord, patch: Partial<TaskRunReco
   if (patch.target !== undefined) record.target = patch.target
   if (patch.mode !== undefined) record.mode = patch.mode
   if (patch.model !== undefined) record.model = patch.model
+  if (patch.doneContract !== undefined) record.doneContract = patch.doneContract
   if (patch.workerState !== undefined) record.workerState = patch.workerState
   if (patch.verificationState !== undefined) record.verificationState = patch.verificationState
   if (patch.failureCategory !== undefined) record.failureCategory = patch.failureCategory
@@ -1002,6 +1041,110 @@ const browserRunInfo = (agent: PreparedAgent, url = "") => ({
   artifactDir: path.join(agent.paths.artifacts, "playwright"),
   url: url || undefined,
 })
+
+const appendVerificationResults = async (
+  record: TaskRunRecord,
+  results: NonNullable<NonNullable<TaskRunRecord["verification"]>["results"]>,
+) => {
+  if (results.length === 0 || !record.verification) return
+  await updateRunRecord(record, {
+    verification: {
+      ...record.verification,
+      results: [...(record.verification.results ?? []), ...results],
+    },
+  })
+}
+
+const runAutomaticVerification = async (
+  record: TaskRunRecord,
+  checkout: string,
+  plan: NonNullable<NonNullable<TaskRunRecord["verification"]>["plan"]>,
+  projectProfile: ProjectProfile,
+  devEnv?: DevEnv,
+) => {
+  const results = await runPhase(
+    record,
+    "run-automatic-verification",
+    () => runLocalVerificationRunners({
+      checkout,
+      plan,
+      profile: projectProfile,
+      devEnv,
+      env: checkoutRuntimeEnv(checkout),
+      source: "runtime",
+    }),
+    {runners: plan.runners.filter(runner => runner.kind !== "playwright-mcp").map(runner => runner.id)},
+  )
+  await appendVerificationResults(record, results)
+  const failure = verificationHasFailure(results)
+  if (!failure) {
+    if (results.some(result => result.state === "succeeded")) {
+      await updateRunRecord(record, {verificationState: "succeeded"})
+    }
+    return results
+  }
+
+  await updateRunRecord(record, {
+    verificationState: "failed",
+    failureCategory: failure.state === "blocked" ? "verification-blocked" : "verification-failed",
+  })
+  throw new Error(`verification runner ${failure.id} ${failure.state}: ${failure.blocker ?? failure.error ?? "see verification result"}`)
+}
+
+const collectWorkerVerificationResults = async (
+  record: TaskRunRecord,
+  checkout: string,
+) => {
+  const results = await runPhase(
+    record,
+    "collect-worker-verification",
+    () => readVerificationResults(checkout),
+  )
+  await appendVerificationResults(record, results)
+  const failure = verificationHasFailure(results)
+  if (!failure) {
+    if (results.some(result => result.state === "succeeded")) {
+      await updateRunRecord(record, {verificationState: "succeeded"})
+    }
+    return results
+  }
+
+  await updateRunRecord(record, {
+    verificationState: "failed",
+    failureCategory: failure.state === "blocked" ? "verification-blocked" : "verification-failed",
+  })
+  throw new Error(`worker verification ${failure.id} ${failure.state}: ${failure.blocker ?? failure.error ?? "see verification result"}`)
+}
+
+const maybeRunAutomaticVerification = async (
+  app: AppCfg,
+  record: TaskRunRecord,
+  checkout: string,
+  plan: NonNullable<NonNullable<TaskRunRecord["verification"]>["plan"]>,
+  projectProfile: ProjectProfile,
+  devEnv?: DevEnv,
+) => {
+  if (!effectiveVerificationConfig(app).autoRunAfterWorker) {
+    await skipRunPhase(record, "run-automatic-verification", {reason: "verification.autoRunAfterWorker is false"})
+    return []
+  }
+  return runAutomaticVerification(record, checkout, plan, projectProfile, devEnv)
+}
+
+const applyEvidenceQualityGate = async (record: TaskRunRecord): Promise<EvidencePolicyView> => {
+  const policy = evaluateEvidencePolicy(record.doneContract, record.verification?.results ?? [])
+  if (policy.finalStateForSuccessfulWorker === "needs-review" && record.verificationState !== "failed") {
+    await updateRunRecord(record, {
+      verificationState: "needs-review",
+      failureCategory: policy.level === "none" ? "verification-evidence-missing" : "verification-evidence-weak",
+    })
+  } else if (policy.finalStateForSuccessfulWorker === "succeeded" && record.verificationState !== "failed") {
+    await updateRunRecord(record, {
+      verificationState: "succeeded",
+    })
+  }
+  return policy
+}
 
 export const assertResolvedContextReady = (resolved: ResolvedRepoTarget, agent: PreparedAgent, item: TaskItem) => {
   if (resolved.context.state !== "leased") {
@@ -1142,6 +1285,10 @@ export const runTask = async (
     await updateRunRecord(runRecord, {devEnv})
     const projectProfile = await runPhase(runRecord, "detect-project-profile", () => detectProjectProfile(checkout, devEnv))
     const projectProfileFile = await runPhase(runRecord, "write-project-profile", () => writeProjectProfile(checkout, projectProfile))
+    const verificationPlan = await runPhase(runRecord, "plan-verification", () => Promise.resolve(createVerificationPlan(app, mode, projectProfile)))
+    const verificationPlanFile = await runPhase(runRecord, "write-verification-plan", () => writeVerificationPlan(checkout, verificationPlan))
+    await runPhase(runRecord, "reset-verification-results", () => resetVerificationResults(checkout))
+    const doneContract = await runPhase(runRecord, "create-done-contract", () => Promise.resolve(createDoneContract(agent.agent.role, mode, item.task)))
     await updateRunRecord(runRecord, {
       projectProfile: {
         path: projectProfileFile,
@@ -1153,7 +1300,29 @@ export const runTask = async (
         })),
         blockers: projectProfile.blockers,
       },
+      verification: {
+        planPath: verificationPlanFile,
+        plan: verificationPlan,
+      },
+      doneContract,
     })
+    const carriedContinuationEvidence = continuationEvidenceForCarry(item.continuation)
+    if (item.continuation?.carryEvidence && carriedContinuationEvidence.length > 0) {
+      await runPhase(
+        runRecord,
+        "carry-forward-verification-evidence",
+        () => appendVerificationResultsFile(checkout, carriedContinuationEvidence),
+        {
+          fromRunId: item.continuation.fromRunId,
+          resultCount: carriedContinuationEvidence.length,
+          skippedFailedOrBlocked: item.continuation.evidenceResults.length - carriedContinuationEvidence.length,
+        },
+      )
+    } else {
+      await skipRunPhase(runRecord, "carry-forward-verification-evidence", {
+        reason: item.continuation ? "prior run has no carried evidence" : "not a continuation run",
+      })
+    }
 
     await mergeState(agent, {
       running: true,
@@ -1174,6 +1343,8 @@ export const runTask = async (
       devEnvSource: devEnv.source,
       projectProfile: projectProfileFile,
       projectStacks: projectProfile.stacks,
+      verificationPlan: verificationPlanFile,
+      verificationRunners: verificationPlanSummary(verificationPlan),
       ...(mode === "web" ? {
         browserProfile: path.join(agent.paths.browser, "profile"),
         browserArtifacts: path.join(agent.paths.artifacts, "playwright"),
@@ -1216,6 +1387,8 @@ export const runTask = async (
           devEnvSource: devEnv.source,
           projectProfile: projectProfileFile,
           projectStacks: projectProfile.stacks,
+          verificationPlan: verificationPlanFile,
+          verificationRunners: verificationPlanSummary(verificationPlan),
         }
         finalResult = result
 
@@ -1290,16 +1463,22 @@ export const runTask = async (
       await mergeState(agent, {url, logFile, browserProfile: path.join(agent.paths.browser, "profile"), browserArtifacts: path.join(agent.paths.artifacts, "playwright")})
 
       try {
-        const prompt = compose(agent, item.task, dev.url, effectiveRuntime, repoPolicy, defaultPublishScope, devEnv, projectProfile)
+        const prompt = compose(agent, item.task, dev.url, effectiveRuntime, repoPolicy, defaultPublishScope, devEnv, projectProfile, doneContract, item.continuation)
         const session = await runPhase(
           runRecord,
           "opencode-worker",
-          () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, item.model, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}}), {}, devEnv),
+          () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, item.model, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}}), {
+            OPENTEAM_RUN_ID: runRecord.runId,
+            OPENTEAM_RUN_FILE: runRecord.runFile,
+            OPENTEAM_DEV_URL: dev.url,
+          }, devEnv),
           {logFile},
         )
         code = session.code
         await updateRunRecord(runRecord, {workerState: code === 0 ? "succeeded" : "failed"})
         if (code === 0) {
+          await collectWorkerVerificationResults(runRecord, checkout)
+          await maybeRunAutomaticVerification(app, runRecord, checkout, verificationPlan, projectProfile, devEnv)
           try {
             await runPhase(runRecord, "verify-dev-server", async () => {
               await health(dev.url, 3000)
@@ -1362,6 +1541,8 @@ export const runTask = async (
             }, {url: dev.url})
           }
         } else {
+          await skipRunPhase(runRecord, "collect-worker-verification", {reason: "worker did not exit successfully"})
+          await skipRunPhase(runRecord, "run-automatic-verification", {reason: "worker did not exit successfully"})
           await updateRunRecord(runRecord, {
             verificationState: "failed",
             failureCategory: "worker-failed",
@@ -1380,24 +1561,55 @@ export const runTask = async (
         }, {pid: dev.child.pid})
       }
     } else {
-      const prompt = composeCode(agent, item.task, repoPolicy, defaultPublishScope, devEnv, projectProfile)
+      const prompt = composeCode(agent, item.task, repoPolicy, defaultPublishScope, devEnv, projectProfile, doneContract, item.continuation)
       const session = await runPhase(
         runRecord,
         "opencode-worker",
-        () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, item.model, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}}), {}, devEnv),
+        () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, item.model, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}}), {
+          OPENTEAM_RUN_ID: runRecord.runId,
+          OPENTEAM_RUN_FILE: runRecord.runFile,
+        }, devEnv),
         {logFile},
       )
       code = session.code
       await updateRunRecord(runRecord, {workerState: code === 0 ? "succeeded" : "failed"})
+      if (code === 0) {
+        await collectWorkerVerificationResults(runRecord, checkout)
+        await maybeRunAutomaticVerification(app, runRecord, checkout, verificationPlan, projectProfile, devEnv)
+      } else {
+        await skipRunPhase(runRecord, "collect-worker-verification", {reason: "worker did not exit successfully"})
+        await skipRunPhase(runRecord, "run-automatic-verification", {reason: "worker did not exit successfully"})
+      }
     }
 
-    const state = code === 0 ? "succeeded" : "failed"
+    const evidencePolicy = code === 0
+      ? await applyEvidenceQualityGate(runRecord)
+      : evaluateEvidencePolicy(runRecord.doneContract, runRecord.verification?.results ?? [])
+    const state = code === 0 ? evidencePolicy.finalStateForSuccessfulWorker : "failed"
     const result: LaunchResult = {
       id: idTask,
       state,
       workerState: code === 0 ? "succeeded" : "failed",
       verificationState: runRecord.verificationState,
       failureCategory: runRecord.failureCategory,
+      evidenceLevel: evidencePolicy.level,
+      prEligible: evidencePolicy.prEligible,
+      recommendedAction: evidencePolicy.recommendedAction,
+      verificationResults: runRecord.verification?.results?.map(result => ({
+        id: result.id,
+        kind: result.kind,
+        state: result.state,
+        evidenceType: result.evidenceType,
+        source: result.source,
+        note: result.note,
+        blocker: result.blocker,
+        error: result.error,
+        logFile: result.logFile,
+        artifacts: result.artifacts,
+        screenshots: result.screenshots,
+        url: result.url,
+        flow: result.flow,
+      })),
       task: item.task,
       target: resolved.target,
       mode,
@@ -1413,6 +1625,8 @@ export const runTask = async (
       devEnvSource: devEnv.source,
       projectProfile: projectProfileFile,
       projectStacks: projectProfile.stacks,
+      verificationPlan: verificationPlanFile,
+      verificationRunners: verificationPlanSummary(verificationPlan),
     }
     finalResult = result
 
@@ -1421,6 +1635,9 @@ export const runTask = async (
       agent,
       [
         `[${agent.id}] ${state} task ${idTask}`,
+        `evidence: ${evidencePolicy.level}`,
+        `PR eligible: ${evidencePolicy.prEligible ? "yes" : "no"}`,
+        `recommended: ${evidencePolicy.recommendedAction}`,
         `url: ${url || "(none)"}`,
         `context: ${contextId}`,
         `checkout: ${checkout}`,
@@ -1646,6 +1863,7 @@ export const serveAgent = async (app: AppCfg, id: string, defaults: Partial<Task
   const runtime = await startRuntime(agent)
   const controlDms = acceptsControlDms(agent)
   const repoWatch = controlDms ? undefined : await prepareRepoWatch(app, agent, defaults)
+  const observeWorkerRuns = agent.agent.role === "orchestrator"
   let active: Promise<void> | undefined
   const pollInterval = agent.agent.reporting.pollIntervalMs ?? app.config.reporting.pollIntervalMs ?? 5000
   let sub = {close: () => {}}
@@ -1730,6 +1948,23 @@ export const serveAgent = async (app: AppCfg, id: string, defaults: Partial<Task
         await pollRepoWatch(app, agent, repoWatch)
       } catch (error) {
         process.stderr.write(`repo watch poll failed: ${String(error)}\n`)
+      }
+    }
+
+    if (observeWorkerRuns) {
+      try {
+        const observed = await observeRuns(app, {limit: 100, emitInitial: false})
+        for (const event of observed.events) {
+          const body = formatObservationEvent(event)
+          process.stderr.write(`${body}\n`)
+          if (event.transitions.some(transition => transition.severity !== "info" || transition.field === "state")) {
+            await sendReport(agent, body).catch(error => {
+              process.stderr.write(`run observation report failed: ${String(error)}\n`)
+            })
+          }
+        }
+      } catch (error) {
+        process.stderr.write(`run observation poll failed: ${String(error)}\n`)
       }
     }
 

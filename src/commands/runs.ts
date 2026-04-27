@@ -2,6 +2,7 @@ import {existsSync} from "node:fs"
 import {readFile, readdir, stat, writeFile} from "node:fs/promises"
 import path from "node:path"
 import {prepareAgent} from "../config.js"
+import {evaluateEvidencePolicy, evidenceLevel, groupEvidenceResults} from "../evidence-policy.js"
 import {detectOpenCodeHardFailure, detectWorkerVerificationBlockers} from "../opencode-log.js"
 import {loadRepoRegistry, releaseRepoContext} from "../repo.js"
 import type {AgentRuntimeState, AppCfg, TaskRunRecord} from "../types.js"
@@ -54,6 +55,47 @@ export const runsList = async (app: AppCfg, args: string[]) => {
   const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 20
   const summaries = await summarizeRuns(app, await recentRunRecords(app, limit))
   console.log(JSON.stringify(summaries, null, 2))
+}
+
+export const runEvidenceView = (record: TaskRunRecord) => {
+  const results = record.verification?.results ?? []
+  const failed = results.filter(result => result.state === "failed")
+  const blocked = results.filter(result => result.state === "blocked")
+  const succeeded = results.filter(result => result.state === "succeeded")
+  const skipped = results.filter(result => result.state === "skipped")
+  const policy = evaluateEvidencePolicy(record.doneContract, results)
+  const groups = groupEvidenceResults(results)
+  return {
+    runId: record.runId,
+    state: record.state,
+    workerState: record.workerState,
+    verificationState: record.verificationState,
+    failureCategory: record.failureCategory,
+    doneContract: record.doneContract,
+    level: policy.level,
+    finalStateForSuccessfulWorker: policy.finalStateForSuccessfulWorker,
+    prEligible: policy.prEligible,
+    prBlockers: policy.prBlockers,
+    recommendedAction: policy.recommendedAction,
+    summary: {
+      total: results.length,
+      succeeded: succeeded.length,
+      failed: failed.length,
+      blocked: blocked.length,
+      skipped: skipped.length,
+    },
+    requiredEvidence: policy.requiredEvidence,
+    missingEvidence: policy.missingEvidence,
+    prPolicy: record.doneContract?.prPolicy,
+    groups,
+    groupSummary: Object.fromEntries(Object.entries(groups).map(([name, items]) => [name, items.length])),
+    results,
+    artifacts: Array.from(new Set(results.flatMap(result => [
+      ...(result.logFile ? [result.logFile] : []),
+      ...(result.artifacts ?? []),
+      ...(result.screenshots ?? []),
+    ]))),
+  }
 }
 
 export const runsShow = async (app: AppCfg, id: string, args: string[]) => {
@@ -214,6 +256,14 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
   if (record.verificationState === "failed" && record.failureCategory) {
     reasons.push(`verification failed: ${record.failureCategory}`)
   }
+  for (const result of record.verification?.results ?? []) {
+    if (result.state === "failed") {
+      reasons.push(`verification runner failed: ${result.id}${result.error ? `: ${result.error}` : ""}`)
+    }
+    if (result.state === "blocked") {
+      reasons.push(`verification runner blocked: ${result.id}${result.blocker ? `: ${result.blocker}` : ""}`)
+    }
+  }
 
   if (verificationBlockers.length > 0 && record.state !== "running") {
     reasons.push(`worker log contains verification blockers: ${verificationBlockers.map(item => item.reason).join("; ")}`)
@@ -253,6 +303,7 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
     },
     hardFailure,
     verificationBlockers,
+    verification: record.verification,
     browser: record.browser,
     context: context ? {
       id: context.id,
@@ -273,6 +324,7 @@ const effectiveRunState = (record: TaskRunRecord, diagnosis?: RunDiagnosis) =>
     diagnosis?.hardFailure ||
     record.workerState === "failed" ||
     record.verificationState === "failed"
+    || record.verification?.results?.some(result => result.state === "failed" || result.state === "blocked")
   )
     ? "failed"
     : diagnosis?.stale ? "stale" : record.state
@@ -293,6 +345,27 @@ export const compactDiagnosis = (diagnosis?: RunDiagnosis) => diagnosis ? {
   devUrlError: diagnosis.devServer.health.error,
   contextState: diagnosis.context?.state,
   contextLeaseMatchesRun: diagnosis.context?.leaseMatchesRun,
+  verificationRunners: diagnosis.verification?.plan.runners.map(runner => ({
+    id: runner.id,
+    kind: runner.kind,
+    configured: runner.configured,
+    reason: runner.reason,
+  })),
+  verificationResults: diagnosis.verification?.results?.map(result => ({
+    id: result.id,
+    kind: result.kind,
+    state: result.state,
+    evidenceType: result.evidenceType,
+    source: result.source,
+    note: result.note,
+    blocker: result.blocker,
+    error: result.error,
+    logFile: result.logFile,
+    artifacts: result.artifacts,
+    screenshots: result.screenshots,
+    url: result.url,
+    flow: result.flow,
+  })),
 } : undefined
 
 const runListView = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
@@ -327,6 +400,11 @@ const runListView = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
     devEnvSource: record.devEnv?.source,
     projectStacks: record.projectProfile?.stacks,
     projectProfile: record.projectProfile?.path,
+    verificationPlan: record.verification?.planPath,
+    verificationRunners: record.verification?.plan.runners.map(runner => `${runner.id}:${runner.configured ? "configured" : "unavailable"}`),
+    verificationResults: record.verification?.results?.map(result => `${result.id}:${result.state}`),
+    evidenceLevel: evidenceLevel(record.doneContract, record.verification?.results ?? []),
+    doneContract: record.doneContract?.taskClass,
     logFile: record.logs?.opencode ?? record.result?.logFile,
     runFile: record.runFile,
   }
@@ -339,6 +417,7 @@ const runShowView = (record: TaskRunRecord, diagnosis: RunDiagnosis) => {
     state,
     storedState: state !== record.state ? record.state : undefined,
     stale: diagnosis.stale,
+    evidence: runEvidenceView(record),
     diagnosis,
   }
 }
@@ -352,6 +431,14 @@ const printDiagnosis = (diagnosis: Awaited<ReturnType<typeof diagnoseRun>>) => {
   console.log(`any task pid alive: ${diagnosis.anyTaskPidAlive ? "yes" : "no"}`)
   console.log(`dev url: ${diagnosis.devServer.health.url ?? "(none)"}`)
   console.log(`dev health: ${diagnosis.devServer.health.ok ? "ok" : "down"}${diagnosis.devServer.health.error ? ` (${diagnosis.devServer.health.error})` : ""}`)
+  if (diagnosis.verification?.planPath) console.log(`verification plan: ${diagnosis.verification.planPath}`)
+  for (const runner of diagnosis.verification?.plan.runners ?? []) {
+    console.log(`verification runner: ${runner.id} (${runner.kind}) ${runner.configured ? "configured" : `unavailable: ${runner.reason ?? "unknown"}`}`)
+  }
+  for (const result of diagnosis.verification?.results ?? []) {
+    const details = result.blocker ?? result.error ?? result.skippedReason ?? result.logFile ?? ""
+    console.log(`verification result: ${result.id} ${result.state}${details ? ` (${details})` : ""}`)
+  }
   console.log(`context: ${diagnosis.context ? `${diagnosis.context.id} ${diagnosis.context.state}` : "(none)"}`)
   for (const reason of diagnosis.reasons) {
     console.log(`reason: ${reason}`)
@@ -433,6 +520,36 @@ export const runsDiagnose = async (app: AppCfg, id: string, args: string[]) => {
   } else {
     printDiagnosis(diagnosis)
   }
+}
+
+export const runsEvidence = async (app: AppCfg, id: string, args: string[]) => {
+  const record = await readRunRecord(app, id)
+  const view = runEvidenceView(record)
+  if (flag(args, "--json")) {
+    console.log(JSON.stringify(view, null, 2))
+    return
+  }
+  console.log(`run: ${view.runId}`)
+  console.log(`evidence: ${view.level}`)
+  console.log(`final state if worker succeeded: ${view.finalStateForSuccessfulWorker}`)
+  console.log(`PR eligible: ${view.prEligible ? "yes" : "no"}`)
+  console.log(`results: total=${view.summary.total} succeeded=${view.summary.succeeded} failed=${view.summary.failed} blocked=${view.summary.blocked} skipped=${view.summary.skipped}`)
+  if (view.doneContract) {
+    console.log(`done contract: ${view.doneContract.taskClass}`)
+    for (const item of view.doneContract.requiredEvidence) console.log(`required: ${item}`)
+    console.log(`pr policy: ${view.doneContract.prPolicy}`)
+  }
+  for (const item of view.missingEvidence) console.log(`missing: ${item}`)
+  for (const blocker of view.prBlockers) console.log(`PR blocker: ${blocker}`)
+  console.log(`recommended: ${view.recommendedAction}`)
+  for (const [group, count] of Object.entries(view.groupSummary)) {
+    if (count > 0) console.log(`group: ${group} ${count}`)
+  }
+  for (const result of view.results) {
+    const detail = result.note ?? result.flow ?? result.url ?? result.blocker ?? result.error ?? result.skippedReason ?? result.logFile ?? ""
+    console.log(`result: ${result.id} ${result.state}${detail ? ` (${detail})` : ""}`)
+  }
+  for (const artifact of view.artifacts) console.log(`artifact: ${artifact}`)
 }
 
 export const runsCleanupStale = async (app: AppCfg, args: string[]) => {

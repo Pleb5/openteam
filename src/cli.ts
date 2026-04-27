@@ -13,13 +13,18 @@ import {
   relaySyncCommand,
 } from "./commands/profile.js"
 import {repoPolicyCommand, repoPublishCommand} from "./commands/repo-publish.js"
+import {verifyCommand} from "./commands/verify.js"
 import {
   runsCleanupStale,
   runsDiagnose,
+  runsEvidence,
   runsList,
   runsShow,
+  readRunRecord,
   stopRunRecord,
 } from "./commands/runs.js"
+import {createContinuationTaskItem} from "./run-continuation.js"
+import {runsObserveCommand, runsWatchCommand} from "./run-observer.js"
 import {statusReport} from "./commands/status.js"
 import {runTask, enqueueTask, prepareOnly, serveAgent} from "./launcher.js"
 import {dispatchOperatorRequest} from "./orchestrator.js"
@@ -54,10 +59,20 @@ const help = () => {
   runs list [--limit <n>]
   runs show <run-id> [--raw]
   runs diagnose <run-id> [--json]
+  runs evidence <run-id> [--json]
+  runs observe <run-id> [--json]
+  runs watch [--active|--needs-review] [--once] [--interval-ms <ms>] [--limit <n>] [--json]
+  runs continue <run-id> [--task <text>] [--model <provider/model>] [--no-carry-evidence] [--dry-run]
+  runs repair-evidence <run-id> [--task <text>] [--model <provider/model>] [--no-carry-evidence] [--dry-run]
   runs stop <run-id>
   runs cleanup-stale [--dry-run]
   browser status [agentId|role|worker-name] [--json]
   browser attach <agentId|role|worker-name> [--open] [--json]
+  verify list [--checkout <path>] [--json]
+  verify run <runner-id> [--checkout <path>] [--json]
+  verify record <runner-id> [--state <succeeded|failed|blocked|skipped>] [--type <browser|repo-native|nostr|desktop|mobile|manual>] [--note <text>] [--artifact <path>] [--screenshot <path>] [--url <url>] [--flow <name>] [--event-id <id>] [--checkout <path>]
+  verify browser [--state <succeeded|failed|blocked>] [--flow <name>] [--url <url>] [--screenshot <path>] [--console <text>] [--network <text>] [--dev-health] [--checkout <path>]
+  verify artifact <path> [--type <browser|repo-native|nostr|desktop|mobile|manual>] [--runner <id>] [--note <text>] [--checkout <path>]
   repo policy [--context <file>] [--agent <agentId|role> --target <nostr-repo|hint|alias>] [--scope <repo|upstream>]
   repo publish raw --event <json-file|-> [--dry-run]
   repo publish issue --subject <text> [--content <text>] [--label <label>] [--p <pubkey>] [--dry-run]
@@ -65,8 +80,8 @@ const help = () => {
   repo publish label --label <label> [--target-id <event-id>] [--namespace <ns>] [--p <pubkey>] [--delete] [--dry-run]
   repo publish role-label --target-id <event-id> --role <assignee|reviewer> --p <pubkey> [--dry-run]
   repo publish status --root-id <event-id> --state <open|applied|closed|draft> [--content <text>] [--dry-run]
-  repo publish pr --tip <commit> [--subject <text>] [--clone <url>] [--branch <name>] [--dry-run]
-  repo publish pr-update --pr-id <event-id> --pr-author <pubkey> --tip <commit> [--dry-run]
+  repo publish pr --tip <commit> [--subject <text>] [--clone <url>] [--branch <name>] [--draft|--wip] [--dry-run]
+  repo publish pr-update --pr-id <event-id> --pr-author <pubkey> --tip <commit> [--draft|--wip] [--dry-run]
   relay sync <agentId>
   profile sync <agentId>
   tokens sync <agentId>  # alias for profile sync
@@ -238,7 +253,7 @@ const main = async () => {
     return
   }
 
-  const known = new Set(["doctor", "console", "prepare", "launch", "enqueue", "serve", "worker", "runs", "browser", "repo", "relay", "profile", "tokens", "git"])
+  const known = new Set(["doctor", "console", "prepare", "launch", "enqueue", "serve", "worker", "runs", "browser", "verify", "repo", "relay", "profile", "tokens", "git"])
   if (!known.has(cmd)) {
     const handled = await dispatchOperatorRequest(app, args.join(" "))
     if (handled.handled) {
@@ -329,6 +344,39 @@ const main = async () => {
     return
   }
 
+  if (cmd === "runs" && sub === "evidence") {
+    await runsEvidence(app, must(args[2] ?? "", "run-id"), args)
+    return
+  }
+
+  if (cmd === "runs" && sub === "observe") {
+    await runsObserveCommand(app, must(args[2] ?? "", "run-id"), args)
+    return
+  }
+
+  if (cmd === "runs" && sub === "watch") {
+    await runsWatchCommand(app, args)
+    return
+  }
+
+  if (cmd === "runs" && (sub === "continue" || sub === "repair-evidence")) {
+    const record = await readRunRecord(app, must(args[2] ?? "", "run-id"))
+    const item = createContinuationTaskItem(record, {
+      kind: sub,
+      task: value(args, "--task") || undefined,
+      model: value(args, "--model") || undefined,
+      carryEvidence: !flag(args, "--no-carry-evidence"),
+    })
+    const agentId = worker(app, item.agentId)
+    assertAppConfigValid(app, {capability: "launch", agentId, mode: item.mode})
+    if (flag(args, "--dry-run")) {
+      console.log(JSON.stringify({agentId, item}, null, 2))
+      return
+    }
+    console.log(JSON.stringify(await runTask(app, agentId, item), null, 2))
+    return
+  }
+
   if (cmd === "runs" && sub === "stop") {
     console.log(JSON.stringify(await stopRunRecord(app, must(args[2] ?? "", "run-id")), null, 2))
     return
@@ -345,6 +393,11 @@ const main = async () => {
 
   if (cmd === "browser") {
     await browserCommand(app, sub, args)
+    return
+  }
+
+  if (cmd === "verify") {
+    await verifyCommand(app, sub, args)
     return
   }
 

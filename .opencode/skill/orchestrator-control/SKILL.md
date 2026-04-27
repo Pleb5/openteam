@@ -83,6 +83,9 @@ openteam worker list
 openteam runs list --limit 10
 openteam runs show <run-id>
 openteam runs diagnose <run-id>
+openteam runs evidence <run-id>
+openteam runs repair-evidence <run-id>
+openteam runs continue <run-id> --task "finish the remaining work and verify it"
 openteam runs cleanup-stale --dry-run
 openteam runs stop <run-id>
 openteam browser attach <agent-or-role>
@@ -109,12 +112,24 @@ Guidance:
 - same-repo work is serialized by default; use `in parallel` only when the operator intentionally wants a separate context for concurrent work on the same Nostr repo
 - current one-off job concurrency limits are intentionally small: builder 2, researcher 2, qa 1, triager 1
 - use `runs list` / `runs show` for completed task metrics, phase timings, log paths, and live-signal effective state
+- use `verificationPlan` and `verificationRunners` as local verification capability metadata; use `verification.results` and logs as runner execution evidence
+- expect structured evidence fields such as `evidenceType`, `flow`, `url`, `screenshots`, `consoleSummary`, `networkSummary`, and `eventIds` when browser/Nostr/GUI verification was performed
+- expect verification to be worker-invoked during the task loop; automatic post-worker runner execution is opt-in, not the default architecture
+- use `runs evidence <run-id>` to classify completion as evidence-backed, weak-evidence, blocked, failed, or needing human review
+- use `runs repair-evidence <run-id>` when the worker likely completed the edit but evidence is missing, weak, or blocked
+- use `runs continue <run-id> --task "..."` for broader follow-up on the same idle repo context
+- continuation refuses busy contexts; do not bypass repo leases when a context is already active
+- use `runs observe <run-id>` for a single-run live snapshot and `runs watch --active` for transition polling
+- treat `runtime/orchestrator/observations.json` as the persisted last-seen observation state for run transitions
+- treat `needs-review` as completed worker execution with insufficient evidence, not as a normal success
 - distinguish `workerState` from `verificationState`; a worker can finish successfully while final web-runtime verification fails
 - a detached launch means the worker process was started; it does not prove the run is still active or that the task succeeded
 - after launching one-off jobs, re-check `openteam runs list`, `openteam runs show <run-id>`, or `openteam status` before telling the operator they are running or complete
 - treat `state: "stale"` as authoritative even when `storedState: "running"` appears; `storedState` is only the raw run-file flag
 - treat `state: "failed"` with `storedState: "succeeded"` as authoritative when diagnosis reports an OpenCode hard failure
 - treat `verificationState: "failed"` and `failureCategory: "dev-server-unhealthy"` as a runtime verification failure, even if `workerState` is `succeeded`
+- treat `failureCategory: "verification-failed"` or `"verification-blocked"` as failed worker-produced verification evidence, not as worker implementation success
+- gate normal PR publication on `PR eligible: yes` from `runs evidence`; draft/WIP publication must be explicit
 - if a failed `verify-dev-server` phase is followed by a succeeded `restart-dev-server` and `verify-dev-server-after-restart`, report it as recovered rather than silently ignoring the transient failure
 - use `runs diagnose` for detailed evidence when a run is stale, logs are idle, process evidence is missing, or the dev URL is unreachable
 - use `runs cleanup-stale --dry-run` to confirm stale records before cleanup; cleanup marks stale records terminal and releases repo leases without deleting checkouts

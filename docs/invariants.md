@@ -43,4 +43,13 @@ These are runtime rules that must be enforced by code and tests, not only by age
 - Web-mode success requires the dev server to be reachable before success is recorded.
 - Web-mode runs may restart the dev server once after a successful worker phase when final verification fails; the recovery attempt must be visible in run phases and dev-server metadata.
 - If the worker succeeds but the dev server cannot be recovered, the run must fail with an explicit verification failure category instead of reporting task success.
+- `.openteam/verification-plan.json` describes selected runner capability; runner execution proof must come from `verification.results` and runner logs.
+- Browser, Nostr, GUI, desktop, and mobile evidence should use structured result fields rather than only vague prose when those fields apply.
+- Workers are responsible for invoking or recording verification evidence during their loop; automatic post-worker runner execution must stay opt-in.
+- Worker-recorded failed or blocked verification evidence must fail the run after worker handoff; skipped runners are informational.
+- Each new worker run should have a done contract describing required evidence, success policy, and PR policy.
+- A successful worker phase with missing or weak evidence must finish as `needs-review`, not plain `succeeded`.
+- Normal PR publication should be gated on strong worker-produced verification evidence unless the task explicitly asks for draft/WIP output.
+- Run observation must be deterministic and side-effect-light: observation may write `runtime/orchestrator/observations.json` and reports, but it must not mutate run records, start workers, stop workers, or clean leases.
+- Guarded mobile-native runners must not install SDKs, boot emulators, create simulators, or write outside the managed checkout/runtime.
 - Runtime checks should produce exact invariant failure messages, not heuristic supervision.

@@ -1,5 +1,7 @@
+import {existsSync} from "node:fs"
 import {readFile} from "node:fs/promises"
 import {assertAppConfigValid} from "../config-validate.js"
+import {evaluateEvidencePolicy, prPublicationDecision} from "../evidence-policy.js"
 import {
   buildCommentEvent,
   buildIssueEvent,
@@ -16,7 +18,8 @@ import {
   type ExtraTags,
   type RepoPublishScope,
 } from "../repo-publish.js"
-import type {AppCfg} from "../types.js"
+import {readVerificationResults} from "../verification.js"
+import type {AppCfg, TaskRunRecord} from "../types.js"
 
 const value = (args: string[], key: string) => {
   const index = args.indexOf(key)
@@ -107,6 +110,62 @@ const extraTags = (args: string[]): ExtraTags => {
 
 const printRepoPublishResult = (value: unknown) => {
   console.log(JSON.stringify(value, null, 2))
+}
+
+const unique = (items: string[]) => Array.from(new Set(items.filter(Boolean)))
+
+const readRunRecordFromEnv = async () => {
+  const file = process.env.OPENTEAM_RUN_FILE
+  if (!file || !existsSync(file)) return undefined
+  return JSON.parse(await readFile(file, "utf8")) as TaskRunRecord
+}
+
+const draftRequested = (args: string[]) => {
+  const labels = values(args, "--label").map(item => item.toLowerCase())
+  return flag(args, "--draft") || flag(args, "--wip") || labels.some(label => label === "draft" || label === "wip")
+}
+
+const draftLabels = (args: string[]) => [
+  ...(flag(args, "--draft") ? ["draft"] : []),
+  ...(flag(args, "--wip") ? ["wip"] : []),
+]
+
+const draftTagExtras = (args: string[]) => draftLabels(args).map(label => ["t", label])
+
+const pullRequestPublicationPolicy = async (
+  target: Awaited<ReturnType<typeof resolveRepoPublishTarget>>,
+  args: string[],
+) => {
+  const record = await readRunRecordFromEnv()
+  const checkout = target.context?.checkout || record?.context?.checkout
+  const fileResults = checkout ? await readVerificationResults(checkout).catch(() => []) : []
+  const recordResults = record?.verification?.results ?? []
+  const results = fileResults.length > 0 ? fileResults : recordResults
+  const policy = evaluateEvidencePolicy(record?.doneContract, results)
+  const decision = prPublicationDecision(policy, {draft: draftRequested(args)})
+  return {
+    ...policy,
+    allowed: decision.allowed,
+    reason: decision.reason,
+    draft: draftRequested(args),
+    runId: record?.runId,
+    resultsSource: fileResults.length > 0 ? "checkout" : recordResults.length > 0 ? "run-record" : "none",
+  }
+}
+
+const assertPullRequestPublicationAllowed = async (
+  target: Awaited<ReturnType<typeof resolveRepoPublishTarget>>,
+  args: string[],
+  dryRun: boolean,
+) => {
+  const policy = await pullRequestPublicationPolicy(target, args)
+  if (dryRun || policy.allowed) return policy
+  throw new Error([
+    `PR publication blocked: ${policy.reason}`,
+    `evidence level: ${policy.level}`,
+    ...policy.prBlockers.map(blocker => `blocker: ${blocker}`),
+    "Record verification evidence first, or explicitly publish a draft/WIP PR with --draft or --wip.",
+  ].join("\n"))
 }
 
 export const repoPolicyCommand = async (app: AppCfg, args: string[]) => {
@@ -205,23 +264,32 @@ export const repoPublishCommand = async (app: AppCfg, kind: string, args: string
   }
 
   if (kind === "pr") {
-    printRepoPublishResult(await publishRepoEvent(app, buildPullRequestEvent({
+    const publicationPolicy = await assertPullRequestPublicationAllowed(target, args, opts.dryRun)
+    const result = await publishRepoEvent(app, buildPullRequestEvent({
       repoAddr,
       subject: value(args, "--subject") || undefined,
       content,
-      labels: values(args, "--label"),
+      labels: unique([
+        ...values(args, "--label"),
+        ...draftLabels(args),
+      ]),
       recipients: values(args, "--p"),
       tipCommitOid: must(value(args, "--tip"), "--tip"),
       clone: values(args, "--clone"),
       branchName: value(args, "--branch") || undefined,
       mergeBase: value(args, "--merge-base") || undefined,
       tags,
-    }), opts))
+    }), opts)
+    printRepoPublishResult({
+      ...result,
+      publicationPolicy,
+    })
     return
   }
 
   if (kind === "pr-update") {
-    printRepoPublishResult(await publishRepoEvent(app, buildPullRequestUpdateEvent({
+    const publicationPolicy = await assertPullRequestPublicationAllowed(target, args, opts.dryRun)
+    const result = await publishRepoEvent(app, buildPullRequestUpdateEvent({
       repoAddr,
       pullRequestEventId: must(value(args, "--pr-id"), "--pr-id"),
       pullRequestAuthorPubkey: must(value(args, "--pr-author"), "--pr-author"),
@@ -229,8 +297,12 @@ export const repoPublishCommand = async (app: AppCfg, kind: string, args: string
       tipCommitOid: must(value(args, "--tip"), "--tip"),
       clone: values(args, "--clone"),
       mergeBase: value(args, "--merge-base") || undefined,
-      tags,
-    }), opts))
+      tags: [...tags, ...draftTagExtras(args)],
+    }), opts)
+    printRepoPublishResult({
+      ...result,
+      publicationPolicy,
+    })
     return
   }
 

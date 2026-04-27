@@ -36,6 +36,99 @@ export type BrowserCfg = {
   executablePath?: string
 }
 
+export type VerificationRunnerKind = "command" | "playwright-mcp" | "desktop-command" | "android-adb" | "ios-simulator"
+export type VerificationRunnerState = "succeeded" | "failed" | "skipped" | "blocked"
+export type VerificationEvidenceType = "repo-native" | "browser" | "nostr" | "desktop" | "mobile" | "manual" | "runtime"
+
+export type VerificationRunnerCfg = {
+  kind: VerificationRunnerKind
+  enabled: boolean
+  local?: boolean
+  description?: string
+  command?: string[]
+  environment?: Dict
+  timeoutMs?: number
+  modes?: TaskMode[]
+  stacks?: string[]
+  artifactsDir?: string
+}
+
+export type VerificationCfg = {
+  autoRunAfterWorker?: boolean
+  defaultRunners: Partial<Record<TaskMode, string[]>>
+  runners: Record<string, VerificationRunnerCfg>
+}
+
+export type VerificationRunnerPlan = {
+  id: string
+  kind: VerificationRunnerKind
+  enabled: boolean
+  configured: boolean
+  local: boolean
+  description?: string
+  reason?: string
+  command?: string[]
+  environment?: Dict
+  timeoutMs?: number
+  modes: TaskMode[]
+  stacks: string[]
+  artifactsDir?: string
+}
+
+export type VerificationPlan = {
+  version: 1
+  mode: TaskMode
+  profileStacks: string[]
+  selectedRunnerIds: string[]
+  runners: VerificationRunnerPlan[]
+}
+
+export type DoneContract = {
+  version: 1
+  role: string
+  mode: TaskMode
+  taskClass: "bug-fix" | "ui-web" | "triage" | "qa" | "research" | "implementation" | "general"
+  summary: string
+  requiredEvidence: string[]
+  successPolicy: string[]
+  prPolicy: string
+}
+
+export type VerificationRunnerResult = {
+  id: string
+  kind: VerificationRunnerKind
+  state: VerificationRunnerState
+  evidenceType?: VerificationEvidenceType
+  source?: "worker" | "runtime" | "operator"
+  startedAt?: string
+  finishedAt?: string
+  durationMs?: number
+  command?: string[]
+  cwd?: string
+  logFile?: string
+  artifacts?: string[]
+  screenshots?: string[]
+  url?: string
+  flow?: string
+  consoleSummary?: string
+  networkSummary?: string
+  eventIds?: string[]
+  urlHealth?: {
+    ok: boolean
+    url?: string
+    status?: number
+    method?: string
+    error?: string
+    checkedAt: string
+  }
+  exitCode?: number
+  signal?: string
+  error?: string
+  blocker?: string
+  skippedReason?: string
+  note?: string
+}
+
 export type ReportingCfg = {
   dmRelays: string[]
   outboxRelays: string[]
@@ -103,6 +196,7 @@ export type RootCfg = {
   runtimeRoot: string
   opencode: OpenCodeCfg
   browser: BrowserCfg
+  verification?: VerificationCfg
   providers: Record<string, ProviderCfg>
   repos: Record<string, RepoCfg>
   reporting: ReportingCfg
@@ -115,7 +209,31 @@ export type AppCfg = {
   config: RootCfg
 }
 
-export type TaskState = "queued" | "running" | "succeeded" | "failed" | "interrupted" | "stale"
+export type TaskState = "queued" | "running" | "succeeded" | "needs-review" | "failed" | "interrupted" | "stale"
+
+export type TaskContinuationKind = "continue" | "repair-evidence"
+
+export type TaskContinuation = {
+  version: 1
+  kind: TaskContinuationKind
+  fromRunId: string
+  fromRunFile?: string
+  contextId: string
+  checkout?: string
+  branch?: string
+  priorState: TaskState
+  workerState?: TaskState
+  verificationState?: TaskState
+  failureCategory?: string
+  evidenceLevel?: string
+  prEligible?: boolean
+  recommendedAction?: string
+  missingEvidence: string[]
+  prBlockers: string[]
+  carryEvidence: boolean
+  evidenceResults: VerificationRunnerResult[]
+  createdAt: string
+}
 
 export type TaskItem = {
   id: string
@@ -129,6 +247,7 @@ export type TaskItem = {
   model?: string
   parallel?: boolean
   recipients?: string[]
+  continuation?: TaskContinuation
   source?: {
     kind: "dm" | "local" | "repo-event"
     eventId?: string
@@ -252,6 +371,10 @@ export type LaunchResult = {
   workerState?: TaskState
   verificationState?: TaskState
   failureCategory?: string
+  evidenceLevel?: string
+  prEligible?: boolean
+  recommendedAction?: string
+  verificationResults?: Array<Pick<VerificationRunnerResult, "id" | "kind" | "state" | "evidenceType" | "source" | "note" | "blocker" | "error" | "logFile" | "artifacts" | "screenshots" | "url" | "flow">>
   task: string
   target: string
   mode: TaskMode
@@ -270,6 +393,8 @@ export type LaunchResult = {
   devEnvSource?: string
   projectProfile?: string
   projectStacks?: string[]
+  verificationPlan?: string
+  verificationRunners?: string[]
 }
 
 export type TaskRunRecord = {
@@ -282,6 +407,7 @@ export type TaskRunRecord = {
   role: string
   task: string
   source?: TaskItem["source"]
+  continuation?: TaskContinuation
   model?: string
   target?: string
   mode?: TaskMode
@@ -322,6 +448,12 @@ export type TaskRunRecord = {
     }>
     blockers: string[]
   }
+  verification?: {
+    planPath?: string
+    plan: VerificationPlan
+    results?: VerificationRunnerResult[]
+  }
+  doneContract?: DoneContract
   logs?: {
     opencode?: string
     provision?: string
@@ -400,6 +532,8 @@ export type AgentRuntimeState = {
   devEnvSource?: string
   projectProfile?: string
   projectStacks?: string[]
+  verificationPlan?: string
+  verificationRunners?: string[]
 }
 
 export type InboundDm = {
