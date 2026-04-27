@@ -16,6 +16,21 @@ export type EvidencePolicyView = {
 const successful = (results: VerificationRunnerResult[]) =>
   results.filter(result => result.state === "succeeded")
 
+const reportVerdictTaskClasses = new Set<DoneContract["taskClass"]>(["qa", "research", "triage"])
+
+export const acceptsVerificationVerdicts = (contract?: DoneContract) =>
+  Boolean(contract && reportVerdictTaskClasses.has(contract.taskClass))
+
+export const verificationFailuresBlockTask = (contract?: DoneContract) =>
+  !acceptsVerificationVerdicts(contract)
+
+const usableEvidence = (
+  contract: DoneContract | undefined,
+  results: VerificationRunnerResult[],
+) => acceptsVerificationVerdicts(contract)
+  ? results.filter(result => result.state !== "skipped")
+  : successful(results)
+
 const hasText = (result: VerificationRunnerResult, pattern: RegExp) =>
   pattern.test([
     result.id,
@@ -36,6 +51,7 @@ const hasText = (result: VerificationRunnerResult, pattern: RegExp) =>
 const hasSubstantiveEvidence = (result: VerificationRunnerResult) =>
   Boolean(
     result.note?.trim() ||
+    result.blocker?.trim() ||
     result.logFile?.trim() ||
     result.artifacts?.length ||
     result.screenshots?.length ||
@@ -46,19 +62,19 @@ const hasSubstantiveEvidence = (result: VerificationRunnerResult) =>
     result.eventIds?.length,
   )
 
-const hasAgenticEvidence = (results: VerificationRunnerResult[]) =>
-  successful(results).some(hasSubstantiveEvidence)
+const hasAgenticEvidence = (results: VerificationRunnerResult[], contract?: DoneContract) =>
+  usableEvidence(contract, results).some(hasSubstantiveEvidence)
 
-const hasBrowserEvidence = (results: VerificationRunnerResult[]) =>
-  successful(results).some(result =>
+const hasBrowserEvidence = (results: VerificationRunnerResult[], contract?: DoneContract) =>
+  usableEvidence(contract, results).some(result =>
     result.evidenceType === "browser" ||
     result.id === "browser" ||
     result.kind === "playwright-mcp" ||
     hasText(result, /\b(browser|playwright|ui|screen|visual|page|flow)\b/i),
   )
 
-const hasCommandEvidence = (results: VerificationRunnerResult[]) =>
-  successful(results).some(result =>
+const hasCommandEvidence = (results: VerificationRunnerResult[], contract?: DoneContract) =>
+  usableEvidence(contract, results).some(result =>
     result.evidenceType === "repo-native" ||
     result.id === "repo-native" ||
     result.kind === "command" ||
@@ -99,16 +115,18 @@ export const evidenceLevel = (
   contract: DoneContract | undefined,
   results: VerificationRunnerResult[],
 ): EvidenceLevel => {
-  if (results.some(result => result.state === "failed")) return "failed"
-  if (results.some(result => result.state === "blocked")) return "blocked"
+  if (verificationFailuresBlockTask(contract)) {
+    if (results.some(result => result.state === "failed")) return "failed"
+    if (results.some(result => result.state === "blocked")) return "blocked"
+  }
 
-  const passed = successful(results)
-  if (passed.length === 0) return "none"
+  const usable = usableEvidence(contract, results)
+  if (usable.length === 0) return "none"
 
-  const substantiveCount = passed.filter(hasSubstantiveEvidence).length
-  const agentic = hasAgenticEvidence(results)
-  const command = hasCommandEvidence(results)
-  const browser = hasBrowserEvidence(results)
+  const substantiveCount = usable.filter(hasSubstantiveEvidence).length
+  const agentic = hasAgenticEvidence(results, contract)
+  const command = hasCommandEvidence(results, contract)
+  const browser = hasBrowserEvidence(results, contract)
 
   switch (taskClass(contract)) {
     case "ui-web":
@@ -126,19 +144,23 @@ export const evidenceLevel = (
   }
 }
 
-const requirementCovered = (requirement: string, results: VerificationRunnerResult[]) => {
+const requirementCovered = (
+  requirement: string,
+  results: VerificationRunnerResult[],
+  contract?: DoneContract,
+) => {
   const text = requirement.toLowerCase()
-  const passed = successful(results)
-  if (passed.length === 0) return false
+  const usable = usableEvidence(contract, results)
+  if (usable.length === 0) return false
 
-  if (/\b(browser|visible|ui|gui|screen|flow)\b/.test(text)) return hasBrowserEvidence(results)
-  if (/\b(repo-native|command|validation|check|test|build|lint|clippy|cargo)\b/.test(text)) return hasCommandEvidence(results)
-  if (/\b(artifact|screenshot|session|log)\b/.test(text)) return passed.some(hasSubstantiveEvidence)
-  if (/\b(repro|reproduction|reproduced)\b/.test(text)) return passed.some(result => hasText(result, /\b(repro|reproduce|reproduced|not reproducible)\b/i))
-  if (/\b(verdict|expected|actual|pass|fail|flaky|blocked)\b/.test(text)) return passed.some(result => hasText(result, /\b(verdict|expected|actual|pass|fail|flaky|blocked)\b/i))
-  if (/\b(pr|publication|publish|event|branch)\b/.test(text)) return passed.some(result => hasText(result, /\b(pr|publish|published|event|branch)\b/i))
+  if (/\b(browser|visible|ui|gui|screen|flow)\b/.test(text)) return hasBrowserEvidence(results, contract)
+  if (/\b(repo-native|command|validation|check|test|build|lint|clippy|cargo)\b/.test(text)) return hasCommandEvidence(results, contract)
+  if (/\b(artifact|screenshot|session|log)\b/.test(text)) return usable.some(hasSubstantiveEvidence)
+  if (/\b(repro|reproduction|reproduced)\b/.test(text)) return usable.some(result => hasText(result, /\b(repro|reproduce|reproduced|not reproducible)\b/i))
+  if (/\b(verdict|expected|actual|pass|fail|flaky|blocked)\b/.test(text)) return usable.some(result => hasText(result, /\b(verdict|expected|actual|pass|fail|flaky|blocked)\b/i))
+  if (/\b(pr|publication|publish|event|branch)\b/.test(text)) return usable.some(result => hasText(result, /\b(pr|publish|published|event|branch)\b/i))
 
-  return passed.some(hasSubstantiveEvidence)
+  return usable.some(hasSubstantiveEvidence)
 }
 
 const missingEvidence = (
@@ -148,7 +170,7 @@ const missingEvidence = (
 ) => {
   const required = contract?.requiredEvidence ?? []
   if (level === "strong") return []
-  const missing = required.filter(requirement => !requirementCovered(requirement, results))
+  const missing = required.filter(requirement => !requirementCovered(requirement, results, contract))
   if (missing.length > 0) return missing
   if (level === "none") return required.length > 0 ? required : ["verification evidence"]
   if (level === "weak") return ["additional task-specific verification note or artifact"]
@@ -164,7 +186,7 @@ export const evaluateEvidencePolicy = (
 ): EvidencePolicyView => {
   const level = evidenceLevel(contract, results)
   const missing = missingEvidence(contract, results, level)
-  const failedOrBlocked = level === "failed" || level === "blocked"
+  const failedOrBlocked = verificationFailuresBlockTask(contract) && (level === "failed" || level === "blocked")
   const prBlockers = [
     ...(!prPolicyAllowsNormalPublish(contract) ? [contract?.prPolicy ?? "role does not normally publish PRs"] : []),
     ...(failedOrBlocked ? ["verification evidence is failed or blocked"] : []),
@@ -172,7 +194,7 @@ export const evaluateEvidencePolicy = (
     ...(level === "weak" ? ["verification evidence is weak; record stronger task-specific evidence before publication"] : []),
     ...missing.map(item => `missing evidence: ${item}`),
   ]
-  const prEligible = prPolicyAllowsNormalPublish(contract) && level === "strong"
+  const prEligible = prPolicyAllowsNormalPublish(contract) && level === "strong" && !results.some(result => result.state === "failed" || result.state === "blocked")
   const finalStateForSuccessfulWorker = level === "strong" ? "succeeded" : "needs-review"
 
   return {
@@ -183,7 +205,9 @@ export const evaluateEvidencePolicy = (
     requiredEvidence: contract?.requiredEvidence ?? [],
     missingEvidence: missing,
     recommendedAction: level === "strong"
-      ? "worker result has enough evidence for normal review and PR publication when role policy allows it"
+      ? acceptsVerificationVerdicts(contract)
+        ? "report-only verdict has enough evidence for normal review; PR publication remains governed by role policy"
+        : "worker result has enough evidence for normal review and PR publication when role policy allows it"
       : failedOrBlocked
         ? "do not publish a PR; inspect the verification failure or blocker and continue or relaunch the worker"
         : "continue the worker or relaunch a focused verification task before accepting the result as complete",

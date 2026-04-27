@@ -16,6 +16,7 @@ import {repoPolicyCommand, repoPublishCommand} from "./commands/repo-publish.js"
 import {serviceCommand} from "./commands/service.js"
 import {verifyCommand} from "./commands/verify.js"
 import {
+  cleanupStaleRunsForContext,
   runsCleanupStale,
   runsDiagnose,
   runsEvidence,
@@ -419,6 +420,9 @@ const main = async () => {
     if (flag(args, "--dry-run")) {
       console.log(JSON.stringify({agentId, item}, null, 2))
       return
+    }
+    if (item.continuation?.contextId) {
+      await cleanupStaleRunsForContext(app, item.continuation.contextId)
     }
     console.log(JSON.stringify(await runTask(app, agentId, item), null, 2))
     return

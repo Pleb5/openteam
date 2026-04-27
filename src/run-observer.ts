@@ -2,6 +2,7 @@ import {existsSync} from "node:fs"
 import {mkdir, readFile, writeFile} from "node:fs/promises"
 import path from "node:path"
 import {diagnoseRun, readRunRecord, recentRunRecords, runEvidenceView} from "./commands/runs.js"
+import {verificationFailuresBlockTask} from "./evidence-policy.js"
 import type {AppCfg, TaskRunRecord} from "./types.js"
 
 type ObservationSeverity = "info" | "warning" | "critical"
@@ -100,8 +101,13 @@ const effectiveState = (record: TaskRunRecord, diagnosis: Awaited<ReturnType<typ
     record.state === "succeeded" && (
       diagnosis.hardFailure ||
       record.workerState === "failed" ||
-      record.verificationState === "failed" ||
-      record.verification?.results?.some(result => result.state === "failed" || result.state === "blocked")
+      (
+        verificationFailuresBlockTask(record.doneContract) &&
+        (
+          record.verificationState === "failed" ||
+          record.verification?.results?.some(result => result.state === "failed" || result.state === "blocked")
+        )
+      )
     )
   ) return "failed"
   return record.state

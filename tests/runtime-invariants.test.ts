@@ -6,7 +6,7 @@ import {tmpdir} from "node:os"
 import path from "node:path"
 import {browserInspection} from "../src/commands/browser.js"
 import {acceptsControlDms} from "../src/commands/profile.js"
-import {runEvidenceView, stopRunRecord, summarizeRuns} from "../src/commands/runs.js"
+import {cleanupStaleRunsForContext, runEvidenceView, stopRunRecord, summarizeRuns} from "../src/commands/runs.js"
 import {statusReport} from "../src/commands/status.js"
 import {verifyCommand} from "../src/commands/verify.js"
 import {prepareAgent} from "../src/config.js"
@@ -266,6 +266,28 @@ describe("runtime invariants", () => {
     expect(existsSync(checkout)).toBe(true)
   })
 
+  test("continuation cleanup releases stale holders for the requested context", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    const registryFile = await writeRegistry(app, registryWithContext(checkout, {
+      workerId: "builder-01",
+      role: "builder",
+      jobId: "task-a",
+      mode: "code",
+      leasedAt: "2026-04-25T00:00:00.000Z",
+    }))
+    await writeRun(runRecord(app, {context: {id: "ctx1", checkout, branch: "openteam/test"}}))
+
+    const cleaned = await cleanupStaleRunsForContext(app, "ctx1")
+    const registry = JSON.parse(await readFile(registryFile, "utf8")) as RepoRegistry
+
+    expect(cleaned[0]?.runId).toBe("builder-01-task-a")
+    expect(registry.contexts.ctx1.state).toBe("idle")
+    expect(registry.contexts.ctx1.lease).toBeUndefined()
+  })
+
   test("stale cleanup does not release a context leased by another run", async () => {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
     const app = makeApp(runtimeRoot)
@@ -344,6 +366,38 @@ describe("runtime invariants", () => {
     expect(summary.verificationState).toBe("failed")
     expect(summary.failureCategory).toBe("dev-server-unhealthy")
     expect(summary.staleReasons?.[0]).toContain("verification failed")
+  })
+
+  test("run summaries do not fail report-only runs for negative verification verdicts", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const [summary] = await summarizeRuns(app, [{
+      record: runRecord(app, {
+        role: "researcher",
+        state: "succeeded",
+        workerState: "succeeded",
+        verificationState: "succeeded",
+        doneContract: createDoneContract("researcher", "code", "Review dependency risk"),
+        finishedAt: "2026-04-25T00:01:00.000Z",
+        durationMs: 60_000,
+        process: {},
+        phases: [{name: "opencode-worker", state: "succeeded", startedAt: "2026-04-25T00:00:30.000Z"}],
+        verification: {
+          plan: createVerificationPlan(app, "code", {stacks: []}),
+          results: [{
+            id: "repo-native",
+            kind: "command",
+            state: "failed",
+            source: "worker",
+            note: "Reviewed package.json and lockfile; install fails; hand off dependency pinning to builder.",
+          }],
+        },
+      }),
+    }])
+
+    expect(summary.state).toBe("succeeded")
+    expect(summary.evidenceLevel).toBe("strong")
+    expect(summary.staleReasons ?? []).not.toContain("verification runner failed: repo-native")
   })
 
   test("run summaries preserve recovered dev-server verification success", async () => {
@@ -527,6 +581,23 @@ describe("runtime invariants", () => {
     expect(policy.level).toBe("strong")
     expect(policy.prEligible).toBe(false)
     expect(prPublicationDecision(policy).allowed).toBe(false)
+  })
+
+  test("research negative verification verdict can complete the report-only evidence contract", () => {
+    const contract = createDoneContract("researcher", "code", "Review a dependency PR")
+    const policy = evaluateEvidencePolicy(contract, [{
+      id: "repo-native",
+      kind: "command",
+      state: "failed",
+      evidenceType: "repo-native",
+      source: "worker",
+      note: "Question answered: the PR regresses install. Inspected package metadata and lockfile. Risk: mutable dependency tag and blocked build step. Handoff: builder should pin an immutable dependency artifact and document any required trust configuration.",
+    }])
+
+    expect(policy.level).toBe("strong")
+    expect(policy.finalStateForSuccessfulWorker).toBe("succeeded")
+    expect(policy.missingEvidence).toHaveLength(0)
+    expect(policy.prEligible).toBe(false)
   })
 
   test("runtime status file records stale leases and cleanup metadata", async () => {

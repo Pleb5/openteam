@@ -2,7 +2,7 @@ import {existsSync} from "node:fs"
 import {readFile, readdir, stat, writeFile} from "node:fs/promises"
 import path from "node:path"
 import {prepareAgent} from "../config.js"
-import {evaluateEvidencePolicy, evidenceLevel, groupEvidenceResults} from "../evidence-policy.js"
+import {evaluateEvidencePolicy, evidenceLevel, groupEvidenceResults, verificationFailuresBlockTask} from "../evidence-policy.js"
 import {detectOpenCodeHardFailure, detectWorkerVerificationBlockers} from "../opencode-log.js"
 import {loadRepoRegistry, releaseRepoContext} from "../repo.js"
 import type {AgentRuntimeState, AppCfg, TaskRunRecord} from "../types.js"
@@ -253,14 +253,15 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
     reasons.push(`run is marked succeeded but OpenCode log contains hard failure: ${hardFailure.reason}`)
   }
 
-  if (record.verificationState === "failed" && record.failureCategory) {
+  const verificationFailureBlocksRun = verificationFailuresBlockTask(record.doneContract)
+  if (verificationFailureBlocksRun && record.verificationState === "failed" && record.failureCategory) {
     reasons.push(`verification failed: ${record.failureCategory}`)
   }
   for (const result of record.verification?.results ?? []) {
-    if (result.state === "failed") {
+    if (verificationFailureBlocksRun && result.state === "failed") {
       reasons.push(`verification runner failed: ${result.id}${result.error ? `: ${result.error}` : ""}`)
     }
-    if (result.state === "blocked") {
+    if (verificationFailureBlocksRun && result.state === "blocked") {
       reasons.push(`verification runner blocked: ${result.id}${result.blocker ? `: ${result.blocker}` : ""}`)
     }
   }
@@ -323,8 +324,13 @@ const effectiveRunState = (record: TaskRunRecord, diagnosis?: RunDiagnosis) =>
   record.state === "succeeded" && (
     diagnosis?.hardFailure ||
     record.workerState === "failed" ||
-    record.verificationState === "failed"
-    || record.verification?.results?.some(result => result.state === "failed" || result.state === "blocked")
+    (
+      verificationFailuresBlockTask(record.doneContract) &&
+      (
+        record.verificationState === "failed"
+        || record.verification?.results?.some(result => result.state === "failed" || result.state === "blocked")
+      )
+    )
   )
     ? "failed"
     : diagnosis?.stale ? "stale" : record.state
@@ -571,7 +577,7 @@ export const runsCleanupStale = async (app: AppCfg, args: string[]) => {
   for (const entry of await readdir(dir)) {
     if (!entry.endsWith(".json")) continue
     const record = await readJsonFile<TaskRunRecord>(path.join(dir, entry)).catch(() => undefined)
-    if (!record || record.state !== "running") continue
+    if (!record || (record.state !== "running" && record.state !== "stale")) continue
     const diagnosis = await diagnoseRun(app, record)
     if (!diagnosis.stale) continue
     if (dryRun) {
@@ -581,5 +587,21 @@ export const runsCleanupStale = async (app: AppCfg, args: string[]) => {
     cleaned.push({...await stopRunRecord(app, record.runId, "stale"), reasons: diagnosis.reasons})
   }
   console.log(JSON.stringify(cleaned, null, 2))
+  return cleaned
+}
+
+export const cleanupStaleRunsForContext = async (app: AppCfg, contextId: string) => {
+  const dir = runRecordsDir(app)
+  if (!existsSync(dir)) return []
+
+  const cleaned = []
+  for (const entry of await readdir(dir)) {
+    if (!entry.endsWith(".json")) continue
+    const record = await readJsonFile<TaskRunRecord>(path.join(dir, entry)).catch(() => undefined)
+    if (!record || (record.state !== "running" && record.state !== "stale") || record.context?.id !== contextId) continue
+    const diagnosis = await diagnoseRun(app, record)
+    if (!diagnosis.stale) continue
+    cleaned.push({...await stopRunRecord(app, record.runId, "stale"), reasons: diagnosis.reasons})
+  }
   return cleaned
 }

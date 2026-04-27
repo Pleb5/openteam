@@ -12,7 +12,7 @@ import {prepareAgent} from "./config.js"
 import {detectDevEnv, wrapDevEnvCommand, type DevEnv} from "./dev-env.js"
 import {createDoneContract, doneContractPromptLines} from "./done-contract.js"
 import {pollInboundTasks, subscribeInboundTasks} from "./dm.js"
-import {evaluateEvidencePolicy, type EvidencePolicyView} from "./evidence-policy.js"
+import {evaluateEvidencePolicy, verificationFailuresBlockTask, type EvidencePolicyView} from "./evidence-policy.js"
 import {KIND_GIT_ISSUE} from "./events.js"
 import {gitCollaborationVocabularyLines} from "./git-vocabulary.js"
 import {detectOpenCodeHardFailure} from "./opencode-log.js"
@@ -1255,7 +1255,7 @@ const runAutomaticVerification = async (
   )
   await appendVerificationResults(record, results)
   const failure = verificationHasFailure(results)
-  if (!failure) {
+  if (!failure || !verificationFailuresBlockTask(record.doneContract)) {
     if (results.some(result => result.state === "succeeded")) {
       await updateRunRecord(record, {verificationState: "succeeded"})
     }
@@ -1280,7 +1280,7 @@ const collectWorkerVerificationResults = async (
   )
   await appendVerificationResults(record, results)
   const failure = verificationHasFailure(results)
-  if (!failure) {
+  if (!failure || !verificationFailuresBlockTask(record.doneContract)) {
     if (results.some(result => result.state === "succeeded")) {
       await updateRunRecord(record, {verificationState: "succeeded"})
     }
