@@ -1333,6 +1333,7 @@ describe("runtime invariants", () => {
     expect(env.XDG_CACHE_HOME).toBe("/repo/checkout/.openteam/cache")
     expect(env.OPENTEAM_ARTIFACTS_DIR).toBe("/repo/checkout/.openteam/artifacts")
     expect(env.npm_config_cache).toBe("/repo/checkout/.openteam/cache/npm")
+    expect(env.PATH?.split(":")[0]).toBe("/repo/checkout/.openteam/bin")
     expect(env.OPENTEAM_PHASE).toBe("provision")
   })
 

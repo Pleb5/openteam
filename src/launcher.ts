@@ -1,6 +1,6 @@
 import {createWriteStream} from "node:fs"
 import {existsSync} from "node:fs"
-import {cp, mkdir, readFile, readdir, rename, rm, stat, writeFile} from "node:fs/promises"
+import {chmod, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile} from "node:fs/promises"
 import {spawn} from "node:child_process"
 import {spawnSync} from "node:child_process"
 import net from "node:net"
@@ -114,6 +114,7 @@ export const checkoutRuntimeDirs = (checkout: string) => {
   const root = path.join(checkout, ".openteam")
   return {
     root,
+    bin: path.join(root, "bin"),
     tmp: path.join(root, "tmp"),
     cache: path.join(root, "cache"),
     artifacts: path.join(root, "artifacts"),
@@ -132,6 +133,10 @@ const ensureCheckoutRuntimeDirs = async (checkout: string) => {
 
 export const checkoutRuntimeEnv = (checkout: string, env: Record<string, string> = {}) => {
   const dirs = checkoutRuntimeDirs(checkout)
+  const pathValue = [
+    dirs.bin,
+    env.PATH ?? process.env.PATH ?? "",
+  ].filter(Boolean).join(path.delimiter)
   return {
     TMPDIR: dirs.tmp,
     TMP: dirs.tmp,
@@ -145,7 +150,76 @@ export const checkoutRuntimeEnv = (checkout: string, env: Record<string, string>
     BUN_INSTALL_CACHE_DIR: dirs.bunCache,
     npm_config_store_dir: dirs.pnpmStore,
     ...env,
+    PATH: pathValue,
   }
+}
+
+const devEnvShimTools = [
+  "node",
+  "npm",
+  "npx",
+  "corepack",
+  "pnpm",
+  "yarn",
+  "bun",
+  "vite",
+  "vitest",
+  "playwright",
+  "svelte-kit",
+  "svelte-check",
+  "tailwindcss",
+  "tsc",
+  "eslint",
+  "prettier",
+]
+
+const devEnvShim = (tool: string, devEnv: DevEnv) => {
+  const prelude = [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    'shim_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"',
+    'checkout_dir="$(cd -- "$shim_dir/../.." && pwd)"',
+    'clean_path=""',
+    'IFS=: read -r -a path_parts <<< "${PATH:-}"',
+    'for path_part in "${path_parts[@]}"; do',
+    '  [[ "$path_part" == "$shim_dir" || -z "$path_part" ]] && continue',
+    '  if [[ -z "$clean_path" ]]; then',
+    '    clean_path="$path_part"',
+    "  else",
+    '    clean_path="$clean_path:$path_part"',
+    "  fi",
+    "done",
+    'export PATH="$clean_path"',
+  ]
+
+  if (devEnv.kind === "nix-flake") {
+    return [
+      ...prelude,
+      `exec nix develop "$checkout_dir" --command ${tool} "$@"`,
+      "",
+    ].join("\n")
+  }
+
+  return [
+    ...prelude,
+    'args=""',
+    'for arg in "$@"; do',
+    '  printf -v quoted "%q" "$arg"',
+    '  args="$args $quoted"',
+    "done",
+    `exec nix-shell "$checkout_dir" --run '${tool}'"$args"`,
+    "",
+  ].join("\n")
+}
+
+const writeDevEnvToolShims = async (checkout: string, devEnv: DevEnv) => {
+  if (devEnv.kind === "none") return
+  const {bin} = await ensureCheckoutRuntimeDirs(checkout)
+  await Promise.all(devEnvShimTools.map(async tool => {
+    const file = path.join(bin, tool)
+    await writeFile(file, devEnvShim(tool, devEnv), {mode: 0o755})
+    await chmod(file, 0o755)
+  }))
 }
 
 const hasPackageManagerFiles = (root: string) => {
@@ -293,6 +367,7 @@ const bootstrapPrompt = (agent: PreparedAgent, task: string, projectProfile?: Pr
     `Provision the environment if needed: initialize submodules, install dependencies, and run the minimum setup needed to make the repository workable.`,
     `Do not assume any specific framework or package manager. Detect what the repository actually uses.`,
     `If the checkout has a Nix flake or shell, openteam will launch you inside that declared development environment; use repo-native commands normally from there.`,
+    `For Nix-managed checkouts, openteam also puts checkout-local tool shims in .openteam/bin first on PATH so plain commands such as pnpm, node, and playwright resolve through the declared environment.`,
     ...gitCollaborationVocabularyLines(),
     `Do not attempt browser verification until the environment is ready for it.`,
     `Use checkout-local scratch/cache/artifact paths from OPENTEAM_TMP_DIR, OPENTEAM_CACHE_DIR, and OPENTEAM_ARTIFACTS_DIR; avoid /tmp and host-global caches.`,
@@ -1420,6 +1495,7 @@ export const runTask = async (
     await runPhase(runRecord, "prepare-checkout", () => prepareCheckout(agent, checkout))
     const devEnv = await runPhase(runRecord, "detect-dev-env", () => detectDevEnv(checkout))
     await updateRunRecord(runRecord, {devEnv})
+    await runPhase(runRecord, "write-dev-env-shims", () => writeDevEnvToolShims(checkout, devEnv), {devEnv: devEnv.kind, source: devEnv.source})
     const projectProfile = await runPhase(runRecord, "detect-project-profile", () => detectProjectProfile(checkout, devEnv))
     const projectProfileFile = await runPhase(runRecord, "write-project-profile", () => writeProjectProfile(checkout, projectProfile))
     const verificationPlan = await runPhase(runRecord, "plan-verification", () => Promise.resolve(createVerificationPlan(app, mode, projectProfile)))
