@@ -15,9 +15,21 @@ import {detectDevEnv, wrapDevEnvCommand} from "../src/dev-env.js"
 import {createDoneContract} from "../src/done-contract.js"
 import {evaluateEvidencePolicy, prPublicationDecision} from "../src/evidence-policy.js"
 import {configureCheckoutGitAuth, gitCredentialFromStdin} from "../src/git-auth.js"
-import {assertResolvedContextReady, checkoutRuntimeEnv, provisionWorkerControlCommand} from "../src/launcher.js"
+import {
+  assertResolvedContextReady,
+  assertVerificationToolingReady,
+  checkoutRuntimeEnv,
+  provisionWorkerControlCommand,
+  writeCheckoutToolShims,
+} from "../src/launcher.js"
 import {detectOpenCodeHardFailure, detectWorkerVerificationBlockers} from "../src/opencode-log.js"
 import {detectProjectProfile, writeProjectProfile} from "../src/project-profile.js"
+import {
+  applyObservationReportPolicy,
+  buildDueObservationDigest,
+  emptyDmReportState,
+  formatTaskRunReport,
+} from "../src/reporting-policy.js"
 import {resolveRepoTarget} from "../src/repo.js"
 import {continuationEvidenceForCarry, continuationPromptLines, createContinuationTaskItem} from "../src/run-continuation.js"
 import {observeRun, observeRuns} from "../src/run-observer.js"
@@ -28,6 +40,7 @@ import {
   createVerificationPlan,
   manualVerificationResult,
   readVerificationResults,
+  resetVerificationResults,
   runLocalVerificationRunners,
   runVerificationRunner,
   verificationHasFailure,
@@ -172,6 +185,8 @@ const registryWithContext = (checkout: string, lease: RepoRegistry["contexts"][s
 
 afterEach(() => {
   delete process.env.OPENTEAM_PHASE
+  delete process.env.OPENTEAM_CHECKOUT
+  delete process.env.OPENTEAM_RUN_FILE
 })
 
 describe("runtime invariants", () => {
@@ -712,6 +727,127 @@ describe("runtime invariants", () => {
     expect(snapshot.evidenceLevel).toBe("none")
     expect(snapshot.prEligible).toBe(false)
     expect(snapshot.recommendedAction).toContain("continue")
+  })
+
+  test("DM task reports keep compact run metadata", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const record = runRecord(app, {
+      state: "needs-review",
+      workerState: "succeeded",
+      verificationState: "needs-review",
+      failureCategory: "verification-evidence-missing",
+      target: "nostr://npub16p8v7varqwjes5hak6q7mz6pygqm4pwc6gve4mrned3xs8tz42gq7kfhdw/flotilla-budabit",
+      mode: "web",
+      task: "Fix checkout flow and verify the browser behavior",
+      context: {
+        id: "ctx1",
+        checkout: path.join(runtimeRoot, "checkout"),
+        branch: "openteam/test",
+      },
+    })
+
+    const report = await formatTaskRunReport(record, {
+      kind: "terminal",
+      state: "needs-review",
+      failureCategory: "verification-evidence-missing",
+      evidenceLevel: "weak",
+      prEligible: false,
+      recommendedAction: "repair evidence",
+    })
+
+    expect(report).toContain("[builder-01] needs-review verification-evidence-missing")
+    expect(report).toContain(`run: ${record.runId}`)
+    expect(report).toContain(`family: ${record.runId}`)
+    expect(report).toContain("target: nostr://npub")
+    expect(report).toContain("/flotilla-budabit")
+    expect(report).toContain("mode: web")
+    expect(report).toContain("task: Fix checkout flow")
+    expect(report).toContain("evidence: weak, PR no")
+    expect(report).toContain(`next: openteam runs evidence ${record.runId}`)
+  })
+
+  test("DM observation policy suppresses duplicate terminal reports", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const record = runRecord(app, {
+      state: "needs-review",
+      workerState: "succeeded",
+      verificationState: "needs-review",
+      failureCategory: "verification-evidence-missing",
+      process: {},
+      phases: [{name: "opencode-worker", state: "succeeded"}],
+      doneContract: createDoneContract("builder", "code", "Fix helper crash"),
+      verification: {
+        plan: createVerificationPlan(app, "code", {stacks: []}),
+        results: [],
+      },
+    })
+    await writeRun(record)
+    const snapshot = await observeRun(app, record.runId)
+    const event = {
+      runId: record.runId,
+      observedAt: snapshot.observedAt,
+      snapshot,
+      transitions: [{
+        field: "state",
+        from: "running",
+        to: "needs-review",
+        severity: "warning" as const,
+        message: `${record.runId}: state changed from running to needs-review`,
+      }],
+    }
+    const state = emptyDmReportState(app)
+
+    const first = applyObservationReportPolicy(state, event, app.config.reporting)
+    const repeat = applyObservationReportPolicy(state, event, app.config.reporting)
+
+    expect(first.report).toContain(`run: ${record.runId}`)
+    expect(first.report).toContain("evidence: none, PR no")
+    expect(repeat.report).toBeUndefined()
+    expect(state.runs[record.runId]?.reportCount).toBe(1)
+  })
+
+  test("DM digest mode groups warning observations without immediate spam", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    app.config.reporting.dmObservationMode = "digest"
+    app.config.reporting.dmDigestIntervalMs = 0
+    const record = runRecord(app, {
+      state: "running",
+      target: "30617:2cc86cc7b95121746fc8d00bb2e78ed1d4b1625aacbf34ced66e175e920bd65e:nostr-git-ui",
+      mode: "web",
+      process: {runnerPid: process.pid},
+      phases: [{name: "start-dev-server", state: "running"}],
+    })
+    await writeRun(record)
+    const snapshot = await observeRun(app, record.runId)
+    const event = {
+      runId: record.runId,
+      observedAt: snapshot.observedAt,
+      snapshot: {
+        ...snapshot,
+        state: "running",
+        devHealthy: false,
+        devError: "connection refused",
+      },
+      transitions: [{
+        field: "devHealthy",
+        from: true,
+        to: false,
+        severity: "warning" as const,
+        message: `${record.runId}: devHealthy changed from true to false`,
+      }],
+    }
+    const state = emptyDmReportState(app)
+
+    const immediate = applyObservationReportPolicy(state, event, app.config.reporting)
+    const digest = buildDueObservationDigest(state, app.config.reporting, {now: new Date("2026-04-27T00:00:00.000Z")})
+
+    expect(immediate.report).toBeUndefined()
+    expect(digest).toContain("openteam run digest")
+    expect(digest).toContain("running: 1")
+    expect(digest).toContain(`run=${record.runId}`)
   })
 
   test("continuation task reuses prior run context and carries evidence guidance", async () => {
@@ -1409,6 +1545,66 @@ describe("runtime invariants", () => {
     expect(saved[0]?.state).toBe("succeeded")
   })
 
+  test("managed checkout exposes openteam verify tooling before worker handoff", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    const app = makeApp(runtimeRoot)
+    const plan = createVerificationPlan(app, "code", {stacks: []})
+
+    await writeCheckoutToolShims(checkout, {kind: "none", commandPrefix: []}, app.root)
+    await writeVerificationPlan(checkout, plan)
+    await resetVerificationResults(checkout)
+
+    const ready = await assertVerificationToolingReady(checkout)
+    const shim = await readFile(ready.openteamShim, "utf8")
+
+    expect(ready.openteamShim).toBe(path.join(checkout, ".openteam", "bin", "openteam"))
+    expect(shim).toContain("OPENTEAM_CHECKOUT")
+    expect(shim).toContain(path.join(app.root, "scripts", "openteam"))
+  })
+
+  test("verify command resolves checkout from worker runtime environment", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    const app = makeApp(runtimeRoot)
+    await writeVerificationPlan(checkout, createVerificationPlan(app, "code", {stacks: []}))
+    await resetVerificationResults(checkout)
+    process.env.OPENTEAM_CHECKOUT = checkout
+
+    const originalLog = console.log
+    console.log = () => undefined
+    try {
+      await verifyCommand(app, "list", ["verify", "list"])
+    } finally {
+      console.log = originalLog
+    }
+  })
+
+  test("verify command falls back to OPENTEAM_RUN_FILE checkout when cwd is unrelated", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    const app = makeApp(runtimeRoot)
+    await writeVerificationPlan(checkout, createVerificationPlan(app, "code", {stacks: []}))
+    await resetVerificationResults(checkout)
+    const record = runRecord(app, {
+      context: {
+        id: "ctx1",
+        checkout,
+        branch: "openteam/test",
+      },
+    })
+    await writeRun(record)
+    process.env.OPENTEAM_RUN_FILE = record.runFile
+
+    const originalLog = console.log
+    console.log = () => undefined
+    try {
+      await verifyCommand(app, "list", ["verify", "list"])
+    } finally {
+      console.log = originalLog
+    }
+  })
+
   test("workers can record agentic verification evidence without running a command", async () => {
     const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
     const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
@@ -1602,6 +1798,7 @@ describe("runtime invariants", () => {
     expect(env.TEMP).toBe("/repo/checkout/.openteam/tmp")
     expect(env.XDG_CACHE_HOME).toBe("/repo/checkout/.openteam/cache")
     expect(env.OPENTEAM_ARTIFACTS_DIR).toBe("/repo/checkout/.openteam/artifacts")
+    expect(env.OPENTEAM_CHECKOUT).toBe("/repo/checkout")
     expect(env.npm_config_cache).toBe("/repo/checkout/.openteam/cache/npm")
     expect(env.PATH?.split(":")[0]).toBe("/repo/checkout/.openteam/bin")
     expect(env.OPENTEAM_PHASE).toBe("provision")

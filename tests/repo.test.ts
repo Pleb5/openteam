@@ -7,11 +7,15 @@ import {
   configuredForkProviderKinds,
   deriveForkClonePlan,
   deriveForkCloneUrl,
+  ensureGithubForkRepo,
+  ensureGitlabForkRepo,
   forkEventTags,
   parseRepoReference,
+  pushForkTargets,
   repoIdentityFromAnnouncement,
   releaseRepoContext,
   resolveRepoRelayPolicy,
+  type ProviderApiFetch,
 } from "../src/repo.js"
 import type {AppCfg, ProviderCfg, RepoIdentity, RepoRegistry} from "../src/types.js"
 
@@ -66,6 +70,28 @@ const identity = {
   cloneUrls: [],
   rawTags: [],
 } satisfies RepoIdentity
+
+type ApiCall = {
+  url: string
+  init: RequestInit
+}
+
+const response = (status: number, body: unknown) => ({
+  ok: status >= 200 && status < 300,
+  status,
+  text: async () => typeof body === "string" ? body : JSON.stringify(body),
+})
+
+const sequenceFetch = (items: Array<{status: number; body: unknown}>) => {
+  const calls: ApiCall[] = []
+  const fetch: ProviderApiFetch = async (url, init) => {
+    calls.push({url, init})
+    const item = items.shift()
+    if (!item) throw new Error(`unexpected API call: ${url}`)
+    return response(item.status, item.body)
+  }
+  return {fetch, calls}
+}
 
 describe("repo references", () => {
   test("parses nostr git URI with relay hints", () => {
@@ -320,5 +346,175 @@ describe("fork clone URLs", () => {
     )
 
     expect(tags.find(tag => tag[0] === "relays")).toEqual(["relays", "wss://nos.lol"])
+  })
+})
+
+describe("provider fork contracts", () => {
+  test("creates GitHub fork storage repositories through the configured namespace", async () => {
+    const {fetch, calls} = sequenceFetch([
+      {status: 200, body: {login: "octobot"}},
+      {status: 201, body: {clone_url: "https://github.com/budabit-agent-gh/openteam-repo.git"}},
+    ])
+
+    const result = await ensureGithubForkRepo({
+      type: "github",
+      host: "github.com",
+      token: "gh-token",
+      namespace: "budabit-agent-gh",
+      username: "openteam-bot",
+      private: true,
+    }, "openteam-repo", "openteam fork", {fetch})
+
+    expect(result).toEqual({
+      cloneUrl: "https://github.com/budabit-agent-gh/openteam-repo.git",
+      username: "openteam-bot",
+    })
+    expect(calls.map(call => `${call.init.method} ${call.url}`)).toEqual([
+      "GET https://api.github.com/user",
+      "POST https://api.github.com/orgs/budabit-agent-gh/repos",
+    ])
+    expect(JSON.parse(String(calls[1]?.init.body))).toEqual({
+      name: "openteam-repo",
+      description: "openteam fork",
+      private: true,
+      auto_init: false,
+    })
+    expect((calls[1]?.init.headers as Record<string, string>).authorization).toBe("Bearer gh-token")
+  })
+
+  test("reuses existing GitHub fork storage repositories after create conflicts", async () => {
+    const {fetch, calls} = sequenceFetch([
+      {status: 200, body: {login: "octobot"}},
+      {status: 422, body: {message: "name already exists on this account"}},
+      {status: 200, body: {clone_url: "https://github.com/octobot/openteam-repo.git"}},
+    ])
+
+    const result = await ensureGithubForkRepo({
+      type: "github",
+      host: "github.com",
+      token: "gh-token",
+    }, "openteam-repo", "openteam fork", {fetch})
+
+    expect(result).toEqual({
+      cloneUrl: "https://github.com/octobot/openteam-repo.git",
+      username: "octobot",
+    })
+    expect(calls.map(call => `${call.init.method} ${call.url}`)).toEqual([
+      "GET https://api.github.com/user",
+      "POST https://api.github.com/user/repos",
+      "GET https://api.github.com/repos/octobot/openteam-repo",
+    ])
+  })
+
+  test("surfaces GitHub auth failures with API status and message", async () => {
+    const {fetch} = sequenceFetch([
+      {status: 401, body: {message: "Bad credentials"}},
+    ])
+
+    await expect(ensureGithubForkRepo({
+      type: "github",
+      host: "github.com",
+      token: "bad-token",
+    }, "openteam-repo", "openteam fork", {fetch})).rejects.toThrow("GitHub user lookup failed (401: Bad credentials)")
+  })
+
+  test("creates GitLab fork storage projects with namespace and visibility settings", async () => {
+    const {fetch, calls} = sequenceFetch([
+      {status: 200, body: {id: 7, username: "gitlab-bot"}},
+      {status: 201, body: {http_url_to_repo: "https://gitlab.com/team/openteam-repo.git"}},
+    ])
+
+    const result = await ensureGitlabForkRepo({
+      type: "gitlab",
+      host: "gitlab.com",
+      token: "gl-token",
+      namespaceId: 42,
+      visibility: "internal",
+    }, "openteam-repo", "openteam fork", {fetch})
+
+    expect(result).toEqual({
+      cloneUrl: "https://gitlab.com/team/openteam-repo.git",
+      username: "gitlab-bot",
+    })
+    expect(calls.map(call => `${call.init.method} ${call.url}`)).toEqual([
+      "GET https://gitlab.com/api/v4/user",
+      "POST https://gitlab.com/api/v4/projects",
+    ])
+    expect(JSON.parse(String(calls[1]?.init.body))).toEqual({
+      name: "openteam-repo",
+      path: "openteam-repo",
+      description: "openteam fork",
+      visibility: "internal",
+      namespace_id: 42,
+    })
+    expect((calls[1]?.init.headers as Record<string, string>)["private-token"]).toBe("gl-token")
+  })
+
+  test("reuses existing GitLab fork storage projects after create conflicts", async () => {
+    const {fetch, calls} = sequenceFetch([
+      {status: 200, body: {id: 7, username: "gitlab-bot"}},
+      {status: 409, body: {message: "has already been taken"}},
+      {status: 200, body: {http_url_to_repo: "https://gitlab.com/team/openteam-repo.git"}},
+    ])
+
+    const result = await ensureGitlabForkRepo({
+      type: "gitlab",
+      host: "gitlab.com",
+      token: "gl-token",
+      namespacePath: "team",
+    }, "openteam-repo", "openteam fork", {fetch})
+
+    expect(result).toEqual({
+      cloneUrl: "https://gitlab.com/team/openteam-repo.git",
+      username: "gitlab-bot",
+    })
+    expect(calls.map(call => `${call.init.method} ${call.url}`)).toEqual([
+      "GET https://gitlab.com/api/v4/user",
+      "POST https://gitlab.com/api/v4/projects",
+      "GET https://gitlab.com/api/v4/projects/team%2Fopenteam-repo",
+    ])
+  })
+
+  test("ignores configured fork providers that do not have a token", () => {
+    expect(configuredForkProviderKinds(app(
+      {},
+      {
+        github: {type: "github", host: "github.com", token: ""},
+        gitlab: {type: "gitlab", host: "gitlab.com", token: "gl-token"},
+      },
+    ))).toEqual(["gitlab"])
+  })
+
+  test("GRASP fork plans publish announcements before push", () => {
+    expect(deriveForkClonePlan(
+      app({graspServers: ["wss://grasp.example.com"]}),
+      identity,
+      "https://git.example.com/upstream/flotilla-budabit.git",
+      {npub: ownerNpub, pubkey: ownerPubkey},
+    )).toEqual({
+      cloneUrls: [`https://grasp.example.com/${ownerNpub}/flotilla-budabit.git`],
+      publishBeforePush: true,
+    })
+  })
+
+  test("aggregates all fork push failures before reporting a provisioning blocker", () => {
+    expect(() => pushForkTargets([
+      "https://fork-one.example/repo.git",
+      "https://fork-two.example/repo.git",
+    ], "https://upstream.example/repo.git", forkUrl => {
+      throw new Error(`push rejected for ${forkUrl}`)
+    })).toThrow("failed to populate orchestrator fork")
+    expect(() => pushForkTargets([
+      "https://fork-one.example/repo.git",
+      "https://fork-two.example/repo.git",
+    ], "https://upstream.example/repo.git", forkUrl => {
+      throw new Error(`push rejected for ${forkUrl}`)
+    })).toThrow("https://fork-one.example/repo.git: Error: push rejected for https://fork-one.example/repo.git")
+    expect(() => pushForkTargets([
+      "https://fork-one.example/repo.git",
+      "https://fork-two.example/repo.git",
+    ], "https://upstream.example/repo.git", forkUrl => {
+      throw new Error(`push rejected for ${forkUrl}`)
+    })).toThrow("https://fork-two.example/repo.git: Error: push rejected for https://fork-two.example/repo.git")
   })
 })

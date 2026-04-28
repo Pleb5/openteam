@@ -98,7 +98,10 @@
     "signerRelays": [],
     "allowFrom": [],
     "reportTo": [],
-    "pollIntervalMs": 5000
+    "pollIntervalMs": 5000,
+    "dmObservationMode": "terminal",
+    "dmDigestIntervalMs": 1800000,
+    "dmWarningThrottleMs": 1800000
   },
   "nostr_git": {
     "graspServers": [],

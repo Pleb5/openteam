@@ -138,6 +138,9 @@ export type ReportingCfg = {
   allowFrom: string[]
   reportTo: string[]
   pollIntervalMs?: number
+  dmObservationMode?: "terminal" | "digest" | "verbose"
+  dmDigestIntervalMs?: number
+  dmWarningThrottleMs?: number
 }
 
 export type AgentIdentityCfg = {
@@ -279,6 +282,15 @@ export type AgentPaths = {
 }
 
 export type RunPhaseState = "running" | "succeeded" | "failed" | "skipped" | "interrupted" | "stale"
+
+export type ProvisionState = "pending" | "current" | "running" | "succeeded" | "failed"
+
+export type ProvisionFailureCategory =
+  | "provision-failed"
+  | "provision-worker-control"
+  | "project-profile-blocker"
+  | "verification-tooling-missing"
+  | "dev-env-wrapper-failed"
 
 export type TaskRunPhase = {
   name: string
@@ -454,6 +466,10 @@ export type TaskRunRecord = {
   workerState?: TaskState
   verificationState?: TaskState
   failureCategory?: string
+  provisionState?: ProvisionState
+  provisionFailureCategory?: ProvisionFailureCategory
+  projectProfilePath?: string
+  verificationToolingReady?: boolean
   startedAt: string
   finishedAt?: string
   durationMs?: number

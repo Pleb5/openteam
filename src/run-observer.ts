@@ -3,6 +3,7 @@ import {mkdir, readFile, writeFile} from "node:fs/promises"
 import path from "node:path"
 import {diagnoseRun, readRunRecord, recentRunRecords, runEvidenceView} from "./commands/runs.js"
 import {verificationFailuresBlockTask} from "./evidence-policy.js"
+import {resolveRunFamilyKey} from "./reporting-policy.js"
 import type {AppCfg, TaskRunRecord} from "./types.js"
 
 type ObservationSeverity = "info" | "warning" | "critical"
@@ -15,9 +16,11 @@ export type RunObservationSnapshot = {
   agentId: string
   baseAgentId: string
   role: string
+  familyKey?: string
   target?: string
   mode?: string
   taskId: string
+  task?: string
   workerState?: string
   verificationState?: string
   failureCategory?: string
@@ -120,6 +123,7 @@ export const snapshotRunObservation = async (
   const diagnosis = await diagnoseRun(app, record)
   const evidence = runEvidenceView(record)
   const devHealth = diagnosis.devServer.health
+  const familyKey = await resolveRunFamilyKey(record)
   return {
     runId: record.runId,
     observedAt: new Date().toISOString(),
@@ -128,9 +132,11 @@ export const snapshotRunObservation = async (
     agentId: record.agentId,
     baseAgentId: record.baseAgentId,
     role: record.role,
+    familyKey,
     target: record.target,
     mode: record.mode,
     taskId: record.taskId,
+    task: record.task,
     workerState: record.workerState,
     verificationState: record.verificationState,
     failureCategory: record.failureCategory,

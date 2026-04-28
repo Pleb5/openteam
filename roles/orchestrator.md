@@ -36,8 +36,11 @@ Operating rules:
 - use `openteam runs evidence <run-id>` to report whether a job has strong, weak, failed, blocked, or missing evidence
 - report "succeeded with evidence" only when worker-produced evidence satisfies the done contract enough for the task class
 - treat `state: needs-review` as a terminal worker result that completed the task phase but did not satisfy the evidence gate
-- use `openteam runs repair-evidence <run-id>` when the edit likely completed but missing or weak evidence prevents success or PR publication
-- use `openteam runs continue <run-id> --task "..."` for follow-up work that should reuse the same idle repo context
+- do not automatically repair or continue a `needs-review` run; inspect `openteam runs evidence <run-id>` and ask for operator approval unless the operator already requested evidence repair
+- use `openteam runs repair-evidence <run-id>` only when the edit likely completed, missing or weak evidence is the only blocker, and the operator or run-family policy allows another attempt
+- use `openteam runs continue <run-id> --task "..."` only for a specific follow-up delta that should reuse the same idle repo context; generic "continue" is not enough
+- stop and report a blocker instead of launching another continuation when the prior attempt failed with the same failure category as an earlier attempt in the same run family
+- treat permission rejection, publication blocked, failed verification, and context-busy as operator-review states, not automatic retry signals
 - if continuation reports the context is busy, do not bypass the lease; stop, wait, or ask the operator whether to parallelize with a new context
 - rely on the run observer for polling: `openteam runs observe <run-id>` for one run and `openteam runs watch --active` for transitions
 - use persisted observations in `runtime/orchestrator/observations.json` as the orchestrator's last-seen run state

@@ -1,3 +1,4 @@
+import {existsSync} from "node:fs"
 import {readFile} from "node:fs/promises"
 import {detectDevEnv} from "../dev-env.js"
 import {
@@ -7,6 +8,8 @@ import {
   readVerificationPlan,
   readVerificationResults,
   runVerificationRunner,
+  verificationPlanPath,
+  verificationResultsPath,
 } from "../verification.js"
 import type {AppCfg, VerificationEvidenceType, VerificationRunnerKind, VerificationRunnerPlan, VerificationRunnerResult, VerificationPlan} from "../types.js"
 
@@ -28,11 +31,29 @@ const values = (args: string[], key: string) => {
 
 const flag = (args: string[], key: string) => args.includes(key)
 
-const checkoutFromArgs = (args: string[]) => value(args, "--checkout") || process.cwd()
+const checkoutFromRunFile = async () => {
+  const file = process.env.OPENTEAM_RUN_FILE
+  if (!file || !existsSync(file)) return ""
+  try {
+    const record = JSON.parse(await readFile(file, "utf8")) as {
+      context?: {checkout?: string}
+      result?: {checkout?: string}
+    }
+    return record.context?.checkout || record.result?.checkout || ""
+  } catch {
+    return ""
+  }
+}
+
+const checkoutFromArgs = async (args: string[]) =>
+  value(args, "--checkout") ||
+  process.env.OPENTEAM_CHECKOUT ||
+  await checkoutFromRunFile() ||
+  process.cwd()
 
 const requirePlan = async (checkout: string) => {
   const plan = await readVerificationPlan(checkout)
-  if (!plan) throw new Error(`verification plan not found: ${checkout}/.openteam/verification-plan.json`)
+  if (!plan) throw new Error(`verification plan not found: ${verificationPlanPath(checkout)}`)
   return plan
 }
 
@@ -158,15 +179,15 @@ const printList = (value: unknown, json: boolean) => {
 
 export const verifyCommand = async (app: AppCfg, sub: string | undefined, args: string[]) => {
   const json = flag(args, "--json")
-  const checkout = checkoutFromArgs(args)
+  const checkout = await checkoutFromArgs(args)
 
   if (sub === "list") {
     const plan = await requirePlan(checkout)
     const results = await readVerificationResults(checkout)
     printList({
       checkout,
-      planPath: `${checkout}/.openteam/verification-plan.json`,
-      resultsPath: `${checkout}/.openteam/verification-results.json`,
+      planPath: verificationPlanPath(checkout),
+      resultsPath: verificationResultsPath(checkout),
       runners: plan.runners,
       results,
     }, json)

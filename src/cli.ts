@@ -26,6 +26,14 @@ import {
   stopRunRecord,
 } from "./commands/runs.js"
 import {createContinuationTaskItem} from "./run-continuation.js"
+import {
+  evaluateContinuationGate,
+  formatContinuationGateError,
+  recordContinuationBlock,
+  recordContinuationLaunch,
+  summarizeContinuationGate,
+  writeRunFamilyState,
+} from "./run-family-policy.js"
 import {runsObserveCommand, runsWatchCommand} from "./run-observer.js"
 import {statusReport} from "./commands/status.js"
 import {recipientsFromEnv, sourceFromEnv} from "./task-context.js"
@@ -65,8 +73,8 @@ const help = () => {
   runs evidence <run-id> [--json]
   runs observe <run-id> [--json]
   runs watch [--active|--needs-review] [--once] [--interval-ms <ms>] [--limit <n>] [--json]
-  runs continue <run-id> [--task <text>] [--model <provider/model>] [--no-carry-evidence] [--dry-run]
-  runs repair-evidence <run-id> [--task <text>] [--model <provider/model>] [--no-carry-evidence] [--dry-run]
+  runs continue <run-id> [--task <text>] [--model <provider/model>] [--no-carry-evidence] [--dry-run] [--force]
+  runs repair-evidence <run-id> [--task <text>] [--model <provider/model>] [--no-carry-evidence] [--dry-run] [--force]
   runs stop <run-id>
   runs cleanup-stale [--dry-run]
   browser status [agentId|role|worker-name] [--json]
@@ -409,6 +417,7 @@ const main = async () => {
 
   if (cmd === "runs" && (sub === "continue" || sub === "repair-evidence")) {
     const record = await readRunRecord(app, must(args[2] ?? "", "run-id"))
+    const explicitTask = Boolean(value(args, "--task").trim())
     const item = createContinuationTaskItem(record, {
       kind: sub,
       task: value(args, "--task") || undefined,
@@ -417,10 +426,23 @@ const main = async () => {
     })
     const agentId = worker(app, item.agentId)
     assertAppConfigValid(app, {capability: "launch", agentId, mode: item.mode})
+    const command = `openteam ${args.join(" ")}`
+    const gate = await evaluateContinuationGate(app, record, item, {
+      explicitTask,
+      force: flag(args, "--force"),
+      command,
+    })
     if (flag(args, "--dry-run")) {
-      console.log(JSON.stringify({agentId, item}, null, 2))
+      console.log(JSON.stringify({agentId, item, gate: summarizeContinuationGate(gate)}, null, 2))
       return
     }
+    if (!gate.allowed) {
+      recordContinuationBlock(gate)
+      await writeRunFamilyState(gate.state)
+      throw new Error(formatContinuationGateError(gate))
+    }
+    recordContinuationLaunch(gate, command)
+    await writeRunFamilyState(gate.state)
     if (item.continuation?.contextId) {
       await cleanupStaleRunsForContext(app, item.continuation.contextId)
     }

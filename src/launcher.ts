@@ -12,6 +12,7 @@ import {prepareAgent} from "./config.js"
 import {detectDevEnv, wrapDevEnvCommand, type DevEnv} from "./dev-env.js"
 import {createDoneContract, doneContractPromptLines} from "./done-contract.js"
 import {pollInboundTasks, subscribeInboundTasks} from "./dm.js"
+import {recordReportOutboxAttempts} from "./dm-outbox.js"
 import {evaluateEvidencePolicy, verificationFailuresBlockTask, type EvidencePolicyView} from "./evidence-policy.js"
 import {KIND_GIT_ISSUE} from "./events.js"
 import {gitCollaborationVocabularyLines} from "./git-vocabulary.js"
@@ -19,6 +20,13 @@ import {detectOpenCodeHardFailure} from "./opencode-log.js"
 import {dispatchOperatorRequest, type DispatchContext} from "./orchestrator.js"
 import {detectProjectProfile, projectProfilePromptLines, writeProjectProfile, type ProjectProfile} from "./project-profile.js"
 import {writeRepoPublishContext} from "./repo-publish.js"
+import {
+  applyObservationReportPolicy,
+  buildDueObservationDigest,
+  formatTaskRunReport,
+  readDmReportState,
+  writeDmReportState,
+} from "./reporting-policy.js"
 import {releaseRepoContext, resolveRepoAnnouncementTarget, resolveRepoRelayPolicy, resolveRepoTarget, type RepoRelayPolicy} from "./repo.js"
 import {continuationEvidenceForCarry, continuationPromptLines} from "./run-continuation.js"
 import {formatObservationEvent, observeRuns} from "./run-observer.js"
@@ -49,7 +57,7 @@ import {
   syncOwnOutboxRelays,
   syncProfileTokens,
 } from "./nostr.js"
-import type {AppCfg, LaunchResult, PreparedAgent, TaskItem, AgentRuntimeState, RepoCfg, ResolvedRepoTarget, ResolvedTaskSubject, TaskMode, TaskRunPhase, TaskRunRecord} from "./types.js"
+import type {AppCfg, LaunchResult, PreparedAgent, TaskItem, AgentRuntimeState, ProvisionFailureCategory, RepoCfg, ResolvedRepoTarget, ResolvedTaskSubject, TaskMode, TaskRunPhase, TaskRunRecord} from "./types.js"
 
 type AgentRuntime = {
   bunker?: RunningBunker
@@ -111,6 +119,8 @@ const nextPort = async (agent: PreparedAgent) => {
 
 const fill = (items: string[], vars: Record<string, string>) => items.map(item => item.replace(/\{(\w+)\}/g, (_, key: string) => vars[key] ?? ""))
 
+const shellQuote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`
+
 export const checkoutRuntimeDirs = (checkout: string) => {
   const root = path.join(checkout, ".openteam")
   return {
@@ -146,6 +156,7 @@ export const checkoutRuntimeEnv = (checkout: string, env: Record<string, string>
     OPENTEAM_TMP_DIR: dirs.tmp,
     OPENTEAM_CACHE_DIR: dirs.cache,
     OPENTEAM_ARTIFACTS_DIR: dirs.artifacts,
+    OPENTEAM_CHECKOUT: checkout,
     npm_config_cache: dirs.npmCache,
     YARN_CACHE_FOLDER: dirs.yarnCache,
     BUN_INSTALL_CACHE_DIR: dirs.bunCache,
@@ -226,6 +237,13 @@ const packageManagerShim = (tool: string) => [
   "",
 ].join("\n")
 
+const openteamShim = (appRoot: string) => [
+  ...checkoutToolShimPrelude,
+  'export OPENTEAM_CHECKOUT="${OPENTEAM_CHECKOUT:-$checkout_dir}"',
+  `exec ${shellQuote(path.join(appRoot, "scripts", "openteam"))} "$@"`,
+  "",
+].join("\n")
+
 const packageJsonPackageManager = async (checkout: string) => {
   const file = path.join(checkout, "package.json")
   if (!existsSync(file)) return ""
@@ -245,16 +263,36 @@ const checkoutPackageManagerShimTools = async (checkout: string) => {
   ]
 }
 
-const writeCheckoutToolShims = async (checkout: string, devEnv: DevEnv) => {
+export const writeCheckoutToolShims = async (checkout: string, devEnv: DevEnv, appRoot: string) => {
   const {bin} = await ensureCheckoutRuntimeDirs(checkout)
   const shims = devEnv.kind === "none"
     ? (await checkoutPackageManagerShimTools(checkout)).map(tool => ({tool, content: packageManagerShim(tool)}))
     : devEnvShimTools.map(tool => ({tool, content: devEnvShim(tool, devEnv)}))
-  await Promise.all(shims.map(async ({tool, content}) => {
+  await Promise.all([...shims, {tool: "openteam", content: openteamShim(appRoot)}].map(async ({tool, content}) => {
     const file = path.join(bin, tool)
     await writeFile(file, content, {mode: 0o755})
     await chmod(file, 0o755)
   }))
+}
+
+export const assertVerificationToolingReady = async (checkout: string) => {
+  const dirs = checkoutRuntimeDirs(checkout)
+  const files = {
+    openteamShim: path.join(dirs.bin, "openteam"),
+    verificationPlan: path.join(dirs.root, "verification-plan.json"),
+    verificationResults: path.join(dirs.root, "verification-results.json"),
+  }
+
+  for (const [label, file] of Object.entries(files)) {
+    if (!existsSync(file)) throw new Error(`verification tooling missing ${label}: ${file}`)
+    const info = await stat(file)
+    if (!info.isFile()) throw new Error(`verification tooling ${label} is not a file: ${file}`)
+    if (label === "openteamShim" && (info.mode & 0o111) === 0) {
+      throw new Error(`verification tooling openteam shim is not executable: ${file}`)
+    }
+  }
+
+  return files
 }
 
 const hasPackageManagerFiles = (root: string) => {
@@ -310,6 +348,34 @@ export const provisionWorkerControlCommand = (text: string) => {
     /\bscripts\/openteam\s+(launch|enqueue|serve|worker)\b/i,
   ]
   return patterns.map(pattern => text.match(pattern)?.[0]).find(Boolean)
+}
+
+export const categorizeProvisioningFailure = (input: {
+  logText?: string
+  projectProfile?: Pick<ProjectProfile, "blockers">
+  error?: unknown
+}): ProvisionFailureCategory => {
+  const errorText = input.error instanceof Error ? `${input.error.name}: ${input.error.message}` : String(input.error ?? "")
+  const text = [input.logText, errorText].filter(Boolean).join("\n")
+  if (provisionWorkerControlCommand(text) || /provisioning attempted worker-control command/i.test(text)) {
+    return "provision-worker-control"
+  }
+  if ((input.projectProfile?.blockers ?? []).length > 0) {
+    return "project-profile-blocker"
+  }
+  if (/\b(nix|direnv|flake|dev-env|shell wrapper|nix-shell|nix develop)\b/i.test(text)) {
+    return "dev-env-wrapper-failed"
+  }
+  return "provision-failed"
+}
+
+const categorizeProvisioningFailureFromLog = async (
+  logFile: string | undefined,
+  projectProfile: Pick<ProjectProfile, "blockers"> | undefined,
+  error?: unknown,
+) => {
+  const logText = logFile && existsSync(logFile) ? await readFile(logFile, "utf8").catch(() => "") : ""
+  return categorizeProvisioningFailure({logText, projectProfile, error})
 }
 
 const assertProvisionLogClean = async (logFile: string) => {
@@ -772,8 +838,7 @@ const runOpencodeSession = async (
   args.push("--", prompt)
 
   const opencodeBinary = resolveHostCommand(agent.app.config.opencode.binary)
-  const cwd = devEnv && devEnv.kind !== "none" ? checkout : agent.app.root
-  const child = spawnLogged(opencodeBinary, args, cwd, logFile, checkoutRuntimeEnv(checkout, env), devEnv)
+  const child = spawnLogged(opencodeBinary, args, checkout, logFile, checkoutRuntimeEnv(checkout, env), devEnv)
   await onStart?.(child.pid)
   const code = await wait(child)
   const hardFailure = existsSync(logFile)
@@ -812,6 +877,12 @@ const runProvisioningPhase = async (
   )
   await assertProvisionLogClean(logFile)
   return {code: session.code, pid: session.pid, logFile}
+}
+
+const expectedProvisionLogFile = async (app: AppCfg, repo: RepoCfg, checkout: string) => {
+  const orchestrator = await prepareAgent(app, "orchestrator-01")
+  const control: PreparedAgent = {...orchestrator, repo}
+  return path.join(control.paths.artifacts, `${path.basename(path.dirname(checkout))}-provision-opencode.log`)
 }
 
 const writeState = async (agent: PreparedAgent, value: unknown) => {
@@ -983,20 +1054,28 @@ const sendRuntimeReport = async (agent: PreparedAgent, body: string, recipients?
   const reporter = await notificationAgent(agent)
   const reportTo = runtimeReportRecipients(reporter, recipients)
   if (reportTo.length === 0) return
-  await sendReport(reporter, body, reportTo).catch(error => {
+  try {
+    await sendReport(reporter, body, reportTo)
+    await recordReportOutboxAttempts(reporter.app, body, reportTo, {
+      state: "sent",
+      relayResult: "published",
+    }).catch(error => {
+      process.stderr.write(`dm outbox record failed: ${String(error)}\n`)
+    })
+  } catch (error) {
+    await recordReportOutboxAttempts(reporter.app, body, reportTo, {
+      state: "failed",
+      error,
+    }).catch(recordError => {
+      process.stderr.write(`dm outbox record failed: ${String(recordError)}\n`)
+    })
     process.stderr.write(`runtime report failed: ${String(error)}\n`)
-  })
+  }
 }
 
 const sendTaskReport = async (agent: PreparedAgent, body: string, recipients?: string[]) => {
   await sendRuntimeReport(agent, body, recipients)
 }
-
-const observationShouldReport = (event: Awaited<ReturnType<typeof observeRuns>>["events"][number]) =>
-  event.transitions.some(transition =>
-    (transition.field === "state" && transition.to === "stale") ||
-    (transition.field !== "state" && transition.severity !== "info"),
-  )
 
 export const enqueueTask = async (
   app: AppCfg,
@@ -1141,6 +1220,10 @@ const updateRunRecord = async (record: TaskRunRecord, patch: Partial<TaskRunReco
   if (patch.workerState !== undefined) record.workerState = patch.workerState
   if (patch.verificationState !== undefined) record.verificationState = patch.verificationState
   if (patch.failureCategory !== undefined) record.failureCategory = patch.failureCategory
+  if (patch.provisionState !== undefined) record.provisionState = patch.provisionState
+  if (patch.provisionFailureCategory !== undefined) record.provisionFailureCategory = patch.provisionFailureCategory
+  if (patch.projectProfilePath !== undefined) record.projectProfilePath = patch.projectProfilePath
+  if (patch.verificationToolingReady !== undefined) record.verificationToolingReady = patch.verificationToolingReady
   if (patch.result !== undefined) record.result = patch.result
   if (patch.error !== undefined) record.error = patch.error
   await writeRunRecord(record)
@@ -1582,16 +1665,41 @@ export const runTask = async (
       )
       await updateRunRecord(runRecord, {subject: resolvedSubject})
     }
-    const devEnv = await runPhase(runRecord, "detect-dev-env", () => detectDevEnv(checkout))
+    await updateRunRecord(runRecord, {provisionState: "pending"})
+    let devEnv: DevEnv
+    try {
+      devEnv = await runPhase(runRecord, "detect-dev-env", () => detectDevEnv(checkout))
+    } catch (error) {
+      await updateRunRecord(runRecord, {
+        provisionState: "failed",
+        provisionFailureCategory: "dev-env-wrapper-failed",
+        failureCategory: "dev-env-wrapper-failed",
+      })
+      throw error
+    }
     await updateRunRecord(runRecord, {devEnv})
-    await runPhase(runRecord, "write-tool-shims", () => writeCheckoutToolShims(checkout, devEnv), {devEnv: devEnv.kind, source: devEnv.source})
+    await runPhase(runRecord, "write-tool-shims", () => writeCheckoutToolShims(checkout, devEnv, app.root), {devEnv: devEnv.kind, source: devEnv.source})
     const projectProfile = await runPhase(runRecord, "detect-project-profile", () => detectProjectProfile(checkout, devEnv))
     const projectProfileFile = await runPhase(runRecord, "write-project-profile", () => writeProjectProfile(checkout, projectProfile))
+    await updateRunRecord(runRecord, {projectProfilePath: projectProfileFile})
     const verificationPlan = await runPhase(runRecord, "plan-verification", () => Promise.resolve(createVerificationPlan(app, mode, projectProfile)))
     const verificationPlanFile = await runPhase(runRecord, "write-verification-plan", () => writeVerificationPlan(checkout, verificationPlan))
     await runPhase(runRecord, "reset-verification-results", () => resetVerificationResults(checkout))
+    try {
+      await runPhase(runRecord, "verify-tooling-ready", () => assertVerificationToolingReady(checkout), {checkout})
+      await updateRunRecord(runRecord, {verificationToolingReady: true})
+    } catch (error) {
+      await updateRunRecord(runRecord, {
+        verificationToolingReady: false,
+        provisionState: "failed",
+        provisionFailureCategory: "verification-tooling-missing",
+        failureCategory: "verification-tooling-missing",
+      })
+      throw error
+    }
     const doneContract = await runPhase(runRecord, "create-done-contract", () => Promise.resolve(createDoneContract(agent.agent.role, mode, item.task)))
     await updateRunRecord(runRecord, {
+      projectProfilePath: projectProfileFile,
       projectProfile: {
         path: projectProfileFile,
         stacks: projectProfile.stacks,
@@ -1656,14 +1764,7 @@ export const runTask = async (
     })
     await sendTaskReport(
       agent,
-      [
-        `[${agent.id}] started task ${idTask}`,
-        `run: ${runRecord.runId}`,
-        `target: ${resolved.target}`,
-        `mode: ${mode}`,
-        `context: ${contextId}`,
-        `checkout: ${checkout}`,
-      ].join("\n"),
+      await formatTaskRunReport(runRecord, {kind: "started", state: "running"}),
       item.recipients,
     )
 
@@ -1671,20 +1772,42 @@ export const runTask = async (
     let provisionLogFile = provisionStateFile(checkout)
 
     if (!ready) {
-      const provision = await runPhase(
-        runRecord,
-        "provision",
-        () => runProvisioningPhase(app, resolved.repo, checkout, item.task, item.model, pid => updateRunRecord(runRecord, {process: {provisionPid: pid}}), devEnv, projectProfile, resolvedSubject),
-      )
+      provisionLogFile = await expectedProvisionLogFile(app, resolved.repo, checkout).catch(() => provisionLogFile)
+      await updateRunRecord(runRecord, {provisionState: "running", logs: {provision: provisionLogFile}})
+      let provision: Awaited<ReturnType<typeof runProvisioningPhase>>
+      try {
+        provision = await runPhase(
+          runRecord,
+          "provision",
+          () => runProvisioningPhase(app, resolved.repo, checkout, item.task, item.model, pid => updateRunRecord(runRecord, {process: {provisionPid: pid}}), devEnv, projectProfile, resolvedSubject),
+        )
+      } catch (error) {
+        const provisionFailureCategory = await categorizeProvisioningFailureFromLog(provisionLogFile, projectProfile, error)
+        await updateRunRecord(runRecord, {
+          provisionState: "failed",
+          provisionFailureCategory,
+          failureCategory: provisionFailureCategory,
+          logs: {provision: provisionLogFile},
+        })
+        throw error
+      }
       provisionLogFile = provision.logFile
       await updateRunRecord(runRecord, {logs: {provision: provisionLogFile}})
       const provisionCode = provision.code
 
       if (provisionCode !== 0) {
+        const provisionFailureCategory = await categorizeProvisioningFailureFromLog(provisionLogFile, projectProfile)
+        await updateRunRecord(runRecord, {
+          provisionState: "failed",
+          provisionFailureCategory,
+          failureCategory: provisionFailureCategory,
+          logs: {provision: provisionLogFile},
+        })
         const result: LaunchResult = {
           id: idTask,
           state: "failed",
           task: item.task,
+          failureCategory: provisionFailureCategory,
           target: resolved.target,
           mode,
           contextId,
@@ -1707,14 +1830,13 @@ export const runTask = async (
         await mergeState(agent, {...result, finishedAt: now(), running: false})
         await sendTaskReport(
           agent,
-          [
-            `[${agent.id}] failed task ${idTask}`,
-            `run: ${runRecord.runId}`,
-            `provision log: ${provisionLogFile}`,
-            `context: ${contextId}`,
-            `checkout: ${checkout}`,
-            `branch: ${branch}`,
-          ].join("\n"),
+          await formatTaskRunReport(runRecord, {
+            kind: "failed",
+            state: "failed",
+            failureCategory: provisionFailureCategory,
+            logFile: provisionLogFile,
+            result,
+          }),
           item.recipients,
         )
 
@@ -1724,7 +1846,9 @@ export const runTask = async (
       await runPhase(runRecord, "write-provision-state", async () => {
         await writeProvisionState(checkout, await provisionFingerprint(resolved.repo, checkout, mode))
       })
+      await updateRunRecord(runRecord, {provisionState: "succeeded"})
     } else {
+      await updateRunRecord(runRecord, {provisionState: "current"})
       await skipRunPhase(runRecord, "provision", {reason: "provision fingerprint is current"})
     }
 
@@ -1776,11 +1900,7 @@ export const runTask = async (
       await mergeState(agent, {url, logFile, browserProfile: path.join(agent.paths.browser, "profile"), browserArtifacts: path.join(agent.paths.artifacts, "playwright")})
       await sendTaskReport(
         agent,
-        [
-          `[${agent.id}] browser URL available for task ${idTask}`,
-          `run: ${runRecord.runId}`,
-          `url: ${url}`,
-        ].join("\n"),
+        await formatTaskRunReport(runRecord, {kind: "browser-url", state: "running", url}),
         item.recipients,
       )
 
@@ -1958,18 +2078,16 @@ export const runTask = async (
     await mergeState(agent, {...result, finishedAt: now(), running: false})
     await sendTaskReport(
       agent,
-      [
-        `[${agent.id}] ${state} task ${idTask}`,
-        `run: ${runRecord.runId}`,
-        `evidence: ${evidencePolicy.level}`,
-        `PR eligible: ${evidencePolicy.prEligible ? "yes" : "no"}`,
-        `recommended: ${evidencePolicy.recommendedAction}`,
-        `url: ${url || "(none)"}`,
-        `context: ${contextId}`,
-        `checkout: ${checkout}`,
-        `branch: ${branch}`,
-        `log: ${logFile}`,
-      ].join("\n"),
+      await formatTaskRunReport(runRecord, {
+        kind: "terminal",
+        state,
+        evidenceLevel: evidencePolicy.level,
+        prEligible: evidencePolicy.prEligible,
+        recommendedAction: evidencePolicy.recommendedAction,
+        url: url || undefined,
+        logFile,
+        result,
+      }),
       item.recipients,
     )
 
@@ -1992,13 +2110,13 @@ export const runTask = async (
     })
     await sendTaskReport(
       agent,
-      [
-        `[${agent.id}] failed task ${idTask}`,
-        `run: ${runRecord.runId}`,
-        contextId ? `context: ${contextId}` : "",
-        runRecord.logs?.opencode ? `log: ${runRecord.logs.opencode}` : "",
-        `error: ${formatError(error)}`,
-      ].filter(Boolean).join("\n"),
+      await formatTaskRunReport(runRecord, {
+        kind: "failed",
+        state: "failed",
+        failureCategory: runRecord.failureCategory ?? "task-runtime-error",
+        error: formatError(error),
+        logFile: runRecord.logs?.opencode,
+      }),
       item.recipients,
     )
     throw error
@@ -2318,13 +2436,23 @@ export const serveAgent = async (app: AppCfg, id: string, defaults: Partial<Task
       if (observeWorkerRuns) {
         try {
           const observed = await observeRuns(app, {limit: 100, emitInitial: false})
+          const reportState = await readDmReportState(app)
+          let reportStateChanged = false
           for (const event of observed.events) {
             const body = formatObservationEvent(event)
             process.stderr.write(`${body}\n`)
-            if (observationShouldReport(event)) {
-              await sendRuntimeReport(agent, body)
+            const decision = applyObservationReportPolicy(reportState, event, app.config.reporting)
+            reportStateChanged = true
+            if (decision.report) {
+              await sendRuntimeReport(agent, decision.report)
             }
           }
+          const digest = buildDueObservationDigest(reportState, app.config.reporting)
+          if (digest) {
+            reportStateChanged = true
+            await sendRuntimeReport(agent, digest)
+          }
+          if (reportStateChanged) await writeDmReportState(reportState)
         } catch (error) {
           process.stderr.write(`run observation poll failed: ${String(error)}\n`)
         }

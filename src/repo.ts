@@ -409,6 +409,11 @@ type ForkTargetPlan = ForkClonePlan & {
 }
 
 type ApiError = Error & {status?: number}
+type FetchResponseLike = Pick<Response, "ok" | "status" | "text">
+export type ProviderApiFetch = (url: string, init: RequestInit) => Promise<FetchResponseLike>
+type ProviderApiOptions = {
+  fetch?: ProviderApiFetch
+}
 
 const providerType = (key: string, provider: ProviderCfg): ForkStorageProvider["kind"] | undefined => {
   if (provider.type === "github" || provider.type === "gitlab") return provider.type
@@ -441,8 +446,8 @@ const apiBodyMessage = (body: unknown) => {
   return JSON.stringify(body).slice(0, 500)
 }
 
-const requestJson = async <T>(url: string, init: RequestInit, label: string): Promise<T> => {
-  const response = await fetch(url, init)
+const requestJson = async <T>(url: string, init: RequestInit, label: string, fetcher?: ProviderApiFetch): Promise<T> => {
+  const response = await (fetcher ?? fetch)(url, init)
   const text = await response.text()
   let body: unknown = text
   if (text) {
@@ -474,18 +479,19 @@ const githubHeaders = (provider: ProviderCfg) => ({
   "user-agent": "openteam",
 })
 
-const githubCurrentUser = async (provider: ProviderCfg) =>
+const githubCurrentUser = async (provider: ProviderCfg, options: ProviderApiOptions = {}) =>
   requestJson<{login: string}>(`${githubApiBase(provider)}/user`, {
     method: "GET",
     headers: githubHeaders(provider),
-  }, "GitHub user lookup")
+  }, "GitHub user lookup", options.fetch)
 
-const ensureGithubForkRepo = async (
+export const ensureGithubForkRepo = async (
   provider: ProviderCfg,
   repoName: string,
   description: string,
+  options: ProviderApiOptions = {},
 ): Promise<{cloneUrl: string; username: string}> => {
-  const user = await githubCurrentUser(provider)
+  const user = await githubCurrentUser(provider, options)
   const owner = provider.namespace?.trim() || user.login
   const createUrl = owner === user.login
     ? `${githubApiBase(provider)}/user/repos`
@@ -502,7 +508,7 @@ const ensureGithubForkRepo = async (
       method: "POST",
       headers: githubHeaders(provider),
       body,
-    }, "GitHub fork repo create")
+    }, "GitHub fork repo create", options.fetch)
     return {cloneUrl: created.clone_url, username: provider.username || user.login}
   } catch (error) {
     if ((error as ApiError).status !== 422) throw error
@@ -510,6 +516,7 @@ const ensureGithubForkRepo = async (
       `${githubApiBase(provider)}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}`,
       {method: "GET", headers: githubHeaders(provider)},
       "GitHub existing fork repo lookup",
+      options.fetch,
     ).catch(() => {
       throw error
     })
@@ -526,18 +533,19 @@ const gitlabHeaders = (provider: ProviderCfg) => ({
   "user-agent": "openteam",
 })
 
-const gitlabCurrentUser = async (provider: ProviderCfg) =>
+const gitlabCurrentUser = async (provider: ProviderCfg, options: ProviderApiOptions = {}) =>
   requestJson<{id: number; username: string}>(`${gitlabApiBase(provider)}/user`, {
     method: "GET",
     headers: gitlabHeaders(provider),
-  }, "GitLab user lookup")
+  }, "GitLab user lookup", options.fetch)
 
-const ensureGitlabForkRepo = async (
+export const ensureGitlabForkRepo = async (
   provider: ProviderCfg,
   repoName: string,
   description: string,
+  options: ProviderApiOptions = {},
 ): Promise<{cloneUrl: string; username: string}> => {
-  const user = await gitlabCurrentUser(provider)
+  const user = await gitlabCurrentUser(provider, options)
   const namespacePath = provider.namespacePath?.trim() || provider.namespace?.trim() || user.username
   const body: Record<string, string | number | boolean> = {
     name: repoName,
@@ -554,7 +562,7 @@ const ensureGitlabForkRepo = async (
       method: "POST",
       headers: gitlabHeaders(provider),
       body: JSON.stringify(body),
-    }, "GitLab fork repo create")
+    }, "GitLab fork repo create", options.fetch)
     return {cloneUrl: created.http_url_to_repo, username: provider.username || user.username}
   } catch (error) {
     if (![400, 409].includes((error as ApiError).status ?? 0)) throw error
@@ -563,6 +571,7 @@ const ensureGitlabForkRepo = async (
       `${gitlabApiBase(provider)}/projects/${pathWithNamespace}`,
       {method: "GET", headers: gitlabHeaders(provider)},
       "GitLab existing fork repo lookup",
+      options.fetch,
     ).catch(() => {
       throw error
     })
@@ -814,20 +823,17 @@ export const deriveForkCloneUrl = (
   owner: {npub: string; pubkey: string},
 ) => deriveForkClonePlan(app, upstream, upstreamCloneUrl, owner).cloneUrls[0]
 
-const populateForkRemotes = async (
-  app: AppCfg,
-  upstream: RepoIdentity,
-  upstreamCloneUrl: string,
+export const pushForkTargets = (
   forkUrls: string[],
-  authUsername?: string,
+  upstreamCloneUrl: string,
+  push: (forkUrl: string) => void,
 ) => {
-  const mirror = await ensureMirror(app, upstream, upstreamCloneUrl)
   const pushed: string[] = []
   const failures: string[] = []
 
   for (const forkUrl of forkUrls) {
     try {
-      runGit(["push", forkUrl, "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"], mirror, gitAuthEnv(app, forkUrl, authUsername))
+      push(forkUrl)
       pushed.push(forkUrl)
     } catch (error) {
       failures.push(`${forkUrl}: ${String(error)}`)
@@ -848,6 +854,19 @@ const populateForkRemotes = async (
   }
 
   return pushed
+}
+
+const populateForkRemotes = async (
+  app: AppCfg,
+  upstream: RepoIdentity,
+  upstreamCloneUrl: string,
+  forkUrls: string[],
+  authUsername?: string,
+) => {
+  const mirror = await ensureMirror(app, upstream, upstreamCloneUrl)
+  return pushForkTargets(forkUrls, upstreamCloneUrl, forkUrl => {
+    runGit(["push", forkUrl, "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"], mirror, gitAuthEnv(app, forkUrl, authUsername))
+  })
 }
 
 const forkRelays = (app: AppCfg, upstream: RepoIdentity, forkCloneUrls: string[]) => {

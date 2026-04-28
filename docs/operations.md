@@ -80,7 +80,10 @@ DM reporting is intentionally sparse.
 DM-originated jobs report to the sender plus configured `reporting.reportTo` recipients.
 TUI/CLI-originated jobs report important lifecycle events to `reporting.reportTo` when configured.
 `reporting.allowFrom` authorizes inbound control DMs; it is not a notification subscription list.
-Expected DM reports are launch/start, browser URL availability, failed, needs-review/succeeded, and warning/critical run observations.
+Expected DM reports are launch/start, browser URL availability, terminal outcomes, and policy-selected warning/critical run observations.
+Reports include compact metadata for `run`, `family`, `target`, `mode`, `task`, evidence level, PR eligibility, and one next command.
+`reporting.dmObservationMode` controls run-observation DMs:
+`terminal` reports terminal outcomes and new critical categories, `digest` groups non-terminal warnings, and `verbose` is for debugging noisy observation streams.
 
 Targets are Nostr-first.
 Aliases, local paths, git URLs, and folder names are only hints; openteam must resolve the target to a kind `30617` repository announcement before it creates or reuses a local context.
@@ -271,7 +274,7 @@ Recommended order for a fresh agent identity:
 6. then move to `serve orchestrator-01` for long-running orchestration
 
 After a repository context has been provisioned successfully, `openteam` reuses that managed normal-clone context when the registry says it is idle and compatible.
-It does not use git worktrees and does not rely on git dirtiness to decide context reuse.
+Context reuse does not rely on git dirtiness.
 When a repo context is already leased, a second task for the same canonical repo fails closed unless the operator explicitly requests parallel work.
 Parallel same-repo work creates a separate normal-clone context and separate task branch.
 

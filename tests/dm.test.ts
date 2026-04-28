@@ -1,5 +1,9 @@
 import {describe, expect, test} from "bun:test"
+import {mkdtemp} from "node:fs/promises"
+import {tmpdir} from "node:os"
+import path from "node:path"
 import {parseInboundDmEvents} from "../src/dm.js"
+import {recordReportOutboxAttempts, readDmOutboxState, reportMetadataFromBody} from "../src/dm-outbox.js"
 import {operatorMessageFromLogText} from "../src/launcher.js"
 import {encryptFor, getSelfPubkey, splitDmBody} from "../src/nostr.js"
 import type {PreparedAgent} from "../src/types.js"
@@ -162,5 +166,54 @@ describe("DM intake", () => {
     const log = `noise before\nOPENTEAM_OPERATOR_MESSAGE:${longMessage}\n`
 
     expect(operatorMessageFromLogText(log)).toBe(longMessage)
+  })
+})
+
+describe("DM outbox accounting", () => {
+  test("persists failed report attempts with run metadata and retry counts", async () => {
+    const agent = makeAgent("orchestrator-01", receiverSec)
+    agent.app.config.runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const body = [
+      "[builder-01] failed request task-a",
+      "run: run-a",
+      "family: root-a",
+      "error: relay unavailable",
+    ].join("\n")
+
+    const [first] = await recordReportOutboxAttempts(agent.app, body, ["npub1"], {
+      state: "failed",
+      error: new Error("relay down"),
+    })
+    const [second] = await recordReportOutboxAttempts(agent.app, body, ["npub1"], {
+      state: "failed",
+      error: new Error("relay down again"),
+    })
+    const state = await readDmOutboxState(agent.app)
+
+    expect(first?.retryCount).toBe(0)
+    expect(second?.retryCount).toBe(1)
+    expect(state.attempts).toHaveLength(2)
+    expect(state.attempts[0]?.eventType).toBe("task-report")
+    expect(state.attempts[0]?.runId).toBe("run-a")
+    expect(state.attempts[0]?.familyKey).toBe("root-a")
+    expect(state.summary.failed).toBe(2)
+    expect(state.summary.publishFailures).toBe(2)
+  })
+
+  test("classifies digest reports separately from task reports", async () => {
+    const agent = makeAgent("orchestrator-01", receiverSec)
+    agent.app.config.runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const body = "openteam run digest\nfamily: root-a\n2 repeated failures"
+
+    await recordReportOutboxAttempts(agent.app, body, ["npub1", "npub2"], {
+      state: "sent",
+      relayResult: "published",
+    })
+    const state = await readDmOutboxState(agent.app)
+
+    expect(reportMetadataFromBody(body).eventType).toBe("digest")
+    expect(state.attempts.map(item => item.eventType)).toEqual(["digest", "digest"])
+    expect(state.attempts.every(item => item.retryCount === 0)).toBe(true)
+    expect(state.summary.sent).toBe(2)
   })
 })

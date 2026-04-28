@@ -302,6 +302,13 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
       ...record.devServer,
       health,
     },
+    provision: {
+      state: record.provisionState,
+      failureCategory: record.provisionFailureCategory,
+      projectProfilePath: record.projectProfilePath ?? record.projectProfile?.path,
+      verificationToolingReady: record.verificationToolingReady,
+      logFile: record.logs?.provision,
+    },
     hardFailure,
     verificationBlockers,
     verification: record.verification,
@@ -387,6 +394,10 @@ const runListView = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
     workerState: record.workerState,
     verificationState: record.verificationState,
     failureCategory: record.failureCategory,
+    provisionState: record.provisionState,
+    provisionFailureCategory: record.provisionFailureCategory,
+    projectProfilePath: record.projectProfilePath,
+    verificationToolingReady: record.verificationToolingReady,
     liveSignals: compact ? {
       anyPidAlive: compact.anyPidAlive,
       anyTaskPidAlive: compact.anyTaskPidAlive,
@@ -444,6 +455,9 @@ const printDiagnosis = (diagnosis: Awaited<ReturnType<typeof diagnoseRun>>) => {
   console.log(`any task pid alive: ${diagnosis.anyTaskPidAlive ? "yes" : "no"}`)
   console.log(`dev url: ${diagnosis.devServer.health.url ?? "(none)"}`)
   console.log(`dev health: ${diagnosis.devServer.health.ok ? "ok" : "down"}${diagnosis.devServer.health.error ? ` (${diagnosis.devServer.health.error})` : ""}`)
+  if (diagnosis.provision.state) console.log(`provision: ${diagnosis.provision.state}${diagnosis.provision.failureCategory ? ` (${diagnosis.provision.failureCategory})` : ""}`)
+  if (diagnosis.provision.projectProfilePath) console.log(`project profile: ${diagnosis.provision.projectProfilePath}`)
+  if (diagnosis.provision.verificationToolingReady !== undefined) console.log(`verification tooling ready: ${diagnosis.provision.verificationToolingReady ? "yes" : "no"}`)
   if (diagnosis.verification?.planPath) console.log(`verification plan: ${diagnosis.verification.planPath}`)
   for (const runner of diagnosis.verification?.plan.runners ?? []) {
     console.log(`verification runner: ${runner.id} (${runner.kind}) ${runner.configured ? "configured" : `unavailable: ${runner.reason ?? "unknown"}`}`)
