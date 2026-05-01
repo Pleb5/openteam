@@ -30,3 +30,12 @@ Operating rules:
 - use `openteam repo publish ...` for repo-side Nostr events
 - write outcomes, blockers, and residual risk in the assigned job result path/runtime output
 - use Nostr only for assigned repository workflows, not operator control
+
+Final response contract:
+
+- `Summary`: what changed and why
+- `Changed Files`: files touched or intentionally left untouched
+- `Verification`: exact checks run or evidence recorded
+- `Evidence Level`: strong, weak, failed, blocked, or missing
+- `Publication Readiness`: PR eligible, draft-only, blocked, or not applicable
+- `Blockers`: concrete blocker, or `none`

@@ -111,6 +111,60 @@ const relayBucketIssues = (app: AppCfg) => {
   return issues
 }
 
+const profileIssues = (app: AppCfg) => {
+  const issues: ConfigValidationIssue[] = []
+  const modelProfiles = app.config.modelProfiles ?? {}
+  const workerProfiles = app.config.workerProfiles ?? {}
+
+  const knownModelProfile = (id: string) => Boolean(modelProfiles[id])
+
+  for (const [id, profile] of Object.entries(modelProfiles)) {
+    if (typeof profile.model !== "string" || !profile.model.trim()) {
+      issues.push(issue("error", "model-profile-model-empty", `model profile '${id}' has an empty model`))
+    }
+    if (profile.variant !== undefined && (typeof profile.variant !== "string" || !profile.variant.trim())) {
+      issues.push(issue("warning", "model-profile-variant-empty", `model profile '${id}' has an empty variant`))
+    }
+  }
+
+  if (app.config.opencode.modelProfile && !knownModelProfile(app.config.opencode.modelProfile)) {
+    issues.push(issue("error", "unknown-model-profile", `opencode.modelProfile references unknown model profile '${app.config.opencode.modelProfile}'`))
+  }
+
+  for (const [id, profile] of Object.entries(workerProfiles)) {
+    if (profile.modelProfile && !knownModelProfile(profile.modelProfile)) {
+      issues.push(issue("error", "unknown-model-profile", `worker profile '${id}' references unknown model profile '${profile.modelProfile}'`))
+    }
+    if (profile.opencodeAgent !== undefined && (typeof profile.opencodeAgent !== "string" || !profile.opencodeAgent.trim())) {
+      issues.push(issue("error", "worker-profile-opencode-agent-empty", `worker profile '${id}' has an empty opencodeAgent`))
+    }
+    for (const key of ["canEdit", "canPublishPr", "canUseBrowser", "canSpawnSubagents", "requiresEvidence"] as const) {
+      if (profile[key] !== undefined && typeof profile[key] !== "boolean") {
+        issues.push(issue("error", "worker-profile-capability-invalid", `worker profile '${id}' has non-boolean ${key}`))
+      }
+    }
+  }
+
+  if (app.config.opencode.roleAgents !== undefined && typeof app.config.opencode.roleAgents !== "boolean") {
+    issues.push(issue("error", "opencode-role-agents-invalid", "opencode.roleAgents must be boolean"))
+  }
+
+  for (const [id, agent] of Object.entries(app.config.agents)) {
+    const label = agentLabel(id, agent)
+    if (agent.workerProfile && !workerProfiles[agent.workerProfile]) {
+      issues.push(issue("error", "unknown-worker-profile", `${label} references unknown worker profile '${agent.workerProfile}'`))
+    }
+    if (agent.modelProfile && !knownModelProfile(agent.modelProfile)) {
+      issues.push(issue("error", "unknown-model-profile", `${label} references unknown model profile '${agent.modelProfile}'`))
+    }
+    if (agent.opencodeAgent !== undefined && (typeof agent.opencodeAgent !== "string" || !agent.opencodeAgent.trim())) {
+      issues.push(issue("error", "agent-opencode-agent-empty", `${label} has an empty opencodeAgent`))
+    }
+  }
+
+  return issues
+}
+
 const identityIssues = (app: AppCfg, options: ConfigValidationOptions) => {
   const issues: ConfigValidationIssue[] = []
   const ids = options.agentId
@@ -298,6 +352,7 @@ const verificationIssues = (app: AppCfg) => {
 export const validateAppConfig = (app: AppCfg, options: ConfigValidationOptions = {}) => {
   const issues = [
     ...relayBucketIssues(app),
+    ...profileIssues(app),
     ...identityIssues(app, options),
     ...npubListIssues(app),
     ...providerIssues(app),

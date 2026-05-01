@@ -190,4 +190,32 @@ describe("process lifecycle reliability fixtures", () => {
     expect(registry.contexts.ctx1?.state).toBe("idle")
     expect(existsSync(record.runFile)).toBe(true)
   })
+
+  test("stale provision cleanup records a terminal failure category", async () => {
+    const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
+    const checkout = path.join(app.config.runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    await writeRegistry(app, {
+      version: 1,
+      repos: {},
+      contexts: {ctx1: leasedContext(checkout)},
+      forks: {},
+    })
+    const record = runRecord(app, {
+      context: {id: "ctx1", checkout, branch: "openteam/test"},
+      provisionState: "running",
+      process: {runnerPid: 999999999, provisionPid: 999999998},
+      phases: [{name: "provision", state: "running", startedAt: new Date(Date.now() - 20 * 60_000).toISOString()}],
+    })
+    await writeRun(record)
+
+    const diagnosis = await diagnoseRun(app, record)
+    await stopRunRecord(app, record.runId, "stale")
+    const saved = JSON.parse(await readFile(record.runFile, "utf8")) as TaskRunRecord
+
+    expect(diagnosis.staleFailureCategory).toBe("provision-stale-no-process")
+    expect(saved.failureCategory).toBe("provision-stale-no-process")
+    expect(saved.provisionState).toBe("failed")
+    expect(saved.provisionFailureCategory).toBe("provision-stale-no-process")
+  })
 })

@@ -5,6 +5,7 @@ import {prepareAgent} from "../config.js"
 import {evaluateEvidencePolicy, evidenceLevel, groupEvidenceResults, verificationFailuresBlockTask} from "../evidence-policy.js"
 import {detectOpenCodeHardFailure, detectWorkerVerificationBlockers} from "../opencode-log.js"
 import {loadRepoRegistry, releaseRepoContext} from "../repo.js"
+import {evaluateRunRecord, type RunEvalResult} from "../run-evals.js"
 import type {AgentRuntimeState, AppCfg, TaskRunRecord} from "../types.js"
 
 const value = (args: string[], key: string) => {
@@ -128,6 +129,12 @@ const writeRunRecord = async (record: TaskRunRecord) => {
 
 const nowIso = () => new Date().toISOString()
 const STALE_NO_ACTIVITY_MS = 10 * 60_000
+
+export type StaleFailureCategory =
+  | "worker-stale-no-process"
+  | "provision-stale-no-process"
+  | "stale-dev-url-unhealthy"
+  | "run-stale"
 
 const pidAlive = (pid?: number) => {
   if (!pid || pid <= 0) return false
@@ -284,11 +291,23 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
     )
   )
   const stale = record.state === "stale" || staleCandidate
+  const staleFailureCategory = stale
+    ? categorizeStaleRun(record, {
+      activePhaseName: runningPhase?.name,
+      knownPids,
+      anyPidAlive,
+      knownTaskPids,
+      anyTaskPidAlive,
+      recentActivity,
+      devUrlHealthy: health.ok,
+    })
+    : undefined
 
   return {
     runId: record.runId,
     state: record.state,
     stale,
+    staleFailureCategory,
     reasons,
     activePhase: runningPhase,
     process: processes,
@@ -327,6 +346,37 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
 
 type RunDiagnosis = Awaited<ReturnType<typeof diagnoseRun>>
 
+export const categorizeStaleRun = (
+  record: TaskRunRecord,
+  signals: {
+    activePhaseName?: string
+    knownPids: number[]
+    anyPidAlive: boolean
+    knownTaskPids: number[]
+    anyTaskPidAlive: boolean
+    recentActivity: boolean
+    devUrlHealthy: boolean
+  },
+): StaleFailureCategory => {
+  if (signals.activePhaseName === "provision" || record.provisionState === "running") {
+    return "provision-stale-no-process"
+  }
+  if ((record.mode === "web" || record.browser?.url) && !signals.devUrlHealthy) {
+    return "stale-dev-url-unhealthy"
+  }
+  if (
+    signals.knownPids.length === 0 ||
+    !signals.anyPidAlive ||
+    (
+      !signals.recentActivity &&
+      (signals.knownTaskPids.length === 0 || !signals.anyTaskPidAlive)
+    )
+  ) {
+    return "worker-stale-no-process"
+  }
+  return "run-stale"
+}
+
 const effectiveRunState = (record: TaskRunRecord, diagnosis?: RunDiagnosis) =>
   record.state === "succeeded" && (
     diagnosis?.hardFailure ||
@@ -346,6 +396,7 @@ export const compactDiagnosis = (diagnosis?: RunDiagnosis) => diagnosis ? {
   stale: diagnosis.stale,
   reasons: diagnosis.reasons,
   hardFailure: diagnosis.hardFailure,
+  staleFailureCategory: diagnosis.staleFailureCategory,
   verificationBlockers: diagnosis.verificationBlockers,
   activePhase: diagnosis.activePhase?.name,
   anyPidAlive: diagnosis.anyPidAlive,
@@ -394,6 +445,7 @@ const runListView = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
     workerState: record.workerState,
     verificationState: record.verificationState,
     failureCategory: record.failureCategory,
+    staleFailureCategory: compact?.staleFailureCategory,
     provisionState: record.provisionState,
     provisionFailureCategory: record.provisionFailureCategory,
     projectProfilePath: record.projectProfilePath,
@@ -450,6 +502,7 @@ const printDiagnosis = (diagnosis: Awaited<ReturnType<typeof diagnoseRun>>) => {
   console.log(`run: ${diagnosis.runId}`)
   console.log(`state: ${diagnosis.state}`)
   console.log(`stale: ${diagnosis.stale ? "yes" : "no"}`)
+  if (diagnosis.staleFailureCategory) console.log(`stale category: ${diagnosis.staleFailureCategory}`)
   console.log(`active phase: ${diagnosis.activePhase?.name ?? "(none)"}`)
   console.log(`any pid alive: ${diagnosis.anyPidAlive ? "yes" : "no"}`)
   console.log(`any task pid alive: ${diagnosis.anyTaskPidAlive ? "yes" : "no"}`)
@@ -476,12 +529,20 @@ const markRunTerminal = async (
   record: TaskRunRecord,
   state: "interrupted" | "stale",
   error: string,
+  failureCategory?: string,
 ) => {
   const finishedAt = nowIso()
   record.state = state
   record.finishedAt = record.finishedAt ?? finishedAt
   record.durationMs = record.durationMs ?? Math.max(0, Date.now() - Date.parse(record.startedAt))
   record.error = error
+  if (state === "stale" && !record.failureCategory) {
+    record.failureCategory = failureCategory ?? "run-stale"
+  }
+  if (state === "stale" && (record.provisionState === "running" || latestRunningPhase(record)?.name === "provision")) {
+    record.provisionState = "failed"
+    record.provisionFailureCategory = record.provisionFailureCategory ?? "provision-stale-no-process"
+  }
   for (const phase of record.phases) {
     if (phase.state !== "running") continue
     phase.state = state
@@ -520,6 +581,9 @@ export const stopRunRecord = async (
   state: "interrupted" | "stale" = "interrupted",
 ) => {
   const record = await readRunRecord(app, id)
+  const diagnosis = state === "stale"
+    ? await diagnoseRun(app, record).catch(() => undefined)
+    : undefined
   const killed: Array<{pid: number; signal: string; ok: boolean}> = []
   for (const pid of runPids(record)) {
     if (!pidAlive(pid)) continue
@@ -534,7 +598,7 @@ export const stopRunRecord = async (
   const releasedContext = record.context?.id
     ? await releaseRepoContext(app, record.context.id, {workerId: record.agentId, jobId: record.taskId})
     : false
-  await markRunTerminal(record, state, state === "stale" ? "run marked stale by reconciliation" : "run stopped by operator")
+  await markRunTerminal(record, state, state === "stale" ? "run marked stale by reconciliation" : "run stopped by operator", diagnosis?.staleFailureCategory)
   await clearAgentStateForRun(app, record, state)
   return {runId: record.runId, state, killed, releasedContext: releasedContext ? record.context?.id : undefined}
 }
@@ -579,14 +643,61 @@ export const runsEvidence = async (app: AppCfg, id: string, args: string[]) => {
   for (const artifact of view.artifacts) console.log(`artifact: ${artifact}`)
 }
 
-export const runsCleanupStale = async (app: AppCfg, args: string[]) => {
+const finalResponseFile = (args: string[]) =>
+  value(args, "--final-response-file") || value(args, "--response-file")
+
+const finalResponseText = async (args: string[]) => {
+  const file = finalResponseFile(args)
+  if (!file) return undefined
+  return readFile(path.resolve(file), "utf8")
+}
+
+export const runEvalView = async (record: TaskRunRecord, args: string[] = []) =>
+  evaluateRunRecord(record, {finalResponseText: await finalResponseText(args)})
+
+const printRunEval = (view: RunEvalResult) => {
+  console.log(`run: ${view.runId}`)
+  console.log(`eval: ${view.terminal ? view.ok ? "ok" : "failed" : "skipped"}`)
+  console.log(`score: ${view.score}`)
+  console.log(`state: ${view.state}`)
+  console.log(`role/mode: ${view.role}${view.mode ? `/${view.mode}` : ""}`)
+  console.log(`evidence: ${view.evidenceLevel}`)
+  console.log(`PR eligible: ${view.prEligible ? "yes" : "no"}`)
+  console.log(`final state if worker succeeded: ${view.finalStateForSuccessfulWorker}`)
+  if (view.finalResponse) {
+    const responseState = view.finalResponse.available
+      ? view.finalResponse.missingLabels.length > 0
+        ? `missing labels: ${view.finalResponse.missingLabels.join(", ")}`
+        : "labels complete"
+      : "unavailable"
+    console.log(`final response: ${responseState}`)
+  }
+  for (const item of view.failures) console.log(`failure: ${item.code} - ${item.message}`)
+  for (const item of view.warnings) console.log(`warning: ${item.code} - ${item.message}`)
+  for (const item of view.findings.filter(item => item.severity === "info")) {
+    console.log(`info: ${item.code} - ${item.message}`)
+  }
+  for (const item of view.missingEvidence) console.log(`missing: ${item}`)
+  for (const blocker of view.prBlockers) console.log(`PR blocker: ${blocker}`)
+}
+
+export const runsEval = async (app: AppCfg, id: string, args: string[]) => {
+  const record = await readRunRecord(app, id)
+  const view = await runEvalView(record, args)
+  if (flag(args, "--json")) {
+    console.log(JSON.stringify(view, null, 2))
+    return view
+  }
+  printRunEval(view)
+  return view
+}
+
+export const cleanupStaleRuns = async (app: AppCfg, options: {dryRun?: boolean} = {}) => {
   const dir = runRecordsDir(app)
   if (!existsSync(dir)) {
-    console.log("[]")
     return []
   }
 
-  const dryRun = flag(args, "--dry-run")
   const cleaned = []
   for (const entry of await readdir(dir)) {
     if (!entry.endsWith(".json")) continue
@@ -594,12 +705,17 @@ export const runsCleanupStale = async (app: AppCfg, args: string[]) => {
     if (!record || (record.state !== "running" && record.state !== "stale")) continue
     const diagnosis = await diagnoseRun(app, record)
     if (!diagnosis.stale) continue
-    if (dryRun) {
+    if (options.dryRun) {
       cleaned.push({runId: record.runId, dryRun: true, reasons: diagnosis.reasons})
       continue
     }
     cleaned.push({...await stopRunRecord(app, record.runId, "stale"), reasons: diagnosis.reasons})
   }
+  return cleaned
+}
+
+export const runsCleanupStale = async (app: AppCfg, args: string[]) => {
+  const cleaned = await cleanupStaleRuns(app, {dryRun: flag(args, "--dry-run")})
   console.log(JSON.stringify(cleaned, null, 2))
   return cleaned
 }

@@ -54,6 +54,7 @@ import {
   evaluateContinuationGate,
   readRunFamilyState,
   recordContinuationLaunch,
+  writeContinuationHandoff,
   writeRunFamilyState,
 } from "../src/run-family-policy.js"
 import {observeRun, observeRuns, type RunObservationEvent, type RunObservationSnapshot} from "../src/run-observer.js"
@@ -1476,6 +1477,95 @@ describe("Round 7 - continuation and repair flows", () => {
 
     expect(gate.allowed).toBe(false)
     expect(gate.blockers.join(" ")).toContain("builder-02/other-task")
+  })
+
+  test("run-family gate blocks stale no-evidence continuations by default", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    const app = makeApp(runtimeRoot)
+    const context = leasedContext(checkout)
+    context.state = "idle"
+    context.lease = undefined
+    await writeRegistry(app, registryWith(identity(), {ctx1: context}))
+    const record = runRecord(app, {
+      state: "stale",
+      context: {id: "ctx1", checkout, branch: "openteam/test"},
+      doneContract: createDoneContract("builder", "code", "Fix helper crash"),
+      verification: {plan: createVerificationPlan(app, "code", {stacks: []}), results: []},
+    })
+    const item = createContinuationTaskItem(record, {
+      kind: "continue",
+      task: "Run a narrow repo-native verification pass and record evidence for the prior edit",
+    })
+
+    const gate = await evaluateContinuationGate(app, record, item, {explicitTask: true})
+
+    expect(gate.allowed).toBe(false)
+    expect(gate.blockers.join("\n")).toContain("stale and has no carried evidence")
+  })
+
+  test("run-family launch accounting records queued continuation attempts immediately", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    const app = makeApp(runtimeRoot)
+    const context = leasedContext(checkout)
+    context.state = "idle"
+    context.lease = undefined
+    await writeRegistry(app, registryWith(identity(), {ctx1: context}))
+    const record = runRecord(app, {
+      state: "needs-review",
+      failureCategory: "verification-evidence-missing",
+      context: {id: "ctx1", checkout, branch: "openteam/test"},
+      doneContract: createDoneContract("builder", "code", "Fix helper crash"),
+      verification: {plan: createVerificationPlan(app, "code", {stacks: []}), results: []},
+    })
+    const item = createContinuationTaskItem(record, {
+      kind: "repair-evidence",
+      task: "Run repo-native verification and record the missing command evidence",
+    })
+    const gate = await evaluateContinuationGate(app, record, item, {explicitTask: true})
+
+    recordContinuationLaunch(gate, "openteam runs repair-evidence builder-01-task-a", {
+      runId: `builder-01-${item.id}`,
+      state: "queued",
+      failureCategory: item.continuation?.failureCategory,
+    })
+
+    expect(gate.family.runs[`builder-01-${item.id}`]?.state).toBe("queued")
+    expect(gate.family.attemptCount).toBe(2)
+  })
+
+  test("continuation handoff summaries redact secrets from prior logs", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(path.join(checkout, ".openteam"), {recursive: true})
+    const app = makeApp(runtimeRoot)
+    const logFile = path.join(runtimeRoot, "prior.log")
+    await writeFile(logFile, [
+      "OPENTEAM_GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456",
+      "OPENTEAM_BUILDER_01_SEC=nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+      "normal finding",
+    ].join("\n"))
+    const record = runRecord(app, {
+      state: "failed",
+      failureCategory: "tool-permission-rejected",
+      context: {id: "ctx1", checkout, branch: "openteam/test"},
+      logs: {opencode: logFile},
+    })
+    const item = createContinuationTaskItem(record, {
+      kind: "continue",
+      task: "Use the sanitized handoff and do not inspect runtime logs",
+    })
+
+    const file = await writeContinuationHandoff(app, record, item)
+    const text = await readFile(file!, "utf8")
+
+    expect(text).toContain("[REDACTED]")
+    expect(text).toContain("normal finding")
+    expect(text).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz123456")
+    expect(text).not.toContain("nsec1qqqq")
   })
 })
 

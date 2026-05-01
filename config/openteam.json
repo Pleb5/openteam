@@ -3,7 +3,8 @@
   "opencode": {
     "binary": "opencode",
     "model": "",
-    "agent": "build"
+    "agent": "build",
+    "roleAgents": true
   },
   "browser": {
     "headless": false,
@@ -110,6 +111,49 @@
     "forkGitOwner": "",
     "forkRepoPrefix": "",
     "forkCloneUrlTemplate": ""
+  },
+  "modelProfiles": {},
+  "workerProfiles": {
+    "orchestrator": {
+      "description": "Routes operator work and manages workers.",
+      "canEdit": false,
+      "canPublishPr": false,
+      "canUseBrowser": false,
+      "canSpawnSubagents": false,
+      "requiresEvidence": false
+    },
+    "triager": {
+      "description": "Classifies incoming repo work and routes follow-up.",
+      "canEdit": false,
+      "canPublishPr": false,
+      "canUseBrowser": false,
+      "canSpawnSubagents": true,
+      "requiresEvidence": true
+    },
+    "builder": {
+      "description": "Implements code changes and prepares publishable work.",
+      "canEdit": true,
+      "canPublishPr": true,
+      "canUseBrowser": true,
+      "canSpawnSubagents": true,
+      "requiresEvidence": true
+    },
+    "researcher": {
+      "description": "Investigates, compares options, and produces handoffs.",
+      "canEdit": false,
+      "canPublishPr": false,
+      "canUseBrowser": false,
+      "canSpawnSubagents": true,
+      "requiresEvidence": false
+    },
+    "qa": {
+      "description": "Verifies behavior and records evidence.",
+      "canEdit": false,
+      "canPublishPr": false,
+      "canUseBrowser": true,
+      "canSpawnSubagents": true,
+      "requiresEvidence": true
+    }
   },
   "agents": {
     "triager-01": {

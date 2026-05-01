@@ -8,17 +8,21 @@ import path from "node:path"
 import process from "node:process"
 import {startBunker, type RunningBunker} from "./bunker.js"
 import {consolePrompt} from "./commands/console.js"
+import {cleanupStaleRuns, cleanupStaleRunsForContext} from "./commands/runs.js"
 import {prepareAgent} from "./config.js"
 import {detectDevEnv, wrapDevEnvCommand, type DevEnv} from "./dev-env.js"
-import {createDoneContract, doneContractPromptLines} from "./done-contract.js"
+import {createDoneContract} from "./done-contract.js"
 import {pollInboundTasks, subscribeInboundTasks} from "./dm.js"
 import {recordReportOutboxAttempts} from "./dm-outbox.js"
 import {evaluateEvidencePolicy, verificationFailuresBlockTask, type EvidencePolicyView} from "./evidence-policy.js"
 import {KIND_GIT_ISSUE} from "./events.js"
-import {gitCollaborationVocabularyLines} from "./git-vocabulary.js"
+import {buildFinalResponseRecord, createOutputTailCapture, type OutputTailSnapshot} from "./final-response.js"
+import {redactSensitiveText} from "./log-redaction.js"
+import {resolveModelSelection} from "./model-profiles.js"
+import {selectOpencodePrimaryAgent, writeOpencodeManagedAgents} from "./opencode-agents.js"
 import {detectOpenCodeHardFailure} from "./opencode-log.js"
 import {dispatchOperatorRequest, type DispatchContext} from "./orchestrator.js"
-import {detectProjectProfile, projectProfilePromptLines, writeProjectProfile, type ProjectProfile} from "./project-profile.js"
+import {detectProjectProfile, writeProjectProfile, type ProjectProfile} from "./project-profile.js"
 import {writeRepoPublishContext} from "./repo-publish.js"
 import {
   applyObservationReportPolicy,
@@ -27,11 +31,12 @@ import {
   readDmReportState,
   writeDmReportState,
 } from "./reporting-policy.js"
-import {releaseRepoContext, resolveRepoAnnouncementTarget, resolveRepoRelayPolicy, resolveRepoTarget, type RepoRelayPolicy} from "./repo.js"
-import {continuationEvidenceForCarry, continuationPromptLines} from "./run-continuation.js"
+import {releaseRepoContext, resolveRepoAnnouncementTarget, resolveRepoRelayPolicy, resolveRepoTarget} from "./repo.js"
+import {continuationEvidenceForCarry} from "./run-continuation.js"
 import {formatObservationEvent, observeRuns} from "./run-observer.js"
-import {prepareTaskSubject, resolveTaskSubject, subjectPromptLines} from "./subject.js"
+import {prepareTaskSubject, resolveTaskSubject} from "./subject.js"
 import {encodeTaskContextEnv} from "./task-context.js"
+import {taskManifestPath, writeTaskManifest, type TaskManifestRuntime} from "./task-manifest.js"
 import {
   appendVerificationResultsFile,
   createVerificationPlan,
@@ -43,8 +48,8 @@ import {
   verificationPlanSummary,
   writeVerificationPlan,
 } from "./verification.js"
+import {buildCodeWorkerPrompt, buildProvisioningPrompt, buildWebWorkerPrompt} from "./worker-prompts.js"
 import {
-  graspServers,
   getSelfNpub,
   PROFILE_SYNC_DELAY_MS,
   queryEvents,
@@ -57,7 +62,7 @@ import {
   syncOwnOutboxRelays,
   syncProfileTokens,
 } from "./nostr.js"
-import type {AppCfg, LaunchResult, PreparedAgent, TaskItem, AgentRuntimeState, ProvisionFailureCategory, RepoCfg, ResolvedRepoTarget, ResolvedTaskSubject, TaskMode, TaskRunPhase, TaskRunRecord} from "./types.js"
+import type {AppCfg, LaunchResult, PreparedAgent, TaskItem, AgentRuntimeState, ProvisionFailureCategory, RepoCfg, ResolvedModelSelection, ResolvedRepoTarget, ResolvedTaskSubject, TaskMode, TaskRunPhase, TaskRunRecord} from "./types.js"
 
 type AgentRuntime = {
   bunker?: RunningBunker
@@ -394,8 +399,9 @@ const spawnLogged = (
   logFile: string,
   env: Record<string, string> = {},
   devEnv?: DevEnv,
-) => {
+): ReturnType<typeof spawn> & {outputSnapshot: () => OutputTailSnapshot} => {
   const stream = createWriteStream(logFile, {flags: "a"})
+  const output = createOutputTailCapture()
   const wrapped = wrapDevEnvCommand(devEnv, cmd, args)
   const child = spawn(wrapped.cmd, wrapped.args, {
     cwd,
@@ -404,13 +410,15 @@ const spawnLogged = (
   })
 
   child.stdout.on("data", chunk => {
-    const text = String(chunk)
+    const text = redactSensitiveText(String(chunk))
+    output.append(text)
     process.stdout.write(text)
     stream.write(text)
   })
 
   child.stderr.on("data", chunk => {
-    const text = String(chunk)
+    const text = redactSensitiveText(String(chunk))
+    output.append(text)
     process.stderr.write(text)
     stream.write(text)
   })
@@ -419,7 +427,7 @@ const spawnLogged = (
     stream.end()
   })
 
-  return child
+  return Object.assign(child, {outputSnapshot: output.snapshot})
 }
 
 const run = async (cmd: string, args: string[], cwd: string) => {
@@ -457,43 +465,6 @@ const syncProjectSkills = async (agent: PreparedAgent, checkout: string) => {
   await cp(src, dest, {recursive: true})
 }
 
-const bootstrapPrompt = (agent: PreparedAgent, task: string, projectProfile?: ProjectProfile, subject?: ResolvedTaskSubject) => {
-  return [
-    `You are ${agent.id}, a ${agent.meta.role} worker in openteam.`,
-    `Read the attached bootstrap files first and follow them.`,
-    `You are running in provisioning mode, not orchestration mode.`,
-    ...projectProfilePromptLines(projectProfile),
-    ...subjectPromptLines(subject),
-    `Before any worker is allowed to begin product work, you must make sure this repository environment is capable of fulfilling the requested task.`,
-    `Inspect project documentation, lockfiles, workspace files, submodule configuration, and development instructions before choosing commands.`,
-    `Provision the environment if needed: initialize submodules, install dependencies, and run the minimum setup needed to make the repository workable.`,
-    `Do not assume any specific framework or package manager. Detect what the repository actually uses.`,
-    `If the checkout has a Nix flake or shell, openteam will launch you inside that declared development environment; use repo-native commands normally from there.`,
-    `For Nix-managed checkouts, openteam also puts checkout-local tool shims in .openteam/bin first on PATH so plain commands such as pnpm, node, and playwright resolve through the declared environment.`,
-    `For non-Nix Node checkouts, openteam may put checkout-local package-manager shims in .openteam/bin so pnpm/yarn can fall back through corepack when the host binary is not installed.`,
-    ...gitCollaborationVocabularyLines(),
-    `Do not attempt browser verification until the environment is ready for it.`,
-    `Use checkout-local scratch/cache/artifact paths from OPENTEAM_TMP_DIR, OPENTEAM_CACHE_DIR, and OPENTEAM_ARTIFACTS_DIR; avoid /tmp and host-global caches.`,
-    `Do not run GUI openers, system package installs, or writes outside the managed checkout/runtime. Stop with a concrete blocker when those are required.`,
-    `Do not run destructive cleanup such as broad rm -rf or git reset --hard unless the task explicitly requires it and the scope is clear.`,
-    `Do not launch, enqueue, start, stop, or watch worker agents. Do not call openteam launch, openteam enqueue, openteam serve, or openteam worker.`,
-    `Worker handoff target task: ${task}`,
-    `When provisioning is complete, leave the managed repo context ready for the worker handoff. If blocked, stop with a concrete blocker.`,
-  ].join("\n")
-}
-
-const repoRelayContext = (policy?: RepoRelayPolicy, defaultPublishScope = "repo") => {
-  if (!policy) return []
-  return [
-    `Repository relay policy: ${policy.isGrasp ? "GRASP" : "non-GRASP"}`,
-    `Repository workflow relays: ${policy.repoRelays.join(", ") || "none"}`,
-    `Repository publish relays: ${policy.publishRelays.join(", ") || "none"}`,
-    `Repository publish helper default scope: ${defaultPublishScope}`,
-    `Repository policy helper: openteam repo policy`,
-    `Repository publish helper: openteam repo publish <issue|comment|label|role-label|status|pr|pr-update|raw>`,
-  ]
-}
-
 const subjectEnv = (subject?: ResolvedTaskSubject): Record<string, string> => subject
   ? {
     OPENTEAM_SUBJECT_KIND: subject.kind,
@@ -505,94 +476,6 @@ const subjectEnv = (subject?: ResolvedTaskSubject): Record<string, string> => su
     OPENTEAM_SUBJECT_BASE: subject.baseCommit ?? "",
   }
   : {}
-
-const compose = (
-  agent: PreparedAgent,
-  task: string,
-  url: string,
-  runtime?: AgentRuntime,
-  repoPolicy?: RepoRelayPolicy,
-  defaultPublishScope = "repo",
-  devEnv?: DevEnv,
-  projectProfile?: ProjectProfile,
-  doneContract?: TaskRunRecord["doneContract"],
-  continuation?: TaskItem["continuation"],
-  subject?: ResolvedTaskSubject,
-) => {
-  const grasp = graspServers(agent)
-  return [
-    `You are ${agent.id}, a ${agent.meta.role} worker in openteam.`,
-    `Read the attached bootstrap files first and follow them.`,
-    `Target repo: ${agent.meta.repo}`,
-    `Local app URL: ${url}`,
-    runtime?.bunker?.uri
-      ? `Remote signer bunker URL: ${runtime.bunker.uri}`
-      : `Remote signer bunker URL: unavailable`,
-    grasp.length > 0 ? `Configured GRASP relays: ${grasp.join(", ")}` : `Configured GRASP relays: none`,
-    `Detected repo dev environment: ${devEnv?.kind ?? "none"}${devEnv?.source ? ` (${devEnv.source})` : ""}`,
-    ...projectProfilePromptLines(projectProfile),
-    ...subjectPromptLines(subject),
-    ...doneContractPromptLines(doneContract),
-    ...continuationPromptLines(continuation),
-    ...gitCollaborationVocabularyLines(),
-    ...repoRelayContext(repoPolicy, defaultPublishScope),
-    `Verification tools: run \`openteam verify list\` to inspect available capabilities, \`openteam verify run <runner-id>\` for configured local command/native checks, \`openteam verify browser --flow "..." --url "${url}" --screenshot <path>\` for browser evidence, and \`openteam verify record <runner-id> --state succeeded --note "..."\` for GUI/Nostr/live-data evidence.`,
-    `Task: ${task}`,
-    `The repository environment has been provisioned by the orchestrator before handoff. Start cleanly from the prepared repo context.`,
-    `Use checkout-local scratch space such as .openteam/tmp for repro clones or temporary files; avoid /tmp unless the operator explicitly grants broader filesystem access.`,
-    `Use OPENTEAM_TMP_DIR, OPENTEAM_CACHE_DIR, and OPENTEAM_ARTIFACTS_DIR for temporary files, caches, repro clones, and generated evidence.`,
-    `Do not run GUI openers, system package installs, or writes outside the managed checkout/runtime. Stop with a concrete blocker when those are required.`,
-    `Do not run destructive cleanup such as broad rm -rf or git reset --hard unless the task explicitly requires it and the scope is clear.`,
-    `If the environment still appears broken, stop with a concrete blocker instead of trying to redesign provisioning yourself.`,
-    `Operator task-status DMs are handled by openteam runtime; focus on the task itself unless the task explicitly requires Nostr messaging work.`,
-    `Use the browser MCP if available to verify UI behavior before you claim success.`,
-    `When you use browser, desktop, mobile, Nostr, or repo-native verification, record concise evidence through \`openteam verify record\` or \`openteam verify run\` before returning success.`,
-    `If evidence is missing or weak, the run will finish as needs-review; continue verification or report a concrete blocker rather than claiming complete success.`,
-    `For branch publication, use plain git against the configured origin and publish Nostr-git PR events through openteam repo publish pr; normal PR publication is blocked until evidence is strong, and you must not rely on gh auth or personal forge sessions.`,
-    `When publishing a Nostr-git PR, do not pass the worker/source branch as --branch; use --target-branch only for the merge target branch when needed. The helper infers source fork clone URLs from the repo context.`,
-    `If the target app requires login, use the Remote Signer flow with the bunker URL above when appropriate.`,
-    `Keep working until the task is handled end-to-end or you hit a concrete blocker.`,
-  ].join("\n")
-}
-
-const composeCode = (
-  agent: PreparedAgent,
-  task: string,
-  repoPolicy?: RepoRelayPolicy,
-  defaultPublishScope = "repo",
-  devEnv?: DevEnv,
-  projectProfile?: ProjectProfile,
-  doneContract?: TaskRunRecord["doneContract"],
-  continuation?: TaskItem["continuation"],
-  subject?: ResolvedTaskSubject,
-) => {
-  return [
-    `You are ${agent.id}, a ${agent.meta.role} worker in openteam.`,
-    `Read the attached bootstrap files first and follow them.`,
-    ...gitCollaborationVocabularyLines(),
-    ...repoRelayContext(repoPolicy, defaultPublishScope),
-    `Detected repo dev environment: ${devEnv?.kind ?? "none"}${devEnv?.source ? ` (${devEnv.source})` : ""}`,
-    ...projectProfilePromptLines(projectProfile),
-    ...subjectPromptLines(subject),
-    ...doneContractPromptLines(doneContract),
-    ...continuationPromptLines(continuation),
-    `Verification tools: run \`openteam verify list\` to inspect available capabilities, \`openteam verify run <runner-id>\` for configured local command/native checks, \`openteam verify record <runner-id> --type <browser|nostr|desktop|mobile|manual> --state succeeded --note "..."\` for structured agentic evidence, and \`openteam verify artifact <path> --type <type>\` for artifacts.`,
-    `Task: ${task}`,
-    `This run is code-first, not browser-first. Do not assume a dev server or browser is required unless the task proves otherwise.`,
-    `The repository environment has been provisioned by the orchestrator before handoff. Start cleanly from the prepared repo context.`,
-    `Use checkout-local scratch space such as .openteam/tmp for repro clones or temporary files; avoid /tmp unless the operator explicitly grants broader filesystem access.`,
-    `Use OPENTEAM_TMP_DIR, OPENTEAM_CACHE_DIR, and OPENTEAM_ARTIFACTS_DIR for temporary files, caches, repro clones, and generated evidence.`,
-    `Do not run GUI openers, system package installs, or writes outside the managed checkout/runtime. Stop with a concrete blocker when those are required.`,
-    `Do not run destructive cleanup such as broad rm -rf or git reset --hard unless the task explicitly requires it and the scope is clear.`,
-    `If the environment still appears broken, stop with a concrete blocker instead of trying to redesign provisioning yourself.`,
-    `Operator task-status DMs are handled by openteam runtime; focus on the task itself unless the task explicitly requires Nostr messaging work.`,
-    `When you use repo-native, desktop, mobile, Nostr, or other verification, record concise evidence through \`openteam verify record\` or \`openteam verify run\` before returning success.`,
-    `If evidence is missing or weak, the run will finish as needs-review; continue verification or report a concrete blocker rather than claiming complete success.`,
-    `For branch publication, use plain git against the configured origin and publish Nostr-git PR events through openteam repo publish pr; normal PR publication is blocked until evidence is strong, and you must not rely on gh auth or personal forge sessions.`,
-    `When publishing a Nostr-git PR, do not pass the worker/source branch as --branch; use --target-branch only for the merge target branch when needed. The helper infers source fork clone URLs from the repo context.`,
-    `Keep working until the task is handled end-to-end or you hit a concrete blocker.`,
-  ].join("\n")
-}
 
 const writeOcfg = async (agent: PreparedAgent, checkout: string, runtime?: AgentRuntime) => {
   const mcp = agent.app.config.browser.mcp
@@ -656,6 +539,7 @@ const prepareCheckout = async (agent: PreparedAgent, checkout: string, runtime?:
   await prepareSubmodules(agent, checkout)
   await ensureCheckoutRuntimeDirs(checkout)
   await syncProjectSkills(agent, checkout)
+  await writeOpencodeManagedAgents(agent, checkout)
   await writeOcfg(agent, checkout, runtime)
 }
 
@@ -818,17 +702,22 @@ const runOpencodeSession = async (
   title: string,
   prompt: string,
   logFile: string,
-  model?: string,
+  modelSelection: ResolvedModelSelection,
   onStart?: (pid: number | undefined) => Promise<void> | void,
   env: Record<string, string> = {},
   devEnv?: DevEnv,
+  primaryAgent?: string,
 ) => {
   const files = attachFiles(agent)
-  const args = ["run", "--dir", checkout, "--agent", agent.app.config.opencode.agent, "--title", title]
+  const opencodeAgent = primaryAgent ?? selectOpencodePrimaryAgent(agent)
+  const args = ["run", "--dir", checkout, "--agent", opencodeAgent, "--title", title]
 
-  const chosen = model || agent.app.config.opencode.model
-  if (chosen) {
-    args.push("--model", chosen)
+  if (modelSelection.model) {
+    args.push("--model", modelSelection.model)
+  }
+
+  if (modelSelection.variant) {
+    args.push("--variant", modelSelection.variant)
   }
 
   for (const file of files) {
@@ -841,21 +730,30 @@ const runOpencodeSession = async (
   const child = spawnLogged(opencodeBinary, args, checkout, logFile, checkoutRuntimeEnv(checkout, env), devEnv)
   await onStart?.(child.pid)
   const code = await wait(child)
+  const output = child.outputSnapshot()
   const hardFailure = existsSync(logFile)
     ? detectOpenCodeHardFailure(await readFile(logFile, "utf8"))
     : undefined
   if (hardFailure) {
     throw new Error(`OpenCode hard failure: ${hardFailure.reason}; evidence: ${hardFailure.evidence}`)
   }
-  return {code, pid: child.pid}
+  return {
+    code,
+    pid: child.pid,
+    finalResponse: buildFinalResponseRecord({
+      text: output.text,
+      truncated: output.truncated,
+      logFile,
+    }),
+  }
 }
 
 const runProvisioningPhase = async (
   app: AppCfg,
   repo: RepoCfg,
   checkout: string,
-  task: string,
-  model?: string,
+  runId: string,
+  item: Pick<TaskItem, "task" | "model" | "modelProfile" | "modelVariant">,
   onStart?: (pid: number | undefined) => Promise<void> | void,
   devEnv?: DevEnv,
   projectProfile?: ProjectProfile,
@@ -863,26 +761,31 @@ const runProvisioningPhase = async (
 ) => {
   const orchestrator = await prepareAgent(app, "orchestrator-01")
   const control: PreparedAgent = {...orchestrator, repo}
-  const logFile = path.join(control.paths.artifacts, `${path.basename(path.dirname(checkout))}-provision-opencode.log`)
+  const modelSelection = resolveModelSelection(control, item)
+  const logFile = path.join(control.paths.artifacts, `${runId}-provision-opencode.log`)
   const session = await runOpencodeSession(
     control,
     checkout,
     `${path.basename(path.dirname(checkout))}-provision`,
-    bootstrapPrompt(control, task, projectProfile, subject),
+    buildProvisioningPrompt(control, item.task, projectProfile, subject),
     logFile,
-    model,
+    modelSelection,
     onStart,
-    {OPENTEAM_PHASE: "provision"},
+    {
+      OPENTEAM_PHASE: "provision",
+      OPENTEAM_TASK_MANIFEST: taskManifestPath(checkout),
+    },
     devEnv,
+    app.config.opencode.agent,
   )
   await assertProvisionLogClean(logFile)
   return {code: session.code, pid: session.pid, logFile}
 }
 
-const expectedProvisionLogFile = async (app: AppCfg, repo: RepoCfg, checkout: string) => {
+const expectedProvisionLogFile = async (app: AppCfg, repo: RepoCfg, checkout: string, runId: string) => {
   const orchestrator = await prepareAgent(app, "orchestrator-01")
   const control: PreparedAgent = {...orchestrator, repo}
-  return path.join(control.paths.artifacts, `${path.basename(path.dirname(checkout))}-provision-opencode.log`)
+  return path.join(control.paths.artifacts, `${runId}-provision-opencode.log`)
 }
 
 const writeState = async (agent: PreparedAgent, value: unknown) => {
@@ -1093,6 +996,8 @@ export const enqueueTask = async (
     target: overrides.target,
     mode: overrides.mode,
     model: overrides.model,
+    modelProfile: overrides.modelProfile,
+    modelVariant: overrides.modelVariant,
     runtimeId: overrides.runtimeId,
     parallel: overrides.parallel,
     recipients: overrides.recipients,
@@ -1151,12 +1056,29 @@ const formatError = (error: unknown) => {
   return String(error)
 }
 
+export const contextBusyContextId = (error: unknown) => {
+  const text = formatError(error)
+  return text.match(/repo context ([^\s]+) is busy/)?.[1]
+}
+
+const taskFailureCategory = (error: unknown) => {
+  const text = formatError(error)
+  if (contextBusyContextId(error)) return "context-busy"
+  if (/permission requested:.*auto-rejecting|rejected permission/i.test(text)) return "tool-permission-rejected"
+  return "task-runtime-error"
+}
+
 const writeRunRecord = async (record: TaskRunRecord) => {
   await ensureDir(path.dirname(record.runFile))
   await writeFile(record.runFile, `${JSON.stringify(record, null, 2)}\n`)
 }
 
-const createRunRecord = async (agent: PreparedAgent, item: TaskItem) => {
+const createRunRecord = async (
+  agent: PreparedAgent,
+  item: TaskItem,
+  modelSelection: ResolvedModelSelection,
+  opencodeAgent: string,
+) => {
   const runId = `${agent.id}-${runFileSlug(item.id)}`
   const record: TaskRunRecord = {
     version: 1,
@@ -1176,6 +1098,14 @@ const createRunRecord = async (agent: PreparedAgent, item: TaskItem) => {
       path: item.subject.path,
     } : undefined,
     model: item.model,
+    requestedModelProfile: item.modelProfile,
+    requestedModelVariant: item.modelVariant,
+    resolvedModel: modelSelection.model,
+    modelProfile: modelSelection.modelProfile,
+    modelVariant: modelSelection.variant,
+    workerProfile: modelSelection.workerProfile,
+    modelSource: modelSelection.source,
+    opencodeAgent,
     target: item.target,
     mode: item.mode,
     parallel: item.parallel,
@@ -1223,7 +1153,9 @@ const updateRunRecord = async (record: TaskRunRecord, patch: Partial<TaskRunReco
   if (patch.provisionState !== undefined) record.provisionState = patch.provisionState
   if (patch.provisionFailureCategory !== undefined) record.provisionFailureCategory = patch.provisionFailureCategory
   if (patch.projectProfilePath !== undefined) record.projectProfilePath = patch.projectProfilePath
+  if (patch.taskManifestPath !== undefined) record.taskManifestPath = patch.taskManifestPath
   if (patch.verificationToolingReady !== undefined) record.verificationToolingReady = patch.verificationToolingReady
+  if (patch.finalResponse !== undefined) record.finalResponse = patch.finalResponse
   if (patch.result !== undefined) record.result = patch.result
   if (patch.error !== undefined) record.error = patch.error
   await writeRunRecord(record)
@@ -1476,11 +1408,17 @@ const runConversationalOrchestratorTask = async (
 ): Promise<LaunchResult> => {
   const idTask = item.id || taskId(item.task)
   const logFile = path.join(agent.paths.artifacts, `${idTask}-orchestrator-opencode.log`)
+  const modelSelection = resolveModelSelection(agent, item)
   await mergeState(agent, {
     running: true,
     taskId: idTask,
     task: item.task,
     startedAt: now(),
+    model: modelSelection.model,
+    modelProfile: modelSelection.modelProfile,
+    modelVariant: modelSelection.variant,
+    workerProfile: modelSelection.workerProfile,
+    modelSource: modelSelection.source,
   })
 
   const session = await runOpencodeSession(
@@ -1489,7 +1427,7 @@ const runConversationalOrchestratorTask = async (
     idTask,
     await composeOrchestratorDmPrompt(app, agent, item),
     logFile,
-    item.model,
+    modelSelection,
     async () => {
       await mergeState(agent, {
         running: true,
@@ -1497,6 +1435,11 @@ const runConversationalOrchestratorTask = async (
         task: item.task,
         logFile,
         startedAt: now(),
+        model: modelSelection.model,
+        modelProfile: modelSelection.modelProfile,
+        modelVariant: modelSelection.variant,
+        workerProfile: modelSelection.workerProfile,
+        modelSource: modelSelection.source,
         finishedAt: undefined,
         state: "running",
         runId: undefined,
@@ -1507,6 +1450,8 @@ const runConversationalOrchestratorTask = async (
       ...encodeTaskContextEnv(item),
       OPENTEAM_REQUEST_SOURCE: item.source?.kind ?? "local",
     },
+    undefined,
+    app.config.opencode.agent,
   )
   const state: TaskItem["state"] = session.code === 0 ? "succeeded" : "failed"
   const message = await operatorMessageFromLog(logFile)
@@ -1528,6 +1473,11 @@ const runConversationalOrchestratorTask = async (
     branch: "",
     url: "",
     logFile,
+    model: modelSelection.model,
+    modelProfile: modelSelection.modelProfile,
+    modelVariant: modelSelection.variant,
+    workerProfile: modelSelection.workerProfile,
+    modelSource: modelSelection.source,
   }
 }
 
@@ -1581,7 +1531,9 @@ export const runTask = async (
   }
 
   const idTask = item.id
-  const runRecord = await createRunRecord(base, item)
+  const modelSelection = resolveModelSelection(base, item)
+  const opencodeAgent = selectOpencodePrimaryAgent(base)
+  const runRecord = await createRunRecord(base, item, modelSelection, opencodeAgent)
   const ownedRuntime = runtime
   let effectiveRuntime = ownedRuntime
   const shouldStopRuntime = !runtime
@@ -1592,12 +1544,24 @@ export const runTask = async (
   let taskError: unknown
   let cleanupError: unknown
   let resolvedSubject: ResolvedTaskSubject | undefined
+  let taskManifestFile = ""
 
   try {
+    const resolveTarget = async () => {
+      try {
+        return await resolveRepoTarget(app, base, item)
+      } catch (error) {
+        const busyContextId = contextBusyContextId(error)
+        if (!busyContextId) throw error
+        const cleaned = await cleanupStaleRunsForContext(app, busyContextId)
+        if (cleaned.length === 0) throw error
+        return await resolveRepoTarget(app, base, item)
+      }
+    }
     const resolved = await runPhase(
       runRecord,
       "resolve-target",
-      () => resolveRepoTarget(app, base, item),
+      resolveTarget,
       {target: item.target ?? ""},
     )
     agent = {...base, repo: resolved.repo}
@@ -1716,6 +1680,26 @@ export const runTask = async (
       },
       doneContract,
     })
+    const writeCurrentTaskManifest = (runtime?: TaskManifestRuntime) => writeTaskManifest({
+      agent,
+      item,
+      runRecord,
+      resolved,
+      repoPolicy,
+      defaultPublishScope,
+      devEnv,
+      projectProfile,
+      projectProfileFile,
+      verificationPlan,
+      verificationPlanFile,
+      doneContract,
+      modelSelection,
+      opencodeAgent,
+      subject: resolvedSubject,
+      runtime,
+    })
+    taskManifestFile = await runPhase(runRecord, "write-task-manifest", () => writeCurrentTaskManifest())
+    await updateRunRecord(runRecord, {taskManifestPath: taskManifestFile})
     const carriedContinuationEvidence = continuationEvidenceForCarry(item.continuation)
     if (item.continuation?.carryEvidence && carriedContinuationEvidence.length > 0) {
       await runPhase(
@@ -1750,12 +1734,19 @@ export const runTask = async (
       baseAgentId: agent.configId,
       runtimeId: agent.id,
       parallel: item.parallel,
+      model: modelSelection.model,
+      modelProfile: modelSelection.modelProfile,
+      modelVariant: modelSelection.variant,
+      workerProfile: modelSelection.workerProfile,
+      modelSource: modelSelection.source,
+      opencodeAgent,
       devEnv: devEnv.kind,
       devEnvSource: devEnv.source,
       projectProfile: projectProfileFile,
       projectStacks: projectProfile.stacks,
       verificationPlan: verificationPlanFile,
       verificationRunners: verificationPlanSummary(verificationPlan),
+      taskManifest: taskManifestFile,
       ...(mode === "web" ? {
         browserProfile: path.join(agent.paths.browser, "profile"),
         browserArtifacts: path.join(agent.paths.artifacts, "playwright"),
@@ -1772,14 +1763,14 @@ export const runTask = async (
     let provisionLogFile = provisionStateFile(checkout)
 
     if (!ready) {
-      provisionLogFile = await expectedProvisionLogFile(app, resolved.repo, checkout).catch(() => provisionLogFile)
+      provisionLogFile = await expectedProvisionLogFile(app, resolved.repo, checkout, runRecord.runId).catch(() => provisionLogFile)
       await updateRunRecord(runRecord, {provisionState: "running", logs: {provision: provisionLogFile}})
       let provision: Awaited<ReturnType<typeof runProvisioningPhase>>
       try {
         provision = await runPhase(
           runRecord,
           "provision",
-          () => runProvisioningPhase(app, resolved.repo, checkout, item.task, item.model, pid => updateRunRecord(runRecord, {process: {provisionPid: pid}}), devEnv, projectProfile, resolvedSubject),
+          () => runProvisioningPhase(app, resolved.repo, checkout, runRecord.runId, item, pid => updateRunRecord(runRecord, {process: {provisionPid: pid}}), devEnv, projectProfile, resolvedSubject),
         )
       } catch (error) {
         const provisionFailureCategory = await categorizeProvisioningFailureFromLog(provisionLogFile, projectProfile, error)
@@ -1818,12 +1809,19 @@ export const runTask = async (
           baseAgentId: agent.configId,
           runtimeId: agent.id,
           parallel: item.parallel,
+          model: modelSelection.model,
+          modelProfile: modelSelection.modelProfile,
+          modelVariant: modelSelection.variant,
+          workerProfile: modelSelection.workerProfile,
+          modelSource: modelSelection.source,
+          opencodeAgent,
           devEnv: devEnv.kind,
           devEnvSource: devEnv.source,
           projectProfile: projectProfileFile,
           projectStacks: projectProfile.stacks,
           verificationPlan: verificationPlanFile,
           verificationRunners: verificationPlanSummary(verificationPlan),
+          taskManifest: taskManifestFile,
         }
         finalResult = result
 
@@ -1903,21 +1901,40 @@ export const runTask = async (
         await formatTaskRunReport(runRecord, {kind: "browser-url", state: "running", url}),
         item.recipients,
       )
+      taskManifestFile = await runPhase(
+        runRecord,
+        "update-task-manifest-runtime",
+        () => writeCurrentTaskManifest({
+          opencodeLogFile: logFile,
+          web: {
+            url: dev.url,
+            browserProfile: path.join(agent.paths.browser, "profile"),
+            browserArtifacts: path.join(agent.paths.artifacts, "playwright"),
+            headless: agent.app.config.browser.headless,
+            remoteSignerAvailable: Boolean(effectiveRuntime?.bunker?.uri),
+          },
+        }),
+        {url: dev.url, logFile},
+      )
+      await updateRunRecord(runRecord, {taskManifestPath: taskManifestFile})
+      await mergeState(agent, {taskManifest: taskManifestFile})
 
       try {
-        const prompt = compose(agent, item.task, dev.url, effectiveRuntime, repoPolicy, defaultPublishScope, devEnv, projectProfile, doneContract, item.continuation, resolvedSubject)
+        const prompt = buildWebWorkerPrompt(agent, item.task, dev.url, effectiveRuntime, repoPolicy, defaultPublishScope, devEnv, projectProfile, doneContract, item.continuation, resolvedSubject)
         const session = await runPhase(
           runRecord,
           "opencode-worker",
-          () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, item.model, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}}), {
+          () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, modelSelection, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}}), {
             OPENTEAM_RUN_ID: runRecord.runId,
             OPENTEAM_RUN_FILE: runRecord.runFile,
+            OPENTEAM_TASK_MANIFEST: taskManifestFile,
             OPENTEAM_DEV_URL: dev.url,
             ...subjectEnv(resolvedSubject),
           }, devEnv),
           {logFile},
         )
         code = session.code
+        if (session.finalResponse) await updateRunRecord(runRecord, {finalResponse: session.finalResponse})
         await updateRunRecord(runRecord, {workerState: code === 0 ? "succeeded" : "failed"})
         if (code === 0) {
           await collectWorkerVerificationResults(runRecord, checkout)
@@ -2004,18 +2021,28 @@ export const runTask = async (
         }, {pid: dev.child.pid})
       }
     } else {
-      const prompt = composeCode(agent, item.task, repoPolicy, defaultPublishScope, devEnv, projectProfile, doneContract, item.continuation, resolvedSubject)
+      taskManifestFile = await runPhase(
+        runRecord,
+        "update-task-manifest-runtime",
+        () => writeCurrentTaskManifest({opencodeLogFile: logFile}),
+        {logFile},
+      )
+      await updateRunRecord(runRecord, {taskManifestPath: taskManifestFile})
+      await mergeState(agent, {taskManifest: taskManifestFile})
+      const prompt = buildCodeWorkerPrompt(agent, item.task, repoPolicy, defaultPublishScope, devEnv, projectProfile, doneContract, item.continuation, resolvedSubject)
       const session = await runPhase(
         runRecord,
         "opencode-worker",
-        () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, item.model, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}}), {
+        () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, modelSelection, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}}), {
           OPENTEAM_RUN_ID: runRecord.runId,
           OPENTEAM_RUN_FILE: runRecord.runFile,
+          OPENTEAM_TASK_MANIFEST: taskManifestFile,
           ...subjectEnv(resolvedSubject),
         }, devEnv),
         {logFile},
       )
       code = session.code
+      if (session.finalResponse) await updateRunRecord(runRecord, {finalResponse: session.finalResponse})
       await updateRunRecord(runRecord, {workerState: code === 0 ? "succeeded" : "failed"})
       if (code === 0) {
         await collectWorkerVerificationResults(runRecord, checkout)
@@ -2039,6 +2066,7 @@ export const runTask = async (
       evidenceLevel: evidencePolicy.level,
       prEligible: evidencePolicy.prEligible,
       recommendedAction: evidencePolicy.recommendedAction,
+      finalResponse: runRecord.finalResponse,
       verificationResults: runRecord.verification?.results?.map(result => ({
         id: result.id,
         kind: result.kind,
@@ -2066,12 +2094,19 @@ export const runTask = async (
       baseAgentId: agent.configId,
       runtimeId: agent.id,
       parallel: item.parallel,
+      model: modelSelection.model,
+      modelProfile: modelSelection.modelProfile,
+      modelVariant: modelSelection.variant,
+      workerProfile: modelSelection.workerProfile,
+      modelSource: modelSelection.source,
+      opencodeAgent,
       devEnv: devEnv.kind,
       devEnvSource: devEnv.source,
       projectProfile: projectProfileFile,
       projectStacks: projectProfile.stacks,
       verificationPlan: verificationPlanFile,
       verificationRunners: verificationPlanSummary(verificationPlan),
+      taskManifest: taskManifestFile,
     }
     finalResult = result
 
@@ -2097,7 +2132,7 @@ export const runTask = async (
     runError = error
     await updateRunRecord(runRecord, {
       workerState: runRecord.workerState ?? "failed",
-      failureCategory: runRecord.failureCategory ?? "task-runtime-error",
+      failureCategory: runRecord.failureCategory ?? taskFailureCategory(error),
     }).catch(() => undefined)
     await mergeState(agent, {
       running: false,
@@ -2107,13 +2142,20 @@ export const runTask = async (
       baseAgentId: agent.configId,
       runtimeId: agent.id,
       parallel: item.parallel,
+      model: modelSelection.model,
+      modelProfile: modelSelection.modelProfile,
+      modelVariant: modelSelection.variant,
+      workerProfile: modelSelection.workerProfile,
+      modelSource: modelSelection.source,
+      opencodeAgent,
+      taskManifest: taskManifestFile || undefined,
     })
     await sendTaskReport(
       agent,
       await formatTaskRunReport(runRecord, {
         kind: "failed",
         state: "failed",
-        failureCategory: runRecord.failureCategory ?? "task-runtime-error",
+        failureCategory: runRecord.failureCategory ?? taskFailureCategory(error),
         error: formatError(error),
         logFile: runRecord.logs?.opencode,
       }),
@@ -2166,6 +2208,8 @@ export const runTask = async (
       baseAgentId: agent.configId,
       runtimeId: agent.id,
       parallel: item.parallel,
+      opencodeAgent,
+      taskManifest: taskManifestFile || undefined,
     })
 
     if (cleanupError && !taskError) {
@@ -2216,6 +2260,8 @@ const acceptInbound = async (
     target: defaults.target,
     mode: defaults.mode,
     model: defaults.model,
+    modelProfile: defaults.modelProfile,
+    modelVariant: defaults.modelVariant,
     recipients: [fromNpub],
     source: {
       kind: "dm",
@@ -2261,6 +2307,8 @@ type RepoWatch = {
   relays: string[]
   mode?: TaskMode
   model?: string
+  modelProfile?: string
+  modelVariant?: string
 }
 
 const prepareRepoWatch = async (app: AppCfg, agent: PreparedAgent, defaults: Partial<TaskItem>): Promise<RepoWatch | undefined> => {
@@ -2279,6 +2327,8 @@ const prepareRepoWatch = async (app: AppCfg, agent: PreparedAgent, defaults: Par
     relays,
     mode: defaults.mode,
     model: defaults.model,
+    modelProfile: defaults.modelProfile,
+    modelVariant: defaults.modelVariant,
   }
 }
 
@@ -2324,6 +2374,8 @@ const pollRepoWatch = async (app: AppCfg, agent: PreparedAgent, watch: RepoWatch
       target: watch.target,
       mode: watch.mode,
       model: watch.model,
+      modelProfile: watch.modelProfile,
+      modelVariant: watch.modelVariant,
       source: {
         kind: "repo-event",
         eventId: event.id,
@@ -2349,6 +2401,15 @@ export const serveAgent = async (app: AppCfg, id: string, defaults: Partial<Task
   let broken = false
   let inbox = Promise.resolve()
   const liveSeenDmIds = new Set<string>()
+
+  if (observeWorkerRuns) {
+    try {
+      const cleaned = await cleanupStaleRuns(app)
+      if (cleaned.length > 0) process.stderr.write(`startup stale reconciliation cleaned ${cleaned.length} run(s)\n`)
+    } catch (error) {
+      process.stderr.write(`startup stale reconciliation failed: ${String(error)}\n`)
+    }
+  }
 
   const arm = async () => {
     const state = await loadState(agent)

@@ -136,6 +136,35 @@ describe("config helpers", () => {
     expect(result.errors.some(item => item.code === "browser-mcp-command-missing")).toBe(true)
   })
 
+  test("validates worker and model profile references", () => {
+    const result = validateAppConfig(app({
+      opencode: {binary: "opencode", model: "", agent: "build", modelProfile: "missing-global", roleAgents: "yes" as unknown as boolean},
+      modelProfiles: {
+        "builder-strong": {model: "provider/model", variant: "high"},
+      },
+      workerProfiles: {
+        builder: {modelProfile: "missing-worker", opencodeAgent: ""},
+      },
+      agents: {
+        ...app().config.agents,
+        "builder-01": {
+          ...app().config.agents["builder-01"],
+          workerProfile: "missing-worker-profile",
+          modelProfile: "missing-agent-profile",
+          opencodeAgent: "",
+        },
+      },
+    }))
+
+    expect(result.errors.some(item => item.message.includes("opencode.modelProfile"))).toBe(true)
+    expect(result.errors.some(item => item.code === "opencode-role-agents-invalid")).toBe(true)
+    expect(result.errors.some(item => item.message.includes("worker profile 'builder'"))).toBe(true)
+    expect(result.errors.some(item => item.code === "worker-profile-opencode-agent-empty")).toBe(true)
+    expect(result.errors.some(item => item.message.includes("unknown worker profile 'missing-worker-profile'"))).toBe(true)
+    expect(result.errors.some(item => item.message.includes("unknown model profile 'missing-agent-profile'"))).toBe(true)
+    expect(result.errors.some(item => item.code === "agent-opencode-agent-empty")).toBe(true)
+  })
+
   test("materializes NIP-34/Nostr-git collaboration vocabulary for agents", async () => {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
     const testApp = app({runtimeRoot})
@@ -149,6 +178,8 @@ describe("config helpers", () => {
     expect(agentsMd).toContain("GitHub/GitLab issues, PRs, or comments")
     expect(roleMd).toContain("NIP-34/Nostr-git")
     expect(roleMd).toContain("openteam repo publish")
+    expect(roleMd).toContain("Final response contract")
+    expect(roleMd).toContain("`Changed Files`")
   })
 
   test("console prompt keeps git collaboration vocabulary Nostr-git-first", async () => {

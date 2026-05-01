@@ -3,6 +3,7 @@ import {mkdir, readFile, writeFile} from "node:fs/promises"
 import path from "node:path"
 import {diagnoseRun} from "./commands/runs.js"
 import {evaluateEvidencePolicy, type EvidencePolicyView} from "./evidence-policy.js"
+import {redactSensitiveText} from "./log-redaction.js"
 import {loadRepoRegistry} from "./repo.js"
 import {resolveRunFamilyKey} from "./reporting-policy.js"
 import type {AppCfg, TaskItem, TaskRunRecord} from "./types.js"
@@ -296,6 +297,10 @@ export const evaluateContinuationGate = async (
   if (record.state === "running" && !diagnosis?.stale) {
     blockers.push(`run ${record.runId} is still running; stop it or wait for it to finish before continuing`)
   }
+  const carriedEvidence = item.continuation?.evidenceResults.filter(result => result.state === "succeeded") ?? []
+  if ((record.state === "stale" || diagnosis?.stale) && policy.level === "none" && carriedEvidence.length === 0) {
+    blockers.push(`prior run ${record.runId} is stale and has no carried evidence; report the stale blocker or use --force with a genuinely different task`)
+  }
 
   const category = record.failureCategory
   const categoryCount = category ? family.failureCounts[category] ?? 0 : 0
@@ -327,13 +332,76 @@ export const evaluateContinuationGate = async (
 export const recordContinuationLaunch = (
   decision: ContinuationGateDecision,
   command: string,
+  launch?: {
+    runId: string
+    state?: string
+    failureCategory?: string
+  },
   date = new Date(),
 ) => {
   const family = decision.family
   family.lastLaunchedCommand = truncate(command)
   family.lastLaunchedAt = nowIso(date)
   family.updatedAt = family.lastLaunchedAt
+  if (launch) {
+    family.runs[launch.runId] = {
+      runId: launch.runId,
+      state: launch.state ?? "queued",
+      failureCategory: launch.failureCategory,
+      evidenceLevel: decision.policy.level,
+      prEligible: decision.policy.prEligible,
+      recommendedAction: decision.policy.recommendedAction,
+      observedAt: family.lastLaunchedAt,
+    }
+    recomputeFamily(family)
+  }
   if (decision.forced) family.forcedCount += 1
+}
+
+const tailLines = (text: string, count: number) =>
+  text.split(/\r?\n/).slice(-count).join("\n").trim()
+
+export const continuationHandoffPath = (checkout: string) =>
+  path.join(checkout, ".openteam", "continuation-summary.md")
+
+export const writeContinuationHandoff = async (
+  app: AppCfg,
+  record: TaskRunRecord,
+  item: TaskItem,
+) => {
+  const checkout = item.continuation?.checkout ?? record.context?.checkout
+  if (!checkout) return undefined
+  const diagnosis = await diagnoseRun(app, record).catch(() => undefined)
+  const policy = evaluateEvidencePolicy(record.doneContract, record.verification?.results ?? [])
+  const logTail = record.logs?.opencode && existsSync(record.logs.opencode)
+    ? tailLines(redactSensitiveText(await readFile(record.logs.opencode, "utf8").catch(() => "")), 80)
+    : ""
+  const file = continuationHandoffPath(checkout)
+  await mkdir(path.dirname(file), {recursive: true})
+  await writeFile(file, `${[
+    "# Continuation Handoff",
+    "",
+    `- prior run: ${record.runId}`,
+    `- prior state: ${record.state}`,
+    record.failureCategory ? `- prior failure category: ${record.failureCategory}` : "",
+    diagnosis?.staleFailureCategory ? `- stale category: ${diagnosis.staleFailureCategory}` : "",
+    `- evidence level: ${policy.level}`,
+    `- PR eligible: ${policy.prEligible ? "yes" : "no"}`,
+    `- recommended action: ${policy.recommendedAction}`,
+    diagnosis?.reasons.length ? `- diagnosis: ${diagnosis.reasons.join("; ")}` : "",
+    "",
+    "## Prior Task",
+    "",
+    redactSensitiveText(record.task),
+    "",
+    "## Continuation Task",
+    "",
+    redactSensitiveText(item.task),
+    logTail ? "## Sanitized Prior Log Tail" : "",
+    logTail ? "" : "",
+    logTail,
+  ].join("\n")}\n`)
+  return file
 }
 
 export const recordContinuationBlock = (

@@ -170,10 +170,30 @@ export type NostrGitCfg = {
   forkCloneUrlTemplate: string
 }
 
+export type ModelProfileCfg = {
+  model: string
+  variant?: string
+  description?: string
+}
+
+export type WorkerProfileCfg = {
+  description?: string
+  modelProfile?: string
+  opencodeAgent?: string
+  canEdit?: boolean
+  canPublishPr?: boolean
+  canUseBrowser?: boolean
+  canSpawnSubagents?: boolean
+  requiresEvidence?: boolean
+}
+
 export type AgentCfg = {
   role: string
   soul: string
   repo: string
+  workerProfile?: string
+  modelProfile?: string
+  opencodeAgent?: string
   portStart: number
   reporting: AgentReportingCfg
   identity: AgentIdentityCfg
@@ -193,6 +213,8 @@ export type OpenCodeCfg = {
   binary: string
   model: string
   agent: string
+  modelProfile?: string
+  roleAgents?: boolean
 }
 
 export type RootCfg = {
@@ -204,6 +226,8 @@ export type RootCfg = {
   repos: Record<string, RepoCfg>
   reporting: ReportingCfg
   nostr_git: NostrGitCfg
+  modelProfiles?: Record<string, ModelProfileCfg>
+  workerProfiles?: Record<string, WorkerProfileCfg>
   agents: Record<string, AgentCfg>
 }
 
@@ -262,11 +286,40 @@ export type TaskItem = {
   target?: string
   mode?: TaskMode
   model?: string
+  modelProfile?: string
+  modelVariant?: string
   parallel?: boolean
   recipients?: string[]
   continuation?: TaskContinuation
   source?: TaskSource
   subject?: TaskSubject
+}
+
+export type ResolvedModelSelectionSource =
+  | "task-model"
+  | "task-model-profile"
+  | "agent-model-profile"
+  | "worker-profile"
+  | "role-default-worker-profile"
+  | "opencode-model-profile"
+  | "opencode-model"
+  | "unset"
+
+export type ResolvedModelSelection = {
+  model?: string
+  variant?: string
+  modelProfile?: string
+  workerProfile?: string
+  source: ResolvedModelSelectionSource
+}
+
+export type FinalResponseRecord = {
+  text: string
+  source: "opencode-output-tail" | "operator-file"
+  capturedAt: string
+  truncated: boolean
+  chars: number
+  logFile?: string
 }
 
 export type AgentPaths = {
@@ -291,6 +344,7 @@ export type ProvisionFailureCategory =
   | "project-profile-blocker"
   | "verification-tooling-missing"
   | "dev-env-wrapper-failed"
+  | "provision-stale-no-process"
 
 export type TaskRunPhase = {
   name: string
@@ -423,6 +477,7 @@ export type LaunchResult = {
   prEligible?: boolean
   recommendedAction?: string
   verificationResults?: Array<Pick<VerificationRunnerResult, "id" | "kind" | "state" | "evidenceType" | "source" | "note" | "blocker" | "error" | "logFile" | "artifacts" | "screenshots" | "url" | "flow">>
+  finalResponse?: FinalResponseRecord
   task: string
   target: string
   subject?: ResolvedTaskSubject
@@ -444,6 +499,13 @@ export type LaunchResult = {
   projectStacks?: string[]
   verificationPlan?: string
   verificationRunners?: string[]
+  taskManifest?: string
+  model?: string
+  modelProfile?: string
+  modelVariant?: string
+  workerProfile?: string
+  modelSource?: ResolvedModelSelectionSource
+  opencodeAgent?: string
 }
 
 export type TaskRunRecord = {
@@ -459,6 +521,14 @@ export type TaskRunRecord = {
   continuation?: TaskContinuation
   subject?: ResolvedTaskSubject
   model?: string
+  requestedModelProfile?: string
+  requestedModelVariant?: string
+  resolvedModel?: string
+  modelProfile?: string
+  modelVariant?: string
+  workerProfile?: string
+  modelSource?: ResolvedModelSelectionSource
+  opencodeAgent?: string
   target?: string
   mode?: TaskMode
   parallel?: boolean
@@ -469,6 +539,7 @@ export type TaskRunRecord = {
   provisionState?: ProvisionState
   provisionFailureCategory?: ProvisionFailureCategory
   projectProfilePath?: string
+  taskManifestPath?: string
   verificationToolingReady?: boolean
   startedAt: string
   finishedAt?: string
@@ -507,6 +578,7 @@ export type TaskRunRecord = {
     plan: VerificationPlan
     results?: VerificationRunnerResult[]
   }
+  finalResponse?: FinalResponseRecord
   doneContract?: DoneContract
   logs?: {
     opencode?: string
@@ -578,6 +650,12 @@ export type AgentRuntimeState = {
   baseAgentId?: string
   runtimeId?: string
   parallel?: boolean
+  model?: string
+  modelProfile?: string
+  modelVariant?: string
+  workerProfile?: string
+  modelSource?: ResolvedModelSelectionSource
+  opencodeAgent?: string
   url?: string
   logFile?: string
   browserProfile?: string
@@ -589,6 +667,7 @@ export type AgentRuntimeState = {
   projectStacks?: string[]
   verificationPlan?: string
   verificationRunners?: string[]
+  taskManifest?: string
 }
 
 export type InboundDm = {

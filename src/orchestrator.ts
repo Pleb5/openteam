@@ -71,6 +71,9 @@ const formatWorkerEntry = (verb: "started" | "launched" | "stopped", entry: {
   role?: string
   target?: string
   mode?: TaskMode
+  model?: string
+  modelProfile?: string
+  modelVariant?: string
   runtimeId?: string
   logFile?: string
 }) => [
@@ -78,6 +81,9 @@ const formatWorkerEntry = (verb: "started" | "launched" | "stopped", entry: {
   entry.role ? `role: ${entry.role}` : "",
   entry.target ? `target: ${entry.target}` : "",
   entry.mode ? `mode: ${entry.mode}` : "",
+  entry.model ? `model: ${entry.model}` : "",
+  entry.modelProfile ? `model profile: ${entry.modelProfile}` : "",
+  entry.modelVariant ? `variant: ${entry.modelVariant}` : "",
   entry.runtimeId ? `runtime: ${entry.runtimeId}` : "",
   entry.logFile ? `log: ${entry.logFile}` : "",
 ].filter(Boolean).join("\n")

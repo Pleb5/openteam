@@ -20,6 +20,7 @@ import {
   runsCleanupStale,
   runsDiagnose,
   runsEvidence,
+  runsEval,
   runsList,
   runsShow,
   readRunRecord,
@@ -32,6 +33,7 @@ import {
   recordContinuationBlock,
   recordContinuationLaunch,
   summarizeContinuationGate,
+  writeContinuationHandoff,
   writeRunFamilyState,
 } from "./run-family-policy.js"
 import {runsObserveCommand, runsWatchCommand} from "./run-observer.js"
@@ -61,20 +63,21 @@ const help = () => {
   status
   console prompt
   prepare <agentId|role>
-  launch <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>] [--parallel] [--runtime-id <id>]
-  enqueue <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>]
+  launch <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--parallel] [--runtime-id <id>]
+  enqueue <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>]
   serve [agentId|role]   # defaults to orchestrator-01 when omitted
-  worker start <agentId|role> [--target <nostr-repo|hint|alias>] [--mode <web|code>] [--model <provider/model>] [--name <worker-name>]
+  worker start <agentId|role> [--target <nostr-repo|hint|alias>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--name <worker-name>]
   worker stop <worker-name>
   worker list
   runs list [--limit <n>]
   runs show <run-id> [--raw]
   runs diagnose <run-id> [--json]
   runs evidence <run-id> [--json]
+  runs eval <run-id> [--json] [--final-response-file <path>]
   runs observe <run-id> [--json]
   runs watch [--active|--needs-review] [--once] [--interval-ms <ms>] [--limit <n>] [--json]
-  runs continue <run-id> [--task <text>] [--model <provider/model>] [--no-carry-evidence] [--dry-run] [--force]
-  runs repair-evidence <run-id> [--task <text>] [--model <provider/model>] [--no-carry-evidence] [--dry-run] [--force]
+  runs continue <run-id> [--task <text>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--no-carry-evidence] [--dry-run] [--force]
+  runs repair-evidence <run-id> [--task <text>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--no-carry-evidence] [--dry-run] [--force]
   runs stop <run-id>
   runs cleanup-stale [--dry-run]
   browser status [agentId|role|worker-name] [--json]
@@ -179,6 +182,8 @@ const taskOpts = (args: string[]): Partial<TaskItem> => ({
   target: value(args, "--target") || undefined,
   mode: mode(args),
   model: value(args, "--model") || undefined,
+  modelProfile: value(args, "--model-profile") || undefined,
+  modelVariant: value(args, "--variant") || undefined,
   runtimeId: value(args, "--runtime-id") || undefined,
   parallel: flag(args, "--parallel") || undefined,
   recipients: taskRecipients(args),
@@ -405,6 +410,11 @@ const main = async () => {
     return
   }
 
+  if (cmd === "runs" && sub === "eval") {
+    await runsEval(app, must(args[2] ?? "", "run-id"), args)
+    return
+  }
+
   if (cmd === "runs" && sub === "observe") {
     await runsObserveCommand(app, must(args[2] ?? "", "run-id"), args)
     return
@@ -422,6 +432,8 @@ const main = async () => {
       kind: sub,
       task: value(args, "--task") || undefined,
       model: value(args, "--model") || undefined,
+      modelProfile: value(args, "--model-profile") || undefined,
+      modelVariant: value(args, "--variant") || undefined,
       carryEvidence: !flag(args, "--no-carry-evidence"),
     })
     const agentId = worker(app, item.agentId)
@@ -441,8 +453,14 @@ const main = async () => {
       await writeRunFamilyState(gate.state)
       throw new Error(formatContinuationGateError(gate))
     }
-    recordContinuationLaunch(gate, command)
+    const plannedRunId = `${agentId}-${item.id}`
+    recordContinuationLaunch(gate, command, {
+      runId: plannedRunId,
+      state: "queued",
+      failureCategory: item.continuation?.failureCategory,
+    })
     await writeRunFamilyState(gate.state)
+    await writeContinuationHandoff(app, record, item)
     if (item.continuation?.contextId) {
       await cleanupStaleRunsForContext(app, item.continuation.contextId)
     }

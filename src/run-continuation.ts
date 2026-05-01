@@ -84,6 +84,8 @@ export const createContinuationTaskItem = (
     kind: TaskContinuationKind
     task?: string
     model?: string
+    modelProfile?: string
+    modelVariant?: string
     carryEvidence?: boolean
   },
 ): TaskItem => {
@@ -98,6 +100,8 @@ export const createContinuationTaskItem = (
     target: record.target,
     mode: record.mode,
     model: options.model || record.model,
+    modelProfile: options.modelProfile || record.requestedModelProfile,
+    modelVariant: options.modelVariant || record.requestedModelVariant,
     continuation,
     subject: record.subject ? {
       kind: record.subject.kind,
@@ -116,6 +120,7 @@ export const continuationPromptLines = (continuation?: TaskContinuation) => {
     `Continuation mode: ${continuation.kind}`,
     `Prior run: ${continuation.fromRunId}`,
     `Prior checkout/context: ${continuation.checkout ?? "(unknown)"} / ${continuation.contextId}`,
+    continuation.checkout ? `Sanitized continuation handoff: ${continuation.checkout}/.openteam/continuation-summary.md` : "",
     `Prior branch: ${continuation.branch ?? "(unknown)"}`,
     `Prior state: ${continuation.priorState}`,
     continuation.workerState ? `Prior worker state: ${continuation.workerState}` : "",

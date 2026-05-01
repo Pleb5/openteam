@@ -17,6 +17,8 @@ export type ManagedWorker = {
   target?: string
   mode?: TaskMode
   model?: string
+  modelProfile?: string
+  modelVariant?: string
   task?: string
   parallel?: boolean
   recipients?: string[]
@@ -115,6 +117,8 @@ export const startWorker = async (
     target?: string
     mode?: TaskMode
     model?: string
+    modelProfile?: string
+    modelVariant?: string
     name?: string
     recipients?: string[]
     source?: TaskSource
@@ -140,6 +144,8 @@ export const startWorker = async (
   if (args.target) cliArgs.push("--target", args.target)
   if (args.mode) cliArgs.push("--mode", args.mode)
   if (args.model) cliArgs.push("--model", args.model)
+  if (args.modelProfile) cliArgs.push("--model-profile", args.modelProfile)
+  if (args.modelVariant) cliArgs.push("--variant", args.modelVariant)
 
   const child = spawn(script, cliArgs, {
     cwd: app.root,
@@ -158,6 +164,8 @@ export const startWorker = async (
     target: args.target,
     mode: args.mode,
     model: args.model,
+    modelProfile: args.modelProfile,
+    modelVariant: args.modelVariant,
     recipients: args.recipients,
     source: args.source,
     pid: child.pid!,
@@ -179,6 +187,8 @@ export const startJob = async (
     target?: string
     mode?: TaskMode
     model?: string
+    modelProfile?: string
+    modelVariant?: string
     task: string
     name?: string
     parallel?: boolean
@@ -214,6 +224,8 @@ export const startJob = async (
   if (args.target) cliArgs.push("--target", args.target)
   if (args.mode) cliArgs.push("--mode", args.mode)
   if (args.model) cliArgs.push("--model", args.model)
+  if (args.modelProfile) cliArgs.push("--model-profile", args.modelProfile)
+  if (args.modelVariant) cliArgs.push("--variant", args.modelVariant)
   if (args.parallel) cliArgs.push("--parallel")
 
   const child = spawn(script, cliArgs, {
@@ -234,6 +246,8 @@ export const startJob = async (
     target: args.target,
     mode: args.mode,
     model: args.model,
+    modelProfile: args.modelProfile,
+    modelVariant: args.modelVariant,
     task: args.task,
     parallel: args.parallel,
     recipients: args.recipients,

@@ -62,3 +62,12 @@ Operating rules:
 Provisioning rule:
 
 - provisioning sessions prepare the repo context only; they must not call `openteam launch`, `openteam enqueue`, `openteam serve`, or `openteam worker ...`
+
+Operator response contract:
+
+- `Status`: current operational state, not launch optimism
+- `Worker`: launched or inspected worker/run id when applicable
+- `Role/Mode`: selected role and mode when applicable
+- `Target`: resolved target or blocker
+- `Evidence`: run, browser, diagnosis, or evidence command used to support the report
+- `Next`: one concrete next command or operator decision
