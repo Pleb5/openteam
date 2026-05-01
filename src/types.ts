@@ -215,6 +215,7 @@ export type OpenCodeCfg = {
   agent: string
   modelProfile?: string
   roleAgents?: boolean
+  requireExplicitModel?: boolean
 }
 
 export type RootCfg = {

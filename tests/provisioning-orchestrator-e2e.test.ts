@@ -759,6 +759,29 @@ describe("Round 4 - run diagnosis and stale cleanup", () => {
     expect(summary.storedState).toBe("succeeded")
   })
 
+  test("summaries turn needs-review OpenCode model failures into effective failed state", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const logFile = path.join(runtimeRoot, "worker.log")
+    await writeFile(logFile, "ProviderModelNotFoundError: Model not found: openai/gpt-5.5\n")
+    const [summary] = await summarizeRuns(app, [{
+      record: runRecord(app, {
+        state: "needs-review",
+        workerState: "succeeded",
+        verificationState: "needs-review",
+        failureCategory: "verification-evidence-missing",
+        process: {},
+        logs: {opencode: logFile},
+        phases: [{name: "opencode-worker", state: "succeeded"}],
+      }),
+    }])
+
+    expect(summary.state).toBe("failed")
+    expect(summary.storedState).toBe("needs-review")
+    expect(summary.failureCategory).toBe("model-config-invalid")
+    expect(summary.staleReasons?.join(" ")).toContain("OpenCode log contains hard failure")
+  })
+
   test("finished runs with matching leased contexts produce cleanup reasons", async () => {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
     const checkout = path.join(runtimeRoot, "checkout")

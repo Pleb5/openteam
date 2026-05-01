@@ -18,7 +18,7 @@ import {evaluateEvidencePolicy, verificationFailuresBlockTask, type EvidencePoli
 import {KIND_GIT_ISSUE} from "./events.js"
 import {buildFinalResponseRecord, createOutputTailCapture, type OutputTailSnapshot} from "./final-response.js"
 import {redactSensitiveText} from "./log-redaction.js"
-import {resolveModelSelection} from "./model-profiles.js"
+import {assertModelSelectionValid, resolveModelSelection} from "./model-profiles.js"
 import {selectOpencodePrimaryAgent, writeOpencodeManagedAgents} from "./opencode-agents.js"
 import {detectOpenCodeHardFailure} from "./opencode-log.js"
 import {dispatchOperatorRequest, type DispatchContext} from "./orchestrator.js"
@@ -1064,6 +1064,7 @@ export const contextBusyContextId = (error: unknown) => {
 const taskFailureCategory = (error: unknown) => {
   const text = formatError(error)
   if (contextBusyContextId(error)) return "context-busy"
+  if (/model|provider|variant/i.test(text) && /opencode|provider\/model|not found|invalid|required/i.test(text)) return "model-config-invalid"
   if (/permission requested:.*auto-rejecting|rejected permission/i.test(text)) return "tool-permission-rejected"
   return "task-runtime-error"
 }
@@ -1547,6 +1548,21 @@ export const runTask = async (
   let taskManifestFile = ""
 
   try {
+    await runPhase(runRecord, "validate-model-config", async () => {
+      assertModelSelectionValid(app, modelSelection, {context: `${base.id} ${base.agent.role} worker`})
+      return {
+        model: modelSelection.model,
+        modelProfile: modelSelection.modelProfile,
+        modelVariant: modelSelection.variant,
+        modelSource: modelSelection.source,
+      }
+    }, {
+      model: modelSelection.model ?? "",
+      modelProfile: modelSelection.modelProfile ?? "",
+      modelVariant: modelSelection.variant ?? "",
+      modelSource: modelSelection.source,
+    })
+
     const resolveTarget = async () => {
       try {
         return await resolveRepoTarget(app, base, item)

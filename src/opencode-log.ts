@@ -4,6 +4,11 @@ const stripAnsi = (value: string) =>
 export const detectOpenCodeHardFailure = (text: string) => {
   const clean = stripAnsi(text)
   const checks: Array<[RegExp, string]> = [
+    [/ProviderModelNotFoundError/i, "configured opencode model was not found by provider"],
+    [/Model not found:\s*[^\n.]+/i, "configured opencode model was not found by provider"],
+    [/No provider found for model|Provider not found|Unknown provider/i, "configured opencode provider was not found"],
+    [/invalid (?:model )?variant|unknown variant/i, "configured opencode model variant was not accepted"],
+    [/AuthenticationError|Unauthorized|invalid api key|missing api key/i, "model provider authentication failed"],
     [/"code"\s*:\s*"server_error"/i, "model provider returned server_error"],
     [/"type"\s*:\s*"server_error"/i, "model provider returned server_error"],
     [/permission requested:[\s\S]{0,300}auto-rejecting/i, "tool permission request was auto-rejected"],

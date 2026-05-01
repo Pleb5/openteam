@@ -9,6 +9,25 @@ import type {
 } from "./types.js"
 
 const clean = (value?: string) => value?.trim() || undefined
+const modelPattern = /^[A-Za-z0-9._-]+\/[^\s/][^\s]*$/
+const variantPattern = /^[A-Za-z0-9._-]+$/
+
+export type ModelSelectionValidationIssue = {
+  severity: "error" | "warning"
+  code: string
+  message: string
+}
+
+const issue = (
+  severity: ModelSelectionValidationIssue["severity"],
+  code: string,
+  message: string,
+): ModelSelectionValidationIssue => ({severity, code, message})
+
+export const isModelReferenceFormatValid = (value: string) => modelPattern.test(value.trim())
+export const isModelVariantFormatValid = (value: string) => variantPattern.test(value.trim())
+
+export const requireExplicitModel = (app: AppCfg) => app.config.opencode.requireExplicitModel !== false
 
 type ResolvedWorkerProfile = {
   id?: string
@@ -151,6 +170,60 @@ export const resolveModelSelection = (
     variant: taskVariant,
     workerProfile: worker.id,
     source: "unset",
+  }
+}
+
+export const validateModelSelection = (
+  app: AppCfg,
+  selection: ResolvedModelSelection,
+  options: {context?: string} = {},
+) => {
+  const context = options.context ?? "opencode model"
+  const issues: ModelSelectionValidationIssue[] = []
+  const model = clean(selection.model)
+  const variant = clean(selection.variant)
+
+  if (!model) {
+    if (requireExplicitModel(app)) {
+      issues.push(issue(
+        "error",
+        "model-required",
+        `${context} did not resolve to an explicit model; configure modelProfiles/workerProfiles, opencode.model, or pass --model/--model-profile`,
+      ))
+    } else {
+      issues.push(issue(
+        "warning",
+        "model-unset",
+        `${context} is unset; openteam will rely on opencode's ambient default model`,
+      ))
+    }
+  } else if (!isModelReferenceFormatValid(model)) {
+    issues.push(issue(
+      "error",
+      "model-format-invalid",
+      `${context} '${model}' must use opencode's provider/model format`,
+    ))
+  }
+
+  if (variant && !isModelVariantFormatValid(variant)) {
+    issues.push(issue(
+      "error",
+      "model-variant-invalid",
+      `${context} variant '${variant}' must be a simple opencode variant id such as medium, high, max, or xhigh`,
+    ))
+  }
+
+  return issues
+}
+
+export const assertModelSelectionValid = (
+  app: AppCfg,
+  selection: ResolvedModelSelection,
+  options: {context?: string} = {},
+) => {
+  const errors = validateModelSelection(app, selection, options).filter(item => item.severity === "error")
+  if (errors.length > 0) {
+    throw new Error(errors.map(item => item.message).join("; "))
   }
 }
 

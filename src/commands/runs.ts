@@ -43,9 +43,15 @@ export const recentRunRecords = async (app: AppCfg, limit: number) => {
   return records.slice(0, limit)
 }
 
+const needsSummaryDiagnosis = (record: TaskRunRecord) =>
+  record.state === "running" ||
+  record.state === "stale" ||
+  record.state === "succeeded" ||
+  record.state === "needs-review"
+
 export const summarizeRuns = async (app: AppCfg, records: Array<{record: TaskRunRecord}>) =>
   Promise.all(records.map(async ({record}) => {
-    const diagnosis = record.state === "running" || record.state === "stale" || record.state === "succeeded"
+    const diagnosis = needsSummaryDiagnosis(record)
       ? await diagnoseRun(app, record).catch(() => undefined)
       : undefined
     return runListView(record, diagnosis)
@@ -256,8 +262,8 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
     }
   }
 
-  if (record.state === "succeeded" && hardFailure) {
-    reasons.push(`run is marked succeeded but OpenCode log contains hard failure: ${hardFailure.reason}`)
+  if (record.state !== "running" && record.state !== "failed" && record.state !== "stale" && hardFailure) {
+    reasons.push(`OpenCode log contains hard failure: ${hardFailure.reason}`)
   }
 
   const verificationFailureBlocksRun = verificationFailuresBlockTask(record.doneContract)
@@ -377,20 +383,35 @@ export const categorizeStaleRun = (
   return "run-stale"
 }
 
-const effectiveRunState = (record: TaskRunRecord, diagnosis?: RunDiagnosis) =>
-  record.state === "succeeded" && (
-    diagnosis?.hardFailure ||
-    record.workerState === "failed" ||
+const hardFailureCategory = (diagnosis?: RunDiagnosis) => {
+  const reason = diagnosis?.hardFailure?.reason ?? ""
+  if (!reason) return undefined
+  if (/model|provider|variant|authentication/i.test(reason)) return "model-config-invalid"
+  return "opencode-hard-failure"
+}
+
+const effectiveRunState = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
+  if (diagnosis?.stale) return "stale"
+  if ((record.state === "succeeded" || record.state === "needs-review") && diagnosis?.hardFailure) {
+    return "failed"
+  }
+  if (
+    record.state === "succeeded" &&
     (
-      verificationFailuresBlockTask(record.doneContract) &&
+      record.workerState === "failed" ||
       (
-        record.verificationState === "failed"
-        || record.verification?.results?.some(result => result.state === "failed" || result.state === "blocked")
+        verificationFailuresBlockTask(record.doneContract) &&
+        (
+          record.verificationState === "failed"
+          || record.verification?.results?.some(result => result.state === "failed" || result.state === "blocked")
+        )
       )
     )
-  )
-    ? "failed"
-    : diagnosis?.stale ? "stale" : record.state
+  ) {
+    return "failed"
+  }
+  return record.state
+}
 
 export const compactDiagnosis = (diagnosis?: RunDiagnosis) => diagnosis ? {
   stale: diagnosis.stale,
@@ -444,7 +465,7 @@ const runListView = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
     activePhase: compact?.activePhase,
     workerState: record.workerState,
     verificationState: record.verificationState,
-    failureCategory: record.failureCategory,
+    failureCategory: state === "failed" ? hardFailureCategory(diagnosis) ?? record.failureCategory : record.failureCategory,
     staleFailureCategory: compact?.staleFailureCategory,
     provisionState: record.provisionState,
     provisionFailureCategory: record.provisionFailureCategory,

@@ -4,7 +4,8 @@
     "binary": "opencode",
     "model": "",
     "agent": "build",
-    "roleAgents": true
+    "roleAgents": true,
+    "requireExplicitModel": true
   },
   "browser": {
     "headless": false,

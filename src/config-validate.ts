@@ -1,5 +1,6 @@
 import {existsSync} from "node:fs"
 import {nip19} from "nostr-tools"
+import {isModelReferenceFormatValid, isModelVariantFormatValid, requireExplicitModel} from "./model-profiles.js"
 import {effectiveVerificationConfig} from "./verification.js"
 import type {AgentCfg, AppCfg, ProviderCfg, TaskMode} from "./types.js"
 
@@ -117,18 +118,47 @@ const profileIssues = (app: AppCfg) => {
   const workerProfiles = app.config.workerProfiles ?? {}
 
   const knownModelProfile = (id: string) => Boolean(modelProfiles[id])
+  const modelFormatIssue = (owner: string, model?: string) => {
+    if (!model?.trim()) return
+    if (!isModelReferenceFormatValid(model)) {
+      issues.push(issue("error", "model-format-invalid", `${owner} model '${model}' must use opencode's provider/model format`))
+    }
+  }
+  const variantFormatIssue = (owner: string, variant?: string) => {
+    if (variant === undefined) return
+    if (!variant.trim()) {
+      issues.push(issue("warning", "model-profile-variant-empty", `${owner} has an empty variant`))
+      return
+    }
+    if (!isModelVariantFormatValid(variant)) {
+      issues.push(issue("error", "model-variant-invalid", `${owner} variant '${variant}' must be a simple opencode variant id`))
+    }
+  }
 
   for (const [id, profile] of Object.entries(modelProfiles)) {
     if (typeof profile.model !== "string" || !profile.model.trim()) {
       issues.push(issue("error", "model-profile-model-empty", `model profile '${id}' has an empty model`))
+    } else {
+      modelFormatIssue(`model profile '${id}'`, profile.model)
     }
-    if (profile.variant !== undefined && (typeof profile.variant !== "string" || !profile.variant.trim())) {
-      issues.push(issue("warning", "model-profile-variant-empty", `model profile '${id}' has an empty variant`))
-    }
+    variantFormatIssue(`model profile '${id}'`, profile.variant)
+  }
+
+  modelFormatIssue("opencode", app.config.opencode.model)
+  if (app.config.opencode.requireExplicitModel !== undefined && typeof app.config.opencode.requireExplicitModel !== "boolean") {
+    issues.push(issue("error", "opencode-require-explicit-model-invalid", "opencode.requireExplicitModel must be boolean"))
   }
 
   if (app.config.opencode.modelProfile && !knownModelProfile(app.config.opencode.modelProfile)) {
     issues.push(issue("error", "unknown-model-profile", `opencode.modelProfile references unknown model profile '${app.config.opencode.modelProfile}'`))
+  }
+
+  if (requireExplicitModel(app) && !app.config.opencode.model?.trim() && !app.config.opencode.modelProfile && Object.keys(modelProfiles).length === 0) {
+    issues.push(issue(
+      "warning",
+      "model-required-without-default",
+      "opencode.requireExplicitModel is enabled but no default model profile or opencode.model is configured; launch tasks must pass --model or --model-profile",
+    ))
   }
 
   for (const [id, profile] of Object.entries(workerProfiles)) {

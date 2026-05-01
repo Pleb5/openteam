@@ -45,6 +45,35 @@
       }
     }
   },
+  "modelProfiles": {
+    "builder-default": {
+      "model": "opencode/gpt-5.5",
+      "variant": "high",
+      "description": "Default model for implementation workers."
+    },
+    "research-default": {
+      "model": "opencode/gpt-5.5",
+      "variant": "medium",
+      "description": "Default model for read-only analysis and QA."
+    }
+  },
+  "workerProfiles": {
+    "builder": {
+      "modelProfile": "builder-default"
+    },
+    "researcher": {
+      "modelProfile": "research-default"
+    },
+    "qa": {
+      "modelProfile": "research-default"
+    },
+    "triager": {
+      "modelProfile": "research-default"
+    },
+    "orchestrator": {
+      "modelProfile": "research-default"
+    }
+  },
   "reporting": {
     "dmRelays": [
       "wss://relay.example.com"
