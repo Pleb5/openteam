@@ -152,10 +152,14 @@ describe("opencode helper agents", () => {
     const researcher = await readFile(opencodePrimaryAgentPath(checkout, "researcher"), "utf8")
     const qa = await readFile(opencodePrimaryAgentPath(checkout, "qa"), "utf8")
     const triager = await readFile(opencodePrimaryAgentPath(checkout, "triager"), "utf8")
+    const orchestrator = await readFile(opencodePrimaryAgentPath(checkout, "orchestrator"), "utf8")
 
     expect(files).toContain(opencodePrimaryAgentPath(checkout, "builder"))
     expect(builder).toContain("mode: primary")
     expect(builder).toContain("You are openteam-builder")
+    expect(builder).toContain("question: deny")
+    expect(builder).toContain("Do not ask interactive questions")
+    expect(builder).toContain("Do not reason about orchestration lifecycle tasks")
     expect(builder).toContain("canEdit: true")
     expect(builder).toContain("Final response contract")
     expect(builder).toContain("- Changed Files:")
@@ -173,6 +177,8 @@ describe("opencode helper agents", () => {
     expect(triager).toContain(`"*": deny`)
     expect(triager).toContain(`"openteam verify *": allow`)
     expect(builder).not.toContain(`"*": deny`)
+    expect(orchestrator).toContain("question: allow")
+    expect(orchestrator).toContain("You may ask concise operator questions")
   })
 
   test("primary agent permissions reflect worker profile capability overrides", async () => {

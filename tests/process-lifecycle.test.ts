@@ -162,6 +162,45 @@ describe("process lifecycle reliability fixtures", () => {
     expect(stale.reasons.join("\n")).toContain("no task-specific child pid evidence")
   })
 
+  test("healthy dev URL does not hide an idle OpenCode worker", async () => {
+    const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
+    const logFile = path.join(app.config.runtimeRoot, "agents", "builder-01", "artifacts", "worker.log")
+    await mkdir(path.dirname(logFile), {recursive: true})
+    await writeFile(logFile, "last worker output\n")
+    const old = new Date(Date.now() - 35 * 60_000)
+    await utimes(logFile, old, old)
+    const record = runRecord(app, {
+      mode: "web",
+      process: {runnerPid: process.pid, opencodePid: process.pid, devPid: process.pid},
+      logs: {opencode: logFile},
+      browser: {enabled: true, headless: true, profileDir: "/tmp/profile", artifactDir: "/tmp/artifacts", url: healthyDevUrl},
+      devServer: {url: healthyDevUrl, pid: process.pid, startedAt: new Date().toISOString()},
+      phases: [{name: "opencode-worker", state: "running", startedAt: new Date(Date.now() - 40 * 60_000).toISOString()}],
+    })
+
+    const diagnosis = await diagnoseRun(app, record)
+
+    expect(diagnosis.stale).toBe(false)
+    expect(diagnosis.devServer.health.ok).toBe(true)
+    expect(diagnosis.opencodeProgress.stallSeverity).toBe("critical")
+    expect(diagnosis.reasons.join("\n")).toContain("OpenCode worker has no output")
+  })
+
+  test("diagnosis surfaces OpenCode permission and question blockers", async () => {
+    const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
+    const permissionLog = path.join(app.config.runtimeRoot, "agents", "builder-01", "artifacts", "permission.log")
+    const questionLog = path.join(app.config.runtimeRoot, "agents", "builder-01", "artifacts", "question.log")
+    await mkdir(path.dirname(permissionLog), {recursive: true})
+    await writeFile(permissionLog, "! permission requested: external_directory (/repo/runtime/runs/*); auto-rejecting\n")
+    await writeFile(questionLog, "Question: Should I publish this without strong evidence?\n")
+
+    const permission = await diagnoseRun(app, runRecord(app, {process: {runnerPid: process.pid, opencodePid: process.pid}, logs: {opencode: permissionLog}}))
+    const question = await diagnoseRun(app, runRecord(app, {process: {runnerPid: process.pid, opencodePid: process.pid}, logs: {opencode: questionLog}}))
+
+    expect(permission.opencodeProgress.blocked?.kind).toBe("permission")
+    expect(question.opencodeProgress.blocked?.kind).toBe("question")
+  })
+
   test("terminal cleanup marks running phases, dev server stop time, and matching lease release", async () => {
     const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
     const checkout = path.join(app.config.runtimeRoot, "checkout")

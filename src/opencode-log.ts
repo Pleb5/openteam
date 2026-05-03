@@ -43,3 +43,32 @@ export const detectWorkerVerificationBlockers = (text: string) => {
     return match ? [{reason, evidence: match[0].replace(/\s+/g, " ").slice(0, 240)}] : []
   })
 }
+
+export type OpenCodeBlockedKind = "permission" | "question" | "policy"
+
+export const detectOpenCodeBlockedState = (text: string) => {
+  const clean = stripAnsi(text)
+  const checks: Array<[RegExp, OpenCodeBlockedKind, string]> = [
+    [/permission requested:[^\n]*(?:\n[^\n]*){0,3}/i, "permission", "OpenCode requested a permission decision"],
+    [/The user rejected permission to use this specific tool call\./i, "permission", "OpenCode permission request was rejected"],
+    [/auto-rejecting[^\n]*/i, "permission", "OpenCode permission request was auto-rejected"],
+    [/\b(?:Question|Ask|User input requested)\b[^\n]*(?:\n[^\n]*){0,3}/i, "question", "OpenCode requested interactive user input"],
+    [/\b(?:Should I|Would you like me to|Do you want me to|Please confirm|Please choose)\b[^\n]*\?/i, "question", "worker appears to be waiting for an interactive decision"],
+    [/operation blocked by OpenCode policy|sandbox (?:denied|blocked|rejected) the requested (?:tool|command|operation)/i, "policy", "OpenCode policy blocked the requested operation"],
+  ]
+  for (const [pattern, kind, reason] of checks) {
+    const match = clean.match(pattern)
+    if (match) {
+      return {kind, reason, evidence: match[0].replace(/\s+/g, " ").slice(0, 240)}
+    }
+  }
+  return undefined
+}
+
+export const lastMeaningfulLogLine = (text: string) => {
+  const lines = stripAnsi(text)
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+  return lines.at(-1)?.replace(/\s+/g, " ").slice(0, 240)
+}

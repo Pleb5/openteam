@@ -33,6 +33,7 @@ import {
 import {resolveRepoTarget} from "../src/repo.js"
 import {continuationEvidenceForCarry, continuationPromptLines, createContinuationTaskItem} from "../src/run-continuation.js"
 import {observeRun, observeRuns} from "../src/run-observer.js"
+import {executeOperatorTakeover, operatorTakeoverHandoffPath, releaseOperatorTakeover} from "../src/run-takeover.js"
 import {refreshRuntimeStatus} from "../src/runtime-status.js"
 import {resolveTaskSubject, subjectPromptLines} from "../src/subject.js"
 import {
@@ -301,6 +302,123 @@ describe("runtime invariants", () => {
     expect(cleaned[0]?.runId).toBe("builder-01-task-a")
     expect(registry.contexts.ctx1.state).toBe("idle")
     expect(registry.contexts.ctx1.lease).toBeUndefined()
+  })
+
+  test("operator takeover writes redacted handoff and holds context", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    const logFile = path.join(runtimeRoot, "prior-opencode.log")
+    await writeFile(logFile, [
+      "OPENTEAM_GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456",
+      "Question: Should I continue?",
+      "normal blocked context",
+    ].join("\n"))
+    const registryFile = await writeRegistry(app, registryWithContext(checkout, {
+      workerId: "builder-01",
+      role: "builder",
+      jobId: "task-a",
+      mode: "code",
+      leasedAt: "2026-04-25T00:00:00.000Z",
+    }))
+    await writeRun(runRecord(app, {
+      context: {id: "ctx1", checkout, branch: "openteam/test"},
+      logs: {opencode: logFile},
+    }))
+
+    const result = await executeOperatorTakeover(app, "builder-01-task-a", {reason: "operator manual steering"})
+    const record = JSON.parse(await readFile(path.join(runtimeRoot, "runs", "builder-01-task-a.json"), "utf8")) as TaskRunRecord
+    const registry = JSON.parse(await readFile(registryFile, "utf8")) as RepoRegistry
+    const handoff = await readFile(operatorTakeoverHandoffPath(checkout), "utf8")
+
+    expect(result.handoffWritten).toBe(true)
+    expect(result.contextHeld).toBe(true)
+    expect(result.command).not.toContain("run")
+    expect(result.command).not.toContain("--agent")
+    expect(handoff).toContain("## Prior Discussion Summary")
+    expect(handoff).toContain("normal blocked context")
+    expect(handoff).toContain("[REDACTED")
+    expect(handoff).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz123456")
+    expect(record.state).toBe("interrupted")
+    expect(record.failureCategory).toBe("operator-takeover")
+    expect(record.manualTakeover?.contextHeld).toBe(true)
+    expect(registry.contexts.ctx1.state).toBe("leased")
+    expect(registry.contexts.ctx1.lease?.workerId).toBe("operator")
+    expect(registry.contexts.ctx1.lease?.jobId).toBe("operator-takeover:builder-01-task-a")
+  })
+
+  test("operator takeover dry run does not mutate run or registry", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    const registryFile = await writeRegistry(app, registryWithContext(checkout, {
+      workerId: "builder-01",
+      role: "builder",
+      jobId: "task-a",
+      mode: "code",
+      leasedAt: "2026-04-25T00:00:00.000Z",
+    }))
+    await writeRun(runRecord(app, {context: {id: "ctx1", checkout, branch: "openteam/test"}}))
+
+    const result = await executeOperatorTakeover(app, "builder-01-task-a", {dryRun: true})
+    const record = JSON.parse(await readFile(path.join(runtimeRoot, "runs", "builder-01-task-a.json"), "utf8")) as TaskRunRecord
+    const registry = JSON.parse(await readFile(registryFile, "utf8")) as RepoRegistry
+
+    expect(result.dryRun).toBe(true)
+    expect(existsSync(operatorTakeoverHandoffPath(checkout))).toBe(false)
+    expect(record.state).toBe("running")
+    expect(record.manualTakeover).toBeUndefined()
+    expect(registry.contexts.ctx1.lease?.workerId).toBe("builder-01")
+  })
+
+  test("operator takeover release only releases matching operator hold", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    const registryFile = await writeRegistry(app, registryWithContext(checkout, {
+      workerId: "builder-01",
+      role: "builder",
+      jobId: "task-a",
+      mode: "code",
+      leasedAt: "2026-04-25T00:00:00.000Z",
+    }))
+    await writeRun(runRecord(app, {context: {id: "ctx1", checkout, branch: "openteam/test"}}))
+    await executeOperatorTakeover(app, "builder-01-task-a")
+
+    const result = await releaseOperatorTakeover(app, "builder-01-task-a")
+    const record = JSON.parse(await readFile(path.join(runtimeRoot, "runs", "builder-01-task-a.json"), "utf8")) as TaskRunRecord
+    const registry = JSON.parse(await readFile(registryFile, "utf8")) as RepoRegistry
+
+    expect(result.released).toBe(true)
+    expect(record.manualTakeover?.contextHeld).toBe(false)
+    expect(record.manualTakeover?.releasedAt).toBeTruthy()
+    expect(registry.contexts.ctx1.state).toBe("idle")
+    expect(registry.contexts.ctx1.lease).toBeUndefined()
+  })
+
+  test("operator takeover refuses context leased by another run", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    await writeRegistry(app, registryWithContext(checkout, {
+      workerId: "builder-02",
+      role: "builder",
+      jobId: "task-b",
+      mode: "code",
+      leasedAt: "2026-04-25T00:00:00.000Z",
+    }))
+    await writeRun(runRecord(app, {
+      state: "needs-review",
+      process: {},
+      phases: [{name: "opencode-worker", state: "succeeded"}],
+      context: {id: "ctx1", checkout, branch: "openteam/test"},
+    }))
+
+    await expect(executeOperatorTakeover(app, "builder-01-task-a")).rejects.toThrow("already leased by builder-02/task-b")
   })
 
   test("stale cleanup does not release a context leased by another run", async () => {

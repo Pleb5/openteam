@@ -37,6 +37,8 @@ const workerSafetyLines = () => [
   `Do not run GUI openers, system package installs, or writes outside the managed checkout/runtime. Stop with a concrete blocker when those are required.`,
   `Do not run destructive cleanup such as broad rm -rf or git reset --hard unless the task explicitly requires it and the scope is clear.`,
   `If the environment still appears broken, stop with a concrete blocker instead of trying to redesign provisioning yourself.`,
+  `Do not inspect or reason about orchestrator runtime internals such as stale-run cleanup, worker stopping, continuation gates, repo-context lease release, or runtime/runs history. The orchestrator owns those decisions and will provide any sanitized context you need inside the checkout.`,
+  `Do not ask interactive questions during unattended worker execution. If a human decision is required, stop with a concrete blocker and the exact decision needed.`,
   `Operator task-status DMs are handled by openteam runtime; focus on the task itself unless the task explicitly requires Nostr messaging work.`,
 ]
 

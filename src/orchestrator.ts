@@ -1,6 +1,7 @@
 import type {AppCfg, TaskItem, TaskMode} from "./types.js"
 import {startJob, startWorker, stopWorker} from "./supervisor.js"
 import {statusReport} from "./commands/status.js"
+import {executeOperatorTakeover, formatOperatorTakeoverResult} from "./run-takeover.js"
 
 type DispatchResult = {
   handled: boolean
@@ -20,6 +21,7 @@ export type ParsedOperatorRequest =
   | {kind: "help"}
   | {kind: "status"}
   | {kind: "stop"; name: string}
+  | {kind: "takeover"; runId: string}
   | {kind: "start"; role: WorkerRole; target: string; mode?: TaskMode; model?: string}
   | {kind: "watch"; role: WorkerRole; target: string; mode?: TaskMode; model?: string}
   | {kind: "research"; role: "researcher"; target: string; mode?: TaskMode; model?: string; parallel?: boolean; task: string}
@@ -46,7 +48,7 @@ const formatStatusReport = (report: Awaited<ReturnType<typeof statusReport>>) =>
     "status",
     `managed workers: ${summary.liveManagedWorkers} live / ${summary.managedWorkers} total`,
     `recent runs: ${summary.runningRuns} running, ${summary.staleRuns} stale / ${summary.recentRuns} total`,
-    `leases: ${summary.staleLeases} stale / ${summary.leasedContexts} leased`,
+    `leases: ${summary.staleLeases} stale, ${summary.operatorHeldContexts} operator-held / ${summary.leasedContexts} leased`,
   ]
 
   if (report.workers.length > 0) {
@@ -94,6 +96,7 @@ const helpMessage = () => [
   "worker list",
   "what is running?",
   "stop <worker-name>",
+  "takeover <run-id>",
   "start <builder|triager|qa|researcher> on <target> [in web|code mode] [with model <model>]",
   "watch <target> [as builder|triager|qa|researcher] [in web|code mode] [with model <model>]",
   "research <target> [in web|code mode] [with model <model>] [in parallel] and <task>",
@@ -170,6 +173,11 @@ export const parseOperatorRequest = (request: string): ParsedOperatorRequest | u
     return {kind: "stop", name: clean(stop[1])}
   }
 
+  const takeover = trimmed.match(/^(?:takeover|take\s+over|manual\s+takeover)\s+(.+)$/i)
+  if (takeover) {
+    return {kind: "takeover", runId: clean(takeover[1])}
+  }
+
   const start = parseStart(trimmed)
   if (start) return {kind: "start", ...start}
 
@@ -215,6 +223,11 @@ export const dispatchOperatorRequest = async (
   if (parsed.kind === "stop") {
     const entry = await stopWorker(app, parsed.name)
     return {handled: true, summary: `stopped ${entry.name}`, payload: entry, message: formatWorkerEntry("stopped", entry)}
+  }
+
+  if (parsed.kind === "takeover") {
+    const result = await executeOperatorTakeover(app, parsed.runId, {reason: "operator requested manual takeover"})
+    return {handled: true, summary: `manual takeover ready for ${parsed.runId}`, payload: result, message: formatOperatorTakeoverResult(result)}
   }
 
   if (parsed.kind === "start") {

@@ -1358,6 +1358,44 @@ const lease = (context: RepoContext, agent: PreparedAgent, item: TaskItem, mode:
   updatedAt: now(),
 })
 
+export const operatorTakeoverJobId = (runId: string) => `operator-takeover:${runId}`
+
+export const isOperatorTakeoverLease = (lease?: WorkerLease) =>
+  lease?.workerId === "operator" && typeof lease.jobId === "string" && lease.jobId.startsWith("operator-takeover:")
+
+export const holdRepoContextForOperator = async (app: AppCfg, contextId: string, runId: string) => {
+  let held: RepoContext | undefined
+  await withRepoRegistryLock(app, async () => {
+    const registry = await loadRepoRegistry(app)
+    const context = registry.contexts[contextId]
+    if (!context) throw new Error(`operator takeover context not found: ${contextId}`)
+    const jobId = operatorTakeoverJobId(runId)
+    if (context.state === "leased") {
+      if (context.lease?.workerId === "operator" && context.lease.jobId === jobId) {
+        held = context
+        return
+      }
+      throw new Error(`operator takeover context ${contextId} is already leased by ${context.lease?.workerId ?? "unknown"}/${context.lease?.jobId ?? "unknown"}`)
+    }
+    held = {
+      ...context,
+      state: "leased",
+      lease: {
+        workerId: "operator",
+        role: "operator",
+        jobId,
+        mode: context.mode,
+        leasedAt: now(),
+      },
+      updatedAt: now(),
+    }
+    registry.contexts[contextId] = held
+    await saveRepoRegistry(app, registry)
+  })
+  if (!held) throw new Error(`operator takeover failed to hold context ${contextId}`)
+  return held
+}
+
 const configureContextGitAuth = async (
   app: AppCfg,
   checkout: string,
@@ -1583,3 +1621,6 @@ export const releaseRepoContext = async (app: AppCfg, contextId?: string, expect
   })
   return released
 }
+
+export const releaseOperatorRepoContextHold = async (app: AppCfg, contextId: string | undefined, runId: string) =>
+  releaseRepoContext(app, contextId, {workerId: "operator", jobId: operatorTakeoverJobId(runId)})

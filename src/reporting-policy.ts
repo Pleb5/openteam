@@ -159,7 +159,10 @@ const nextForState = (runId: string, state: string, recommended?: string) => {
 }
 
 const failureFor = (snapshot: RunObservationSnapshot) =>
-  snapshot.failureCategory || (snapshot.state === "stale" ? snapshot.staleReasons[0] : undefined)
+  snapshot.failureCategory ||
+  (snapshot.opencodeBlockedKind ? `opencode-${snapshot.opencodeBlockedKind}-blocked` : undefined) ||
+  (snapshot.opencodeStallSeverity ? `opencode-idle-${snapshot.opencodeStallSeverity}` : undefined) ||
+  (snapshot.state === "stale" ? snapshot.staleReasons[0] : undefined)
 
 export const formatTaskRunReport = async (
   record: TaskRunRecord,
@@ -224,6 +227,7 @@ const formatObservationReport = (event: RunObservationEvent) => {
     `task: ${truncate(snapshot.task ?? snapshot.taskId)}`,
     evidence ? `evidence: ${evidence}` : "",
     snapshot.devUrl && snapshot.devHealthy ? `url: ${snapshot.devUrl}` : "",
+    snapshot.opencodeLogAgeMs !== undefined ? `opencode idle: ${Math.round(snapshot.opencodeLogAgeMs / 60_000)}m${snapshot.opencodeLastLine ? ` last=${truncate(snapshot.opencodeLastLine, 80)}` : ""}` : "",
     `why: ${observationReason(event)}`,
     snapshot.contextId && (snapshot.state === "stale" || snapshot.contextLeaseMatchesRun === false) ? `context: ${snapshot.contextId}` : "",
     `next: ${next}`,
@@ -263,6 +267,8 @@ const fingerprintFor = (snapshot: RunObservationSnapshot) =>
     snapshot.state,
     snapshot.failureCategory ?? "",
     snapshot.evidenceLevel,
+    snapshot.opencodeBlockedKind ?? "",
+    snapshot.opencodeStallSeverity ?? "",
     snapshot.prEligible ? "pr-yes" : "pr-no",
     snapshot.recommendedAction ?? "",
   ].join("|")

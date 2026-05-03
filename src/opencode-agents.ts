@@ -135,7 +135,7 @@ const renderPermission = (rules: Record<string, string | Record<string, string>>
 
 const primaryPermission = (role: OpencodePrimaryRole, capabilities: WorkerCapabilities) => {
   const rules: Record<string, string | Record<string, string>> = {
-    question: "allow",
+    question: role === "orchestrator" ? "allow" : "deny",
     plan_enter: "allow",
   }
 
@@ -211,6 +211,12 @@ const primaryBody = (role: OpencodePrimaryRole, capabilities: WorkerCapabilities
   `Read attached bootstrap files and .openteam/task.json before starting product work.`,
   `Use OPENTEAM_RUN_ID, OPENTEAM_RUN_FILE, OPENTEAM_TASK_MANIFEST, OPENTEAM_TMP_DIR, OPENTEAM_CACHE_DIR, and OPENTEAM_ARTIFACTS_DIR when relevant.`,
   `Do not launch, enqueue, start, stop, or watch other openteam workers unless this is an orchestrator worker explicitly handling lifecycle control.`,
+  role === "orchestrator"
+    ? `You may ask concise operator questions when lifecycle policy or operator intent is ambiguous.`
+    : `Do not ask interactive questions. If human input is truly required, stop with a concrete blocker in your final response.`,
+  role === "orchestrator"
+    ? `You own stale-run diagnosis, cleanup, continuation policy, and operator escalation decisions.`
+    : `Do not reason about orchestration lifecycle tasks such as stale-run cleanup, worker stopping, continuation gates, or repo-context lease release. Treat those as orchestrator-owned concerns.`,
   ``,
   `Capability policy:`,
   `- canEdit: ${capabilities.canEdit}`,

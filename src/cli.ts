@@ -37,6 +37,7 @@ import {
   writeRunFamilyState,
 } from "./run-family-policy.js"
 import {runsObserveCommand, runsWatchCommand} from "./run-observer.js"
+import {executeOperatorTakeover, formatOperatorTakeoverResult, releaseOperatorTakeover} from "./run-takeover.js"
 import {statusReport} from "./commands/status.js"
 import {recipientsFromEnv, sourceFromEnv} from "./task-context.js"
 import {runTask, enqueueTask, prepareOnly, serveAgent} from "./launcher.js"
@@ -78,6 +79,8 @@ const help = () => {
   runs watch [--active|--needs-review] [--once] [--interval-ms <ms>] [--limit <n>] [--json]
   runs continue <run-id> [--task <text>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--no-carry-evidence] [--dry-run] [--force]
   runs repair-evidence <run-id> [--task <text>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--no-carry-evidence] [--dry-run] [--force]
+  runs takeover <run-id> [--reason <text>] [--dry-run] [--no-hold] [--no-stop]
+  runs takeover-release <run-id>
   runs stop <run-id>
   runs cleanup-stale [--dry-run]
   browser status [agentId|role|worker-name] [--json]
@@ -465,6 +468,26 @@ const main = async () => {
       await cleanupStaleRunsForContext(app, item.continuation.contextId)
     }
     console.log(JSON.stringify(await runTask(app, agentId, item), null, 2))
+    return
+  }
+
+  if (cmd === "runs" && sub === "takeover") {
+    const result = await executeOperatorTakeover(app, must(args[2] ?? "", "run-id"), {
+      reason: value(args, "--reason") || undefined,
+      dryRun: flag(args, "--dry-run"),
+      noHold: flag(args, "--no-hold"),
+      noStop: flag(args, "--no-stop"),
+    })
+    if (flag(args, "--json")) {
+      console.log(JSON.stringify(result, null, 2))
+    } else {
+      console.log(formatOperatorTakeoverResult(result))
+    }
+    return
+  }
+
+  if (cmd === "runs" && sub === "takeover-release") {
+    console.log(JSON.stringify(await releaseOperatorTakeover(app, must(args[2] ?? "", "run-id")), null, 2))
     return
   }
 

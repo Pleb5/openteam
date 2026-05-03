@@ -24,6 +24,7 @@ export const statusReport = async (app: AppCfg) => {
       runningRuns: recentRuns.filter(run => run.state === "running").length,
       runStates: runtimeStatus.runs.byState,
       leasedContexts: runtimeStatus.leases.leased,
+      operatorHeldContexts: runtimeStatus.leases.operatorHeld,
       staleLeases: runtimeStatus.leases.stale,
       statusFile: runtimeStatus.statusFile,
     },

@@ -25,11 +25,18 @@ export type RunObservationSnapshot = {
   verificationState?: string
   failureCategory?: string
   activePhase?: string
+  activePhaseDurationMs?: number
   stale: boolean
   staleReasons: string[]
   anyPidAlive: boolean
   anyTaskPidAlive: boolean
   newestLogAgeMs?: number
+  opencodeLogAgeMs?: number
+  opencodeLogSize?: number
+  opencodeLastLine?: string
+  opencodeBlockedKind?: string
+  opencodeBlockedReason?: string
+  opencodeStallSeverity?: "warning" | "critical"
   devUrl?: string
   devHealthy: boolean
   devError?: string
@@ -141,11 +148,18 @@ export const snapshotRunObservation = async (
     verificationState: record.verificationState,
     failureCategory: record.failureCategory,
     activePhase: diagnosis.activePhase?.name,
+    activePhaseDurationMs: diagnosis.activePhaseDurationMs,
     stale: diagnosis.stale,
     staleReasons: diagnosis.reasons,
     anyPidAlive: diagnosis.anyPidAlive,
     anyTaskPidAlive: diagnosis.anyTaskPidAlive,
     newestLogAgeMs: diagnosis.newestLogAgeMs,
+    opencodeLogAgeMs: diagnosis.opencodeProgress.logAgeMs,
+    opencodeLogSize: diagnosis.opencodeProgress.logSize,
+    opencodeLastLine: diagnosis.opencodeProgress.lastLine,
+    opencodeBlockedKind: diagnosis.opencodeProgress.blocked?.kind,
+    opencodeBlockedReason: diagnosis.opencodeProgress.blocked?.reason,
+    opencodeStallSeverity: diagnosis.opencodeProgress.stallSeverity,
     devUrl: devHealth.url,
     devHealthy: devHealth.ok,
     devError: devHealth.error,
@@ -166,6 +180,9 @@ const fieldSeverity = (field: string, to: unknown): ObservationSeverity => {
   if (field === "state" && (to === "failed" || to === "stale")) return "critical"
   if (field === "state" && to === "needs-review") return "warning"
   if (field === "devHealthy" && to === false) return "warning"
+  if (field === "opencodeBlockedKind" && to) return "critical"
+  if (field === "opencodeStallSeverity" && to === "critical") return "critical"
+  if (field === "opencodeStallSeverity" && to === "warning") return "warning"
   if (field === "evidenceLevel" && (to === "failed" || to === "blocked")) return "critical"
   if (field === "evidenceLevel" && (to === "weak" || to === "none")) return "warning"
   if (field === "prEligible" && to === true) return "info"
@@ -200,6 +217,8 @@ const diffSnapshots = (
   const fields: Array<keyof RunObservationSnapshot> = [
     "state",
     "activePhase",
+    "opencodeBlockedKind",
+    "opencodeStallSeverity",
     "devHealthy",
     "evidenceLevel",
     "prEligible",
@@ -285,7 +304,11 @@ const printSnapshot = (snapshot: RunObservationSnapshot) => {
   console.log(`role: ${snapshot.role}`)
   console.log(`target: ${snapshot.target ?? "(none)"}`)
   console.log(`phase: ${snapshot.activePhase ?? "(none)"}`)
+  if (snapshot.activePhaseDurationMs !== undefined) console.log(`phase duration ms: ${snapshot.activePhaseDurationMs}`)
   console.log(`pids: any=${snapshot.anyPidAlive ? "yes" : "no"} task=${snapshot.anyTaskPidAlive ? "yes" : "no"}`)
+  if (snapshot.opencodeLogAgeMs !== undefined) console.log(`opencode log age ms: ${snapshot.opencodeLogAgeMs}`)
+  if (snapshot.opencodeStallSeverity) console.log(`opencode stall: ${snapshot.opencodeStallSeverity}`)
+  if (snapshot.opencodeBlockedKind) console.log(`opencode blocked: ${snapshot.opencodeBlockedKind}${snapshot.opencodeBlockedReason ? ` (${snapshot.opencodeBlockedReason})` : ""}`)
   console.log(`dev: ${snapshot.devUrl ?? "(none)"} ${snapshot.devHealthy ? "healthy" : "down"}${snapshot.devError ? ` (${snapshot.devError})` : ""}`)
   console.log(`evidence: ${snapshot.evidenceLevel}`)
   console.log(`PR eligible: ${snapshot.prEligible ? "yes" : "no"}`)
@@ -303,6 +326,8 @@ export const formatObservationEvent = (event: RunObservationEvent) => {
     lines.push(`[${transition.severity}] ${transition.message}`)
   }
   lines.push(`state: ${event.snapshot.state}`)
+  if (event.snapshot.opencodeBlockedKind) lines.push(`opencode blocked: ${event.snapshot.opencodeBlockedKind}`)
+  if (event.snapshot.opencodeStallSeverity) lines.push(`opencode stall: ${event.snapshot.opencodeStallSeverity}`)
   lines.push(`evidence: ${event.snapshot.evidenceLevel}`)
   lines.push(`PR eligible: ${event.snapshot.prEligible ? "yes" : "no"}`)
   if (event.snapshot.recommendedAction) {

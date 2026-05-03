@@ -82,6 +82,13 @@ describe("orchestrator operator request parsing", () => {
     })
   })
 
+  test("parses manual takeover requests", () => {
+    expect(parseOperatorRequest("take over builder-01-task-a")).toEqual({
+      kind: "takeover",
+      runId: "builder-01-task-a",
+    })
+  })
+
   test("status dispatch uses operator runtime status", async () => {
     const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
     const result = await dispatchOperatorRequest(app, "status")

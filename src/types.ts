@@ -623,6 +623,19 @@ export type TaskRunRecord = {
   phases: TaskRunPhase[]
   result?: LaunchResult
   error?: string
+  manualTakeover?: {
+    version: 1
+    requestedAt: string
+    releasedAt?: string
+    previousState: TaskState
+    reason?: string
+    handoffFile?: string
+    contextId?: string
+    contextHeld: boolean
+    stoppedManagedWorker: boolean
+    releasedPriorLease?: boolean
+    command: string[]
+  }
 }
 
 export type AgentRuntimeState = {

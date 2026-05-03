@@ -125,6 +125,8 @@ describe("worker prompt contracts", () => {
     expect(prompt).toContain("`Verification`")
     expect(prompt).toContain("needs-review")
     expect(prompt).toContain("normal PR publication is blocked until evidence is strong")
+    expect(prompt).toContain("Do not inspect or reason about orchestrator runtime internals")
+    expect(prompt).toContain("Do not ask interactive questions during unattended worker execution")
     expect(prompt).not.toContain("Local app URL")
   })
 

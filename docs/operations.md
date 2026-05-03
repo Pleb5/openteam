@@ -201,6 +201,8 @@ Web runs also separate `workerState` from `verificationState`.
 `verificationState: "failed"` with `failureCategory: "dev-server-unhealthy"` means the task phase completed but the dev server could not be verified at the end of the run.
 Use `runs show --raw` only when you need the unmodified run record.
 Use `runs diagnose` for detailed evidence when a worker appears idle, its logs stop moving, or its dev URL is unreachable.
+Diagnosis separates OpenCode worker progress from dev-server health: a healthy dev URL does not prove the worker is still progressing.
+If diagnosis reports `opencode stall`, `opencode blocked`, or a stale OpenCode log age, treat it as a worker/runtime concern even when the browser URL is healthy.
 Use `runs evidence` for the operator-facing evidence contract summary: done contract, required evidence, missing evidence, grouped verification results, artifacts, PR eligibility, and recommended next action.
 Use `runs observe` for a compact single-run observation snapshot: effective state, active phase, live PID signals, dev URL health, evidence level, PR eligibility, and recommended action.
 Use `runs watch` to poll recent runs and print only transitions; the long-running orchestrator service runs the same observer and persists state to `runtime/orchestrator/observations.json`.
@@ -227,6 +229,7 @@ Worker process policy:
 - when publishing an upstream PR from an orchestrator-owned fork, `openteam repo publish pr ...` infers source fork `clone` URLs and repo owner/maintainer `p` recipients from `.openteam/repo-context.json`
 - Normal `repo publish pr` and `repo publish pr-update` require strong evidence from the active run/checkout; use `--draft` or `--wip` only when incomplete verification is intentional
 - workers should treat GUI openers, system package installs, writes outside checkout/runtime, and broad destructive cleanup as blockers unless explicitly authorized
+- non-orchestrator workers should not ask interactive questions or inspect orchestrator lifecycle internals such as stale cleanup, continuation gates, worker stopping, repo-context lease release, or `runtime/runs`; see `docs/opencode-runtime-behavior-plan.md`
 
 Inspect or attach to a worker browser context:
 

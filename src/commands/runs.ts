@@ -3,7 +3,7 @@ import {readFile, readdir, stat, writeFile} from "node:fs/promises"
 import path from "node:path"
 import {prepareAgent} from "../config.js"
 import {evaluateEvidencePolicy, evidenceLevel, groupEvidenceResults, verificationFailuresBlockTask} from "../evidence-policy.js"
-import {detectOpenCodeHardFailure, detectWorkerVerificationBlockers} from "../opencode-log.js"
+import {detectOpenCodeBlockedState, detectOpenCodeHardFailure, detectWorkerVerificationBlockers, lastMeaningfulLogLine} from "../opencode-log.js"
 import {loadRepoRegistry, releaseRepoContext} from "../repo.js"
 import {evaluateRunRecord, type RunEvalResult} from "../run-evals.js"
 import type {AgentRuntimeState, AppCfg, TaskRunRecord} from "../types.js"
@@ -129,12 +129,14 @@ export const readRunRecord = async (app: AppCfg, id: string) => {
   return readJsonFile<TaskRunRecord>(file)
 }
 
-const writeRunRecord = async (record: TaskRunRecord) => {
+export const writeRunRecord = async (record: TaskRunRecord) => {
   await writeFile(record.runFile, `${JSON.stringify(record, null, 2)}\n`)
 }
 
 const nowIso = () => new Date().toISOString()
 const STALE_NO_ACTIVITY_MS = 10 * 60_000
+const OPENCODE_IDLE_WARNING_MS = 10 * 60_000
+const OPENCODE_IDLE_CRITICAL_MS = 30 * 60_000
 
 export type StaleFailureCategory =
   | "worker-stale-no-process"
@@ -179,6 +181,25 @@ const logInfo = async (file?: string) => {
     modifiedAt: info.mtime.toISOString(),
     ageMs: Date.now() - info.mtimeMs,
   }
+}
+
+const opencodeProgressInfo = async (file?: string, fallbackStartedAt?: string) => {
+  const info = await logInfo(file)
+  const text = file && existsSync(file) ? await readFile(file, "utf8").catch(() => "") : ""
+  const ageMs = info?.ageMs ?? (fallbackStartedAt ? Math.max(0, Date.now() - Date.parse(fallbackStartedAt)) : undefined)
+  return {
+    ...info,
+    ageMs,
+    blocked: text ? detectOpenCodeBlockedState(text) : undefined,
+    lastLine: text ? lastMeaningfulLogLine(text) : undefined,
+  }
+}
+
+const phaseDurationMs = (phase?: {startedAt?: string; finishedAt?: string}) => {
+  if (!phase?.startedAt) return undefined
+  const end = phase.finishedAt ? Date.parse(phase.finishedAt) : Date.now()
+  const start = Date.parse(phase.startedAt)
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : undefined
 }
 
 const opencodeHardFailure = async (file?: string) => {
@@ -226,9 +247,19 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
     provision: await logInfo(record.logs?.provision),
     dev: await logInfo(record.logs?.dev),
   }
+  const opencodeProgress = await opencodeProgressInfo(record.logs?.opencode, runningPhase?.startedAt ?? record.startedAt)
   const hardFailure = await opencodeHardFailure(record.logs?.opencode)
   const verificationBlockers = await workerVerificationBlockers(record.logs?.opencode)
   const newestLogAgeMs = Math.min(...Object.values(logs).map(item => item?.ageMs).filter((age): age is number => typeof age === "number"))
+  const activePhaseDurationMs = phaseDurationMs(runningPhase)
+  const opencodeIdleMs = opencodeProgress.ageMs
+  const opencodeStallSeverity: "warning" | "critical" | undefined = record.state === "running" && runningPhase?.name === "opencode-worker" && !opencodeProgress.blocked && typeof opencodeIdleMs === "number"
+    ? opencodeIdleMs >= OPENCODE_IDLE_CRITICAL_MS
+      ? "critical"
+      : opencodeIdleMs >= OPENCODE_IDLE_WARNING_MS
+        ? "warning"
+        : undefined
+    : undefined
   const runAgeMs = Math.max(0, Date.now() - Date.parse(record.startedAt))
   const recentActivity = Number.isFinite(newestLogAgeMs)
     ? newestLogAgeMs < STALE_NO_ACTIVITY_MS
@@ -259,6 +290,12 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
 
     if ((record.mode === "web" || record.browser?.url) && !health.ok) {
       reasons.push("run advertises a browser/dev URL but the URL is not healthy")
+    }
+
+    if (runningPhase?.name === "opencode-worker" && opencodeProgress.blocked) {
+      reasons.push(`${opencodeProgress.blocked.reason}: ${opencodeProgress.blocked.evidence}`)
+    } else if (runningPhase?.name === "opencode-worker" && opencodeStallSeverity) {
+      reasons.push(`OpenCode worker has no output for ${Math.round((opencodeIdleMs ?? 0) / 60_000)} minutes while the run is still active`)
     }
   }
 
@@ -316,6 +353,7 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
     staleFailureCategory,
     reasons,
     activePhase: runningPhase,
+    activePhaseDurationMs,
     process: processes,
     knownPids,
     anyPidAlive,
@@ -323,6 +361,16 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
     anyTaskPidAlive,
     newestLogAgeMs: Number.isFinite(newestLogAgeMs) ? newestLogAgeMs : undefined,
     staleNoActivityMs: STALE_NO_ACTIVITY_MS,
+    opencodeProgress: {
+      logAgeMs: opencodeProgress.ageMs,
+      logSize: opencodeProgress.size,
+      logModifiedAt: opencodeProgress.modifiedAt,
+      lastLine: opencodeProgress.lastLine,
+      blocked: opencodeProgress.blocked,
+      stallSeverity: opencodeStallSeverity,
+      idleWarningMs: OPENCODE_IDLE_WARNING_MS,
+      idleCriticalMs: OPENCODE_IDLE_CRITICAL_MS,
+    },
     devServer: {
       ...record.devServer,
       health,
@@ -338,6 +386,7 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
     verificationBlockers,
     verification: record.verification,
     browser: record.browser,
+    manualTakeover: record.manualTakeover,
     context: context ? {
       id: context.id,
       state: context.state,
@@ -425,6 +474,8 @@ export const compactDiagnosis = (diagnosis?: RunDiagnosis) => diagnosis ? {
   knownPids: diagnosis.knownPids,
   knownTaskPids: diagnosis.knownTaskPids,
   newestLogAgeMs: diagnosis.newestLogAgeMs,
+  activePhaseDurationMs: diagnosis.activePhaseDurationMs,
+  opencodeProgress: diagnosis.opencodeProgress,
   devUrl: diagnosis.devServer.health.url,
   devUrlHealthy: diagnosis.devServer.health.ok,
   devUrlError: diagnosis.devServer.health.error,
@@ -476,6 +527,9 @@ const runListView = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
       anyTaskPidAlive: compact.anyTaskPidAlive,
       devUrlHealthy: compact.devUrlHealthy,
       newestLogAgeMs: compact.newestLogAgeMs,
+      opencodeLogAgeMs: compact.opencodeProgress.logAgeMs,
+      opencodeStallSeverity: compact.opencodeProgress.stallSeverity,
+      opencodeBlockedKind: compact.opencodeProgress.blocked?.kind,
     } : undefined,
     agentId: record.agentId,
     baseAgentId: record.baseAgentId,
@@ -492,6 +546,12 @@ const runListView = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
     startedAt: record.startedAt,
     finishedAt: record.finishedAt,
     durationMs: record.durationMs,
+    manualTakeover: record.manualTakeover ? {
+      requestedAt: record.manualTakeover.requestedAt,
+      releasedAt: record.manualTakeover.releasedAt,
+      contextHeld: record.manualTakeover.contextHeld,
+      handoffFile: record.manualTakeover.handoffFile,
+    } : undefined,
     contextId: record.context?.id,
     devEnv: record.devEnv?.kind,
     devEnvSource: record.devEnv?.source,
@@ -525,8 +585,12 @@ const printDiagnosis = (diagnosis: Awaited<ReturnType<typeof diagnoseRun>>) => {
   console.log(`stale: ${diagnosis.stale ? "yes" : "no"}`)
   if (diagnosis.staleFailureCategory) console.log(`stale category: ${diagnosis.staleFailureCategory}`)
   console.log(`active phase: ${diagnosis.activePhase?.name ?? "(none)"}`)
+  if (diagnosis.activePhaseDurationMs !== undefined) console.log(`active phase duration ms: ${diagnosis.activePhaseDurationMs}`)
   console.log(`any pid alive: ${diagnosis.anyPidAlive ? "yes" : "no"}`)
   console.log(`any task pid alive: ${diagnosis.anyTaskPidAlive ? "yes" : "no"}`)
+  if (diagnosis.opencodeProgress.logAgeMs !== undefined) console.log(`opencode log age ms: ${diagnosis.opencodeProgress.logAgeMs}`)
+  if (diagnosis.opencodeProgress.stallSeverity) console.log(`opencode stall: ${diagnosis.opencodeProgress.stallSeverity}`)
+  if (diagnosis.opencodeProgress.blocked) console.log(`opencode blocked: ${diagnosis.opencodeProgress.blocked.kind} (${diagnosis.opencodeProgress.blocked.reason})`)
   console.log(`dev url: ${diagnosis.devServer.health.url ?? "(none)"}`)
   console.log(`dev health: ${diagnosis.devServer.health.ok ? "ok" : "down"}${diagnosis.devServer.health.error ? ` (${diagnosis.devServer.health.error})` : ""}`)
   if (diagnosis.provision.state) console.log(`provision: ${diagnosis.provision.state}${diagnosis.provision.failureCategory ? ` (${diagnosis.provision.failureCategory})` : ""}`)
@@ -541,6 +605,10 @@ const printDiagnosis = (diagnosis: Awaited<ReturnType<typeof diagnoseRun>>) => {
     console.log(`verification result: ${result.id} ${result.state}${details ? ` (${details})` : ""}`)
   }
   console.log(`context: ${diagnosis.context ? `${diagnosis.context.id} ${diagnosis.context.state}` : "(none)"}`)
+  if (diagnosis.manualTakeover) {
+    console.log(`manual takeover: ${diagnosis.manualTakeover.contextHeld ? "held" : "not held"}`)
+    if (diagnosis.manualTakeover.handoffFile) console.log(`manual handoff: ${diagnosis.manualTakeover.handoffFile}`)
+  }
   for (const reason of diagnosis.reasons) {
     console.log(`reason: ${reason}`)
   }

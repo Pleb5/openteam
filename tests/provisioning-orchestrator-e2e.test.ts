@@ -1104,6 +1104,29 @@ describe("Round 6 - observations and DM reporting policy", () => {
     expect(second.report).toContain("dev-server-unhealthy")
   })
 
+  test("DM policy reports critical OpenCode blockers while run is non-terminal", async () => {
+    const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
+    const record = runRecord(app, {process: {runnerPid: process.pid, opencodePid: process.pid}})
+    await writeRun(record)
+    const snapshot: RunObservationSnapshot = {
+      ...await observeRun(app, record.runId),
+      opencodeBlockedKind: "permission",
+      opencodeBlockedReason: "OpenCode requested a permission decision",
+      opencodeLogAgeMs: 60_000,
+      opencodeLastLine: "permission requested: external_directory",
+    }
+    const state = emptyDmReportState(app)
+
+    const decision = applyObservationReportPolicy(
+      state,
+      observationEvent(snapshot, "opencodeBlockedKind", undefined, "permission", "critical"),
+      app.config.reporting,
+    )
+
+    expect(decision.report).toContain("opencode-permission-blocked")
+    expect(decision.report).toContain("opencode idle")
+  })
+
   test("digest mode throttles repeated warning observations", async () => {
     const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
     app.config.reporting.dmObservationMode = "digest"

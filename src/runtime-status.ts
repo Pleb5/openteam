@@ -2,6 +2,7 @@ import {existsSync} from "node:fs"
 import {mkdir, readFile, writeFile} from "node:fs/promises"
 import path from "node:path"
 import {loadRepoRegistry} from "./repo.js"
+import {isOperatorTakeoverLease} from "./repo.js"
 import {listWorkers} from "./supervisor.js"
 import type {AppCfg, RepoContext} from "./types.js"
 import {recentRunRecords, summarizeRuns} from "./commands/runs.js"
@@ -32,6 +33,12 @@ export type RuntimeStatus = {
   }
   leases: {
     leased: number
+    operatorHeld: number
+    operatorHeldContexts: Array<{
+      id: string
+      repoKey: string
+      jobId?: string
+    }>
     stale: number
     staleContexts: Array<{
       id: string
@@ -77,6 +84,7 @@ const staleLeaseSummaries = (
 
   return contexts
     .filter(context => context.state === "leased")
+    .filter(context => !isOperatorTakeoverLease(context.lease))
     .map(context => {
       const expected = `${context.lease?.workerId ?? ""}:${context.lease?.jobId ?? ""}:${context.id}`
       return {context, active: active.has(expected)}
@@ -108,6 +116,7 @@ export const buildRuntimeStatus = async (
   const liveWorkers = workers.filter(worker => worker.running)
   const contexts = Object.values(registry.contexts)
   const leasedContexts = contexts.filter(context => context.state === "leased")
+  const operatorHeldContexts = leasedContexts.filter(context => isOperatorTakeoverLease(context.lease))
   const staleContexts = staleLeaseSummaries(leasedContexts, recentRecords.map(({record}) => {
     const summary = summariesByRunId.get(record.runId)
     return {
@@ -145,6 +154,12 @@ export const buildRuntimeStatus = async (
     },
     leases: {
       leased: leasedContexts.length,
+      operatorHeld: operatorHeldContexts.length,
+      operatorHeldContexts: operatorHeldContexts.map(context => ({
+        id: context.id,
+        repoKey: context.repoKey,
+        jobId: context.lease?.jobId,
+      })),
       stale: staleContexts.length,
       staleContexts,
     },
