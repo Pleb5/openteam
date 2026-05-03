@@ -23,7 +23,7 @@ import {selectOpencodePrimaryAgent, writeOpencodeManagedAgents} from "./opencode
 import {detectOpenCodeHardFailure} from "./opencode-log.js"
 import {dispatchOperatorRequest, type DispatchContext} from "./orchestrator.js"
 import {detectProjectProfile, writeProjectProfile, type ProjectProfile} from "./project-profile.js"
-import {writeRepoPublishContext} from "./repo-publish.js"
+import {writeRepoPublishContext, type RepoPublishScope} from "./repo-publish.js"
 import {
   applyObservationReportPolicy,
   buildDueObservationDigest,
@@ -67,6 +67,10 @@ import type {AppCfg, LaunchResult, PreparedAgent, TaskItem, AgentRuntimeState, P
 type AgentRuntime = {
   bunker?: RunningBunker
 }
+
+export const defaultRepoPublishScope = (
+  resolved: Pick<ResolvedRepoTarget, "upstreamIdentity">,
+): RepoPublishScope => resolved.upstreamIdentity ? "upstream" : "repo"
 
 const slug = (value: string) => {
   return value
@@ -1582,7 +1586,10 @@ export const runTask = async (
     )
     agent = {...base, repo: resolved.repo}
     const repoPolicy = resolveRepoRelayPolicy(app, resolved.identity, {target: item.target})
-    const defaultPublishScope = item.source?.kind === "repo-event" && resolved.upstreamIdentity ? "upstream" : "repo"
+    const defaultPublishScope = defaultRepoPublishScope(resolved)
+    const publishPolicy = defaultPublishScope === "upstream" && resolved.upstreamIdentity
+      ? resolveRepoRelayPolicy(app, resolved.upstreamIdentity, {target: item.target})
+      : repoPolicy
     const mode = resolved.context.mode
     const checkout = resolved.context.checkout
     const branch = resolved.context.branch
@@ -1701,7 +1708,7 @@ export const runTask = async (
       item,
       runRecord,
       resolved,
-      repoPolicy,
+      repoPolicy: publishPolicy,
       defaultPublishScope,
       devEnv,
       projectProfile,
@@ -1936,7 +1943,7 @@ export const runTask = async (
       await mergeState(agent, {taskManifest: taskManifestFile})
 
       try {
-        const prompt = buildWebWorkerPrompt(agent, item.task, dev.url, effectiveRuntime, repoPolicy, defaultPublishScope, devEnv, projectProfile, doneContract, item.continuation, resolvedSubject)
+        const prompt = buildWebWorkerPrompt(agent, item.task, dev.url, effectiveRuntime, publishPolicy, defaultPublishScope, devEnv, projectProfile, doneContract, item.continuation, resolvedSubject)
         const session = await runPhase(
           runRecord,
           "opencode-worker",
@@ -2045,7 +2052,7 @@ export const runTask = async (
       )
       await updateRunRecord(runRecord, {taskManifestPath: taskManifestFile})
       await mergeState(agent, {taskManifest: taskManifestFile})
-      const prompt = buildCodeWorkerPrompt(agent, item.task, repoPolicy, defaultPublishScope, devEnv, projectProfile, doneContract, item.continuation, resolvedSubject)
+      const prompt = buildCodeWorkerPrompt(agent, item.task, publishPolicy, defaultPublishScope, devEnv, projectProfile, doneContract, item.continuation, resolvedSubject)
       const session = await runPhase(
         runRecord,
         "opencode-worker",

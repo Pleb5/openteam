@@ -23,6 +23,7 @@ import {
   assertVerificationToolingReady,
   categorizeProvisioningFailure,
   checkoutRuntimeEnv,
+  defaultRepoPublishScope,
   provisionWorkerControlCommand,
   writeCheckoutToolShims,
 } from "../src/launcher.js"
@@ -427,6 +428,27 @@ describe("Round 1 - repo identity and fork planning", () => {
 })
 
 describe("Round 2 - repo context leasing and provisioning handoff", () => {
+  test("defaults fork-backed publication to the upstream repo for local work", async () => {
+    const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
+    const upstream = identity({
+      key: repoKey(upstreamPubkey, "repo"),
+      ownerPubkey: upstreamPubkey,
+      ownerNpub: upstreamNpub,
+      cloneUrls: ["https://git.example.com/upstream/repo.git"],
+    })
+    const fork = identity({cloneUrls: ["https://git.example.com/openteam/repo.git"]})
+    const resolved = {
+      repo: app.config.repos.app,
+      identity: fork,
+      upstreamIdentity: upstream,
+      context: leasedContext(app.config.runtimeRoot, {repoKey: fork.key}),
+      target: "repo",
+    }
+
+    expect(defaultRepoPublishScope(resolved)).toBe("upstream")
+    expect(defaultRepoPublishScope({...resolved, upstreamIdentity: undefined})).toBe("repo")
+  })
+
   test("resolves a cached Nostr repo into a leased checkout", async () => {
     const {app} = await appWithSeededRepo()
     const agent = await prepareAgent(app, "builder-01")
@@ -525,6 +547,55 @@ describe("Round 2 - repo context leasing and provisioning handoff", () => {
       target: "repo",
       mode: "code",
     })).rejects.toThrow("is busy")
+  })
+
+  test("resolves an orchestrator fork key with its upstream context", async () => {
+    const {app, root} = await appWithSeededRepo()
+    const agent = await prepareAgent(app, "builder-01")
+    const upstream = identity({
+      key: repoKey(upstreamPubkey, "repo"),
+      ownerPubkey: upstreamPubkey,
+      ownerNpub: upstreamNpub,
+      cloneUrls: [root],
+      rawTags: [["d", "repo"], ["clone", root]],
+    })
+    const fork = identity({cloneUrls: [root], sourceHint: "fork-target", rawTags: [["d", "repo"], ["clone", root]]})
+    await writeRegistry(app, {
+      version: 1,
+      repos: {[upstream.key]: upstream, [fork.key]: fork},
+      forks: {
+        [upstream.key]: {
+          upstreamKey: upstream.key,
+          forkKey: fork.key,
+          ownerPubkey: fork.ownerPubkey,
+          ownerNpub: fork.ownerNpub,
+          forkIdentifier: fork.identifier,
+          forkAnnouncementEventId: fork.announcementEventId,
+          upstreamCloneUrl: root,
+          forkCloneUrl: root,
+          forkCloneUrls: [root],
+          provider: "announced",
+          createdAt: "2026-04-25T00:00:00.000Z",
+          updatedAt: "2026-04-25T00:00:00.000Z",
+        },
+      },
+      contexts: {},
+    })
+
+    const resolved = await resolveRepoTarget(app, agent, {
+      id: "task-fork-key",
+      task: "fix from fork key",
+      createdAt: "",
+      state: "queued",
+      agentId: "builder-01",
+      target: "fork-target",
+      mode: "code",
+    })
+
+    expect(resolved.identity.key).toBe(fork.key)
+    expect(resolved.upstreamIdentity?.key).toBe(upstream.key)
+    expect(resolved.context.upstreamRepoKey).toBe(upstream.key)
+    expect(defaultRepoPublishScope(resolved)).toBe("upstream")
   })
 
   test("different requested mode does not reuse an otherwise idle context", async () => {
@@ -655,6 +726,75 @@ describe("Round 2 - repo context leasing and provisioning handoff", () => {
         createdAt: "",
       },
     })).rejects.toThrow("was created for web mode")
+  })
+
+  test("continuation restores upstream context for legacy fork-only contexts", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    const app = makeApp(runtimeRoot)
+    const upstream = identity({
+      key: repoKey(upstreamPubkey, "repo"),
+      ownerPubkey: upstreamPubkey,
+      ownerNpub: upstreamNpub,
+      cloneUrls: [checkout],
+    })
+    const fork = identity({cloneUrls: [checkout]})
+    await writeRegistry(app, {
+      version: 1,
+      repos: {[upstream.key]: upstream, [fork.key]: fork},
+      forks: {
+        [upstream.key]: {
+          upstreamKey: upstream.key,
+          forkKey: fork.key,
+          ownerPubkey: fork.ownerPubkey,
+          ownerNpub: fork.ownerNpub,
+          forkIdentifier: fork.identifier,
+          forkAnnouncementEventId: fork.announcementEventId,
+          upstreamCloneUrl: checkout,
+          forkCloneUrl: checkout,
+          forkCloneUrls: [checkout],
+          provider: "announced",
+          createdAt: "2026-04-25T00:00:00.000Z",
+          updatedAt: "2026-04-25T00:00:00.000Z",
+        },
+      },
+      contexts: {
+        ctx1: leasedContext(checkout, {
+          state: "idle",
+          lease: undefined,
+          repoKey: fork.key,
+          upstreamRepoKey: undefined,
+        }),
+      },
+    })
+    const agent = await prepareAgent(app, "builder-01")
+
+    const resolved = await resolveRepoTarget(app, agent, {
+      id: "task-b",
+      task: "continue",
+      createdAt: "",
+      state: "queued",
+      agentId: "builder-01",
+      mode: "code",
+      continuation: {
+        version: 1,
+        kind: "continue",
+        fromRunId: "builder-01-task-a",
+        contextId: "ctx1",
+        priorState: "needs-review",
+        missingEvidence: [],
+        prBlockers: [],
+        carryEvidence: false,
+        evidenceResults: [],
+        createdAt: "",
+      },
+    })
+
+    expect(resolved.identity.key).toBe(fork.key)
+    expect(resolved.upstreamIdentity?.key).toBe(upstream.key)
+    expect(resolved.context.upstreamRepoKey).toBe(upstream.key)
+    expect(defaultRepoPublishScope(resolved)).toBe("upstream")
   })
 })
 

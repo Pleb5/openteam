@@ -188,6 +188,17 @@ describe("repo publish event builders", () => {
     expect(upstreamPullRequestNeedsClone(target)).toBe(true)
     expect(pullRequestCloneUrlsForTarget(target)).toEqual(["https://example.com/openteam/repo.git"])
     expect(pullRequestCloneUrlsForTarget(target, ["https://override.example.com/repo.git"])).toEqual(["https://override.example.com/repo.git"])
+
+    const pr = buildPullRequestEvent({
+      repoAddr: target.identity.key,
+      subject: "Fix upstream bug",
+      tipCommitOid: "tip789",
+      clone: pullRequestCloneUrlsForTarget(target),
+      targetBranch: "main",
+    })
+
+    expect(hasTag(pr.tags ?? [], ["a", "30617:upstream-owner:repo"])).toBe(true)
+    expect(hasTag(pr.tags ?? [], ["clone", "https://example.com/openteam/repo.git"])).toBe(true)
   })
 
   test("infers repo owner and maintainers as PR recipients", () => {

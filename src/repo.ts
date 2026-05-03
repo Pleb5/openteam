@@ -973,6 +973,13 @@ const forkRecord = (
   updatedAt: now(),
 })
 
+const upstreamForKnownFork = (registry: RepoRegistry, identity: RepoIdentity) => {
+  const fork = Object.values(registry.forks).find(item => item.forkKey === identity.key)
+  if (!fork) return {}
+  const upstream = registry.repos[fork.upstreamKey]
+  return {fork, upstream}
+}
+
 const publishForkAnnouncement = async (
   app: AppCfg,
   upstream: RepoIdentity,
@@ -1488,13 +1495,13 @@ const resolveContinuationContext = async (
   if (!identity) {
     throw new Error(`continuation context ${contextId} references unknown repo ${context.repoKey}`)
   }
-  const upstreamIdentity = context.upstreamRepoKey ? registry.repos[context.upstreamRepoKey] : undefined
-  if (context.upstreamRepoKey && !upstreamIdentity) {
-    throw new Error(`continuation context ${contextId} references unknown upstream repo ${context.upstreamRepoKey}`)
+  const knownFork = upstreamForKnownFork(registry, identity)
+  const inferredUpstreamKey = context.upstreamRepoKey ?? knownFork.fork?.upstreamKey
+  const upstreamIdentity = inferredUpstreamKey ? registry.repos[inferredUpstreamKey] : undefined
+  if (inferredUpstreamKey && !upstreamIdentity) {
+    throw new Error(`continuation context ${contextId} references unknown upstream repo ${inferredUpstreamKey}`)
   }
-  const fork = context.upstreamRepoKey
-    ? registry.forks[context.upstreamRepoKey]
-    : Object.values(registry.forks).find(item => item.forkKey === identity.key)
+  const fork = inferredUpstreamKey ? registry.forks[inferredUpstreamKey] : knownFork.fork
   const remoteUrls = uniq([
     ...(fork?.forkCloneUrls ?? []),
     ...(fork?.forkCloneUrl ? [fork.forkCloneUrl] : []),
@@ -1503,7 +1510,9 @@ const resolveContinuationContext = async (
   ])
   await configureContextGitAuth(app, context.checkout, remoteUrls, fork?.authUsername)
 
-  const leased = lease(context, agent, item, context.mode)
+  const leased = lease(upstreamIdentity && !context.upstreamRepoKey
+    ? {...context, upstreamRepoKey: upstreamIdentity.key}
+    : context, agent, item, context.mode)
   registry.contexts[context.id] = leased
   registry.repos[identity.key] = identity
   if (upstreamIdentity) registry.repos[upstreamIdentity.key] = upstreamIdentity
@@ -1535,7 +1544,11 @@ export const resolveRepoTarget = async (
     if (continuation) return continuation
 
     const mode = item.mode ?? profile.profile.mode ?? "web"
-    const upstreamIdentity = await resolveRepoIdentity(app, profile)
+    let upstreamIdentity = await resolveRepoIdentity(app, profile)
+    const knownFork = upstreamForKnownFork(registry, upstreamIdentity)
+    if (knownFork.upstream) {
+      upstreamIdentity = knownFork.upstream
+    }
     const upstreamSources = cloneSources(upstreamIdentity, profile.hint)
     const upstreamMirror = await ensureMirrorFromSources(app, upstreamIdentity, upstreamSources)
     const upstreamSource = upstreamMirror.source
