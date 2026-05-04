@@ -70,6 +70,7 @@ const hasBrowserEvidence = (results: VerificationRunnerResult[], contract?: Done
     result.evidenceType === "browser" ||
     result.id === "browser" ||
     result.kind === "playwright-mcp" ||
+    result.kind === "browser-cli" ||
     hasText(result, /\b(browser|playwright|ui|screen|visual|page|flow)\b/i),
   )
 
@@ -87,7 +88,7 @@ const taskClass = (contract?: DoneContract) => contract?.taskClass ?? "general"
 export const evidenceGroupForResult = (result: VerificationRunnerResult): EvidenceGroup => {
   if (result.evidenceType) return result.evidenceType
   if (result.id === "repo-native") return "repo-native"
-  if (result.kind === "playwright-mcp" || result.id === "browser") return "browser"
+  if (result.kind === "playwright-mcp" || result.kind === "browser-cli" || result.id === "browser") return "browser"
   if (result.kind === "desktop-command") return "desktop"
   if (result.kind === "android-adb" || result.kind === "ios-simulator") return "mobile"
   if (result.eventIds?.length || hasText(result, /\b(nevent|naddr|nostr|relay|event id)\b/i)) return "nostr"

@@ -341,7 +341,7 @@ const capabilityIssues = (app: AppCfg, options: ConfigValidationOptions) => {
 const verificationIssues = (app: AppCfg) => {
   const issues: ConfigValidationIssue[] = []
   const config = effectiveVerificationConfig(app)
-  const validKinds = new Set(["command", "playwright-mcp", "desktop-command", "android-adb", "ios-simulator"])
+  const validKinds = new Set(["command", "playwright-mcp", "browser-cli", "desktop-command", "android-adb", "ios-simulator"])
   const validModes = new Set(["code", "web"])
 
   if (config.autoRunAfterWorker !== undefined && typeof config.autoRunAfterWorker !== "boolean") {
@@ -374,6 +374,32 @@ const verificationIssues = (app: AppCfg) => {
     if (runner.kind === "playwright-mcp" && runner.enabled && app.config.browser.mcp.command.length === 0) {
       issues.push(issue("warning", "verification-browser-runner-unavailable", `verification runner '${id}' is enabled but browser.mcp.command is not configured`))
     }
+    if (runner.kind === "browser-cli" && runner.enabled && !runner.command?.length) {
+      issues.push(issue("warning", "verification-browser-cli-runner-unavailable", `verification runner '${id}' is enabled but has no command configured`))
+    }
+  }
+
+  return issues
+}
+
+const browserToolIssues = (app: AppCfg) => {
+  const issues: ConfigValidationIssue[] = []
+  const tools = app.config.browser.agentBrowserTools
+  if (!tools) return issues
+
+  if (tools.enabled !== undefined && typeof tools.enabled !== "boolean") {
+    issues.push(issue("error", "agent-browser-tools-enabled-invalid", "browser.agentBrowserTools.enabled must be boolean"))
+  }
+  if (tools.command !== undefined && (!tools.command || typeof tools.command !== "string")) {
+    issues.push(issue("error", "agent-browser-tools-command-invalid", "browser.agentBrowserTools.command must be a non-empty string"))
+  }
+  if (tools.maxOutputChars !== undefined && (!Number.isFinite(tools.maxOutputChars) || tools.maxOutputChars <= 0)) {
+    issues.push(issue("error", "agent-browser-tools-max-output-invalid", "browser.agentBrowserTools.maxOutputChars must be a positive number"))
+  }
+  for (const domain of tools.allowedDomains ?? []) {
+    if (!domain || /\s/.test(domain)) {
+      issues.push(issue("error", "agent-browser-tools-domain-invalid", `browser.agentBrowserTools.allowedDomains contains invalid domain '${domain}'`))
+    }
   }
 
   return issues
@@ -390,6 +416,7 @@ export const validateAppConfig = (app: AppCfg, options: ConfigValidationOptions 
     ...forkIssues(app, options),
     ...capabilityIssues(app, options),
     ...verificationIssues(app),
+    ...browserToolIssues(app),
   ]
 
   return {

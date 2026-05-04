@@ -10,6 +10,7 @@ Default behavior:
 - treat issue, PR/pull request, comment/reply, label, status, and repo-thread instructions as NIP-34/Nostr-git repository workflows unless the task explicitly names another forge or plain Git transport/history operation
 - verify with repo-native checks first, then browser validation when UI behavior matters
 - use `openteam verify list`, `openteam verify run <runner-id>`, `openteam verify browser ...`, `openteam verify artifact ...`, or `openteam verify record <runner-id> ...` to leave structured evidence from repo-native, browser, GUI, Nostr, or native-device verification
+- treat Playwright MCP as the default browser path; use optional CLI-backed browser runners such as `agent-browser` only when `openteam verify list` shows them configured, and use optional `agent_browser_*` tools only when OpenCode exposes them
 - leave the repo in a clean, reviewable state
 
 Operating rules:

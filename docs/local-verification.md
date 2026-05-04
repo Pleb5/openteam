@@ -30,6 +30,8 @@ The existing verification system already gives workers these capabilities:
 - generic artifact recording with `openteam verify artifact`
 - URL health checks for browser evidence when requested
 - Playwright MCP capability planning for web-mode browser validation
+- optional disabled-by-default `agent-browser` metadata for CLI-backed browser agents
+- optional disabled-by-default OpenCode `agent_browser_*` custom tools for step-by-step CLI-backed browser interaction
 - explicit `desktop-command` runner metadata for configured desktop smoke/build/test commands
 - guarded mobile-native runner blockers for Android ADB and iOS simulator, disabled by default
 - run evidence collection into run records after worker handoff
@@ -43,7 +45,7 @@ Current gaps:
 
 - CLI products are treated as repo-native commands, not as interactive software with terminal transcripts and behavioral assertions.
 - Desktop software can be represented by configured commands, but openteam does not yet manage a GUI session, capture window state, take desktop screenshots, or drive interactions.
-- Browser verification has a good agentic path through Playwright MCP, but equivalent CLI and desktop flows still need first-class worker commands.
+- Browser verification defaults to Playwright MCP. The optional `agent-browser` runner and `agent_browser_*` tools can execute the external `agent-browser` CLI, but neither is enabled by default and neither replaces the MCP path.
 - Mobile-native runners exist only as guardrails and are not part of the next focus.
 
 ## Phase 1: Runner Foundation
@@ -63,6 +65,8 @@ Default local runners:
 
 - `repo-native`: repo docs/scripts/project-profile driven checks; planned for code and web runs.
 - `browser`: local Playwright MCP browser validation; planned for web runs.
+- `agent-browser`: optional CLI-backed browser-agent verification; disabled by default, not in default web runners, and selected only when local config opts in.
+- `agent_browser_*`: optional OpenCode custom tools generated only when `browser.agentBrowserTools.enabled` is true, giving the worker a live tool-call path backed by the external `agent-browser` CLI.
 - `desktop-command`: enabled by default for detected desktop stacks, but only executes explicit configured commands.
 - `android-adb`: disabled by default; reserved for guarded local Android emulator/device verification.
 - `ios-simulator`: disabled by default; reserved for guarded local iOS simulator verification.
@@ -72,7 +76,7 @@ Execution evidence lives in `.openteam/verification-results.json`, run-record `v
 
 ## Phase 2: Local Runner Execution
 
-Status: implemented as worker-invoked local command execution, worker evidence recording, desktop command metadata, and guarded mobile-native blockers.
+Status: implemented as worker-invoked local command execution, worker evidence recording, optional browser-cli metadata, desktop command metadata, and guarded mobile-native blockers.
 
 Phase 2 makes local verification adapters available to workers through `openteam verify`:
 
@@ -81,14 +85,18 @@ Phase 2 makes local verification adapters available to workers through `openteam
 3. command runners run inside the detected dev environment, using the same Nix/dev-env wrapper as worker and provisioning processes.
 4. explicit configured runner commands take precedence; `repo-native` can fall back to the smallest project-profile command hint.
 5. `openteam verify record <runner-id> --state ... --note ...` lets workers record evidence from browser MCP, desktop GUI use, Nostr live-data checks, or other agentic verification they performed directly.
-6. `desktop-command` supports desktop software smoke/build/test flows that can run locally from explicit repo-native commands.
-7. `android-adb` and `ios-simulator` are guarded and disabled by default.
+6. `browser-cli` runner results are classified as browser evidence. The built-in `agent-browser` metadata is disabled unless local config enables it.
+7. `agent-browser` commands receive `OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR` and `OPENTEAM_AGENT_BROWSER_PROFILE_DIR`, both rooted under `.openteam/artifacts/verification/agent-browser`, so they do not reuse the Playwright MCP profile.
+8. When `browser.executablePath` is configured, openteam exposes it to the CLI as `AGENT_BROWSER_EXECUTABLE_PATH`; otherwise the external CLI may auto-detect Chrome/Chromium or use its installed Chrome for Testing.
+9. `desktop-command` supports desktop software smoke/build/test flows that can run locally from explicit repo-native commands.
+10. `android-adb` and `ios-simulator` are guarded and disabled by default.
 
 Worker-facing commands:
 
 ```bash
 openteam verify list
 openteam verify run repo-native
+openteam verify run agent-browser
 openteam verify browser --flow "repo grid light theme" --url "$OPENTEAM_DEV_URL" --screenshot .openteam/artifacts/playwright/repo-grid-light.png --dev-health
 openteam verify artifact .openteam/artifacts/nostr/comment.json --type nostr --runner repo-comment --event-id nevent1...
 openteam verify record browser --state succeeded --note "Verified login and repo creation in browser with worker Nostr account."
@@ -114,6 +122,44 @@ Automatic post-worker runner execution is an escape hatch, not the default archi
 
 The web-mode final dev-server health check remains a runtime sanity check.
 It is not a substitute for worker browser verification.
+
+Optional CLI-backed browser verification is configured locally, for example:
+
+```json
+{
+  "verification": {
+    "runners": {
+      "agent-browser": {
+        "enabled": true,
+        "environment": {
+          "AGENT_BROWSER_ALLOWED_DOMAINS": "127.0.0.1,localhost"
+        }
+      }
+    }
+  }
+}
+```
+
+Optional OpenCode custom tools are configured independently:
+
+```json
+{
+  "browser": {
+    "agentBrowserTools": {
+      "enabled": true,
+      "allowedDomains": ["127.0.0.1", "localhost"]
+    }
+  }
+}
+```
+
+When enabled, openteam writes `.opencode/tools/agent_browser.ts` into the managed checkout. OpenCode loads this as first-class tools such as `agent_browser_open`, `agent_browser_snapshot`, `agent_browser_click`, `agent_browser_fill`, `agent_browser_screenshot`, `agent_browser_console_messages`, `agent_browser_errors`, `agent_browser_close`, and `agent_browser_record_evidence`.
+These tools use the same checkout-local `.openteam/artifacts/verification/agent-browser` profile and artifact paths as the batch runner.
+
+The default disabled command uses the external `agent-browser` CLI to open `OPENTEAM_DEV_URL`, wait for network idle, capture an interactive JSON snapshot, screenshot, console messages, and page errors under `.openteam/artifacts/verification/agent-browser`, then close the browser.
+Install the CLI and run its own setup first, for example `npm install -g agent-browser` plus `agent-browser install`, or rely on an existing Chromium/Chrome by setting `browser.executablePath` or `AGENT_BROWSER_EXECUTABLE_PATH`.
+
+Do not add `agent-browser` to default web verification unless the local machine has opted in and the configured CLI is safe to run in the managed checkout.
 
 ## Phase 3: Evidence Gates and Publication Policy
 

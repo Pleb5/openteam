@@ -46,12 +46,14 @@ const workerSafetyLines = () => [
 const verificationInstructionLines = (input: {mode: "code" | "web"; url?: string}) => {
   const base = input.mode === "web"
     ? [
-      `Verification tools: run \`openteam verify list\` to inspect available capabilities, \`openteam verify run <runner-id>\` for configured local command/native checks, \`openteam verify browser --flow "..." --url "${input.url ?? ""}" --screenshot <path>\` for browser evidence, and \`openteam verify record <runner-id> --state succeeded --note "..."\` for GUI/Nostr/live-data evidence.`,
-      `Use the browser MCP if available to verify UI behavior before you claim success.`,
+      `Verification tools: run \`openteam verify list\` to inspect available capabilities, \`openteam verify run <runner-id>\` for configured local command/native/browser-cli checks, \`openteam verify browser --flow "..." --url "${input.url ?? ""}" --screenshot <path>\` for browser evidence, and \`openteam verify record <runner-id> --state succeeded --note "..."\` for GUI/Nostr/live-data evidence.`,
+      `Use Playwright MCP as the default browser path. If OpenCode exposes \`agent_browser_*\` tools, you may use them for step-by-step browser interaction through the external agent-browser CLI. If \`openteam verify list\` shows a configured \`browser-cli\` runner such as \`agent-browser\`, you may run it with \`openteam verify run agent-browser\`; both paths use .openteam/artifacts/verification/agent-browser for CLI browser artifacts/profile and record browser evidence.`,
       `When you use browser, desktop, mobile, Nostr, or repo-native verification, record concise evidence through \`openteam verify record\` or \`openteam verify run\` before returning success.`,
     ]
     : [
       `Verification tools: run \`openteam verify list\` to inspect available capabilities, \`openteam verify run <runner-id>\` for configured local command/native checks, \`openteam verify record <runner-id> --type <browser|nostr|desktop|mobile|manual> --state succeeded --note "..."\` for structured agentic evidence, and \`openteam verify artifact <path> --type <type>\` for artifacts.`,
+      `Configured \`browser-cli\` runners such as \`agent-browser\` are opt-in browser evidence; in code-first work, run them only when listed/configured and the task actually needs browser behavior.`,
+      `If OpenCode exposes \`agent_browser_*\` tools in a code-first task, use them only when browser behavior is directly relevant.`,
       `When you use repo-native, desktop, mobile, Nostr, or other verification, record concise evidence through \`openteam verify record\` or \`openteam verify run\` before returning success.`,
     ]
 

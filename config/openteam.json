@@ -9,6 +9,13 @@
   },
   "browser": {
     "headless": false,
+    "agentBrowserTools": {
+      "enabled": false,
+      "command": "agent-browser",
+      "allowedDomains": ["127.0.0.1", "localhost"],
+      "environment": {},
+      "maxOutputChars": 60000
+    },
     "mcp": {
       "name": "playwright",
       "command": [],
@@ -37,6 +44,20 @@
         "description": "Local Playwright MCP validation against the openteam-managed browser/dev-server runtime.",
         "modes": ["web"],
         "stacks": ["web", "node"]
+      },
+      "agent-browser": {
+        "kind": "browser-cli",
+        "enabled": false,
+        "local": true,
+        "description": "Optional CLI-backed agent-browser verification; opt in locally to run the external agent-browser CLI as browser evidence.",
+        "command": [
+          "sh",
+          "-c",
+          "test -n \"$OPENTEAM_DEV_URL\" && agent-browser --profile \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" --screenshot-dir \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR\" open \"$OPENTEAM_DEV_URL\" && agent-browser wait --load networkidle && agent-browser snapshot -i --json > \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/snapshot.json\" && agent-browser screenshot \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/page.png\" && agent-browser console --json > \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/console.json\" && agent-browser errors --json > \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/errors.json\" && agent-browser close"
+        ],
+        "modes": ["web"],
+        "stacks": ["web", "node"],
+        "artifactsDir": ".openteam/artifacts/verification/agent-browser"
       },
       "desktop-command": {
         "kind": "desktop-command",

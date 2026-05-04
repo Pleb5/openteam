@@ -20,6 +20,23 @@ type ProjectProfileLike = {
   stacks?: string[]
 }
 
+const VERIFICATION_ARTIFACTS_DIR = path.join(".openteam", "artifacts", "verification")
+const AGENT_BROWSER_ARTIFACTS_DIR = path.join(VERIFICATION_ARTIFACTS_DIR, "agent-browser")
+const AGENT_BROWSER_COMMAND = [
+  "sh",
+  "-c",
+  [
+    "test -n \"$OPENTEAM_DEV_URL\"",
+    "agent-browser --profile \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" --screenshot-dir \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR\" open \"$OPENTEAM_DEV_URL\"",
+    "agent-browser wait --load networkidle",
+    "agent-browser snapshot -i --json > \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/snapshot.json\"",
+    "agent-browser screenshot \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/page.png\"",
+    "agent-browser console --json > \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/console.json\"",
+    "agent-browser errors --json > \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/errors.json\"",
+    "agent-browser close",
+  ].join(" && "),
+]
+
 export const DEFAULT_VERIFICATION_CONFIG: VerificationCfg = {
   autoRunAfterWorker: false,
   defaultRunners: {
@@ -42,6 +59,16 @@ export const DEFAULT_VERIFICATION_CONFIG: VerificationCfg = {
       description: "Local Playwright MCP validation against the openteam-managed browser/dev-server runtime.",
       modes: ["web"],
       stacks: ["web", "node"],
+    },
+    "agent-browser": {
+      kind: "browser-cli",
+      enabled: false,
+      local: true,
+      description: "Optional CLI-backed agent-browser verification; opt in locally to run the external agent-browser CLI as browser evidence.",
+      command: AGENT_BROWSER_COMMAND,
+      modes: ["web"],
+      stacks: ["web", "node"],
+      artifactsDir: AGENT_BROWSER_ARTIFACTS_DIR,
     },
     "desktop-command": {
       kind: "desktop-command",
@@ -113,6 +140,9 @@ const runnerConfigured = (app: AppCfg, id: string, runner: VerificationRunnerCfg
   if (runner.kind === "playwright-mcp" && app.config.browser.mcp.command.length === 0) {
     return {configured: false, reason: "browser.mcp.command is not configured"}
   }
+  if (runner.kind === "browser-cli" && !runner.command?.length) {
+    return {configured: false, reason: "browser-cli runner requires an explicit command"}
+  }
   if (runner.kind === "command" && runner.command && runner.command.length === 0) {
     return {configured: false, reason: "command runner has an empty command"}
   }
@@ -160,7 +190,10 @@ export const createVerificationPlan = (
       description: runner.description,
       reason: availability.reason,
       command: runner.command,
-      environment: runner.environment,
+      environment: {
+        ...(runner.kind === "browser-cli" && app.config.browser.executablePath ? {AGENT_BROWSER_EXECUTABLE_PATH: app.config.browser.executablePath} : {}),
+        ...(runner.environment ?? {}),
+      },
       timeoutMs: runner.timeoutMs,
       modes: runnerModes(runner),
       stacks: runnerStacks(runner),
@@ -231,7 +264,7 @@ const now = () => new Date().toISOString()
 
 export const verificationEvidenceTypeForRunner = (runner: Pick<VerificationRunnerPlan, "id" | "kind">): VerificationEvidenceType => {
   if (runner.id === "repo-native") return "repo-native"
-  if (runner.kind === "playwright-mcp" || runner.id === "browser") return "browser"
+  if (runner.kind === "playwright-mcp" || runner.kind === "browser-cli" || runner.id === "browser") return "browser"
   if (runner.kind === "desktop-command") return "desktop"
   if (runner.kind === "android-adb" || runner.kind === "ios-simulator") return "mobile"
   return "manual"
@@ -274,17 +307,48 @@ const commandForRunner = (
   if (runner.kind === "desktop-command") {
     return {skippedReason: "desktop verification requires an explicit runner command"}
   }
+  if (runner.kind === "browser-cli") {
+    return {skippedReason: "browser-cli verification requires an explicit runner command"}
+  }
   return {skippedReason: "runner has no executable command"}
 }
 
-const verificationArtifactsDir = async (checkout: string) => {
-  const dir = path.join(checkout, ".openteam", "artifacts", "verification")
+const resolveCheckoutPath = (checkout: string, value: string) =>
+  path.isAbsolute(value) ? value : path.join(checkout, value)
+
+const relativeArtifactPath = (checkout: string, value: string) => {
+  const relative = path.relative(checkout, value)
+  return relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : value
+}
+
+const verificationArtifactsDir = async (checkout: string, runner?: VerificationRunnerPlan) => {
+  const dir = resolveCheckoutPath(checkout, runner?.artifactsDir ?? VERIFICATION_ARTIFACTS_DIR)
   await mkdir(dir, {recursive: true})
   return dir
 }
 
 const logFileForRunner = async (checkout: string, runner: VerificationRunnerPlan) =>
-  path.join(await verificationArtifactsDir(checkout), `${safeName(runner.id)}-${Date.now()}.log`)
+  path.join(await verificationArtifactsDir(checkout, runner), `${safeName(runner.id)}-${Date.now()}.log`)
+
+const runnerExecutionEnv = async (checkout: string, runner: VerificationRunnerPlan): Promise<Record<string, string>> => {
+  if (runner.kind !== "browser-cli") return {}
+
+  const artifactsDir = await verificationArtifactsDir(checkout, runner)
+  const profileDir = path.join(artifactsDir, "profile")
+  await mkdir(profileDir, {recursive: true})
+  return {
+    OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR: artifactsDir,
+    OPENTEAM_AGENT_BROWSER_PROFILE_DIR: profileDir,
+    OPENTEAM_BROWSER_CLI_ARTIFACTS_DIR: artifactsDir,
+    OPENTEAM_BROWSER_CLI_PROFILE_DIR: profileDir,
+  }
+}
+
+const commandArtifactsForRunner = (checkout: string, runner: VerificationRunnerPlan, executionEnv: Record<string, string>) => {
+  if (runner.kind !== "browser-cli") return undefined
+  const artifactsDir = executionEnv.OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR
+  return artifactsDir ? [relativeArtifactPath(checkout, artifactsDir)] : undefined
+}
 
 const commandAvailable = (cmd: string) => {
   if (path.isAbsolute(cmd) || cmd.includes("/")) return existsSync(cmd)
@@ -331,12 +395,14 @@ const runCommand = async (
   const startedAt = now()
   const started = Date.now()
   const logFile = await logFileForRunner(checkout, runner)
+  const executionEnv = await runnerExecutionEnv(checkout, runner)
+  const artifacts = commandArtifactsForRunner(checkout, runner, executionEnv)
   const stream = createWriteStream(logFile, {flags: "a"})
   const [cmd, ...args] = command
   const wrapped = wrapDevEnvCommand(devEnv, cmd, args)
   const child = spawn(wrapped.cmd, wrapped.args, {
     cwd: checkout,
-    env: {...process.env, ...env, ...(runner.environment ?? {})},
+    env: {...process.env, ...env, ...(runner.environment ?? {}), ...executionEnv},
     stdio: ["ignore", "pipe", "pipe"],
   })
   const timeoutMs = runner.timeoutMs ?? DEFAULT_TIMEOUT_MS
@@ -383,6 +449,7 @@ const runCommand = async (
       command,
       cwd: checkout,
       logFile,
+      artifacts,
       error: error instanceof Error ? error.message : String(error),
     } satisfies VerificationRunnerResult
   } finally {
@@ -405,6 +472,7 @@ const runCommand = async (
     command,
     cwd: checkout,
     logFile,
+    artifacts,
     exitCode: code ?? undefined,
     signal: signal ?? undefined,
     error: timedOut ? `verification runner timed out after ${timeoutMs}ms` : code === 0 ? undefined : `${command.join(" ")} exited with code ${code ?? -1}`,

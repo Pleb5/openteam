@@ -2,6 +2,10 @@
   "browser": {
     "headless": false,
     "executablePath": "/usr/bin/chromium",
+    "agentBrowserTools": {
+      "enabled": false,
+      "allowedDomains": ["127.0.0.1", "localhost"]
+    },
     "mcp": {
       "name": "playwright",
       "command": [
@@ -36,6 +40,12 @@
     "runners": {
       "desktop-command": {
         "enabled": true
+      },
+      "agent-browser": {
+        "enabled": false,
+        "environment": {
+          "AGENT_BROWSER_ALLOWED_DOMAINS": "127.0.0.1,localhost"
+        }
       },
       "android-adb": {
         "enabled": false

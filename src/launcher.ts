@@ -3,7 +3,6 @@ import {existsSync} from "node:fs"
 import {chmod, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile} from "node:fs/promises"
 import {spawn} from "node:child_process"
 import {spawnSync} from "node:child_process"
-import net from "node:net"
 import path from "node:path"
 import process from "node:process"
 import {startBunker, type RunningBunker} from "./bunker.js"
@@ -11,6 +10,7 @@ import {consolePrompt} from "./commands/console.js"
 import {cleanupStaleRuns, cleanupStaleRunsForContext} from "./commands/runs.js"
 import {prepareAgent} from "./config.js"
 import {detectDevEnv, wrapDevEnvCommand, type DevEnv} from "./dev-env.js"
+import {checkDevHealthOnce, processAlive, startAgentDevServer, stopChildProcess, waitForDevHealth} from "./dev-server.js"
 import {createDoneContract} from "./done-contract.js"
 import {pollInboundTasks, subscribeInboundTasks} from "./dm.js"
 import {recordReportOutboxAttempts} from "./dm-outbox.js"
@@ -104,30 +104,6 @@ const resolveHostCommand = (cmd: string) => {
 }
 
 const taskId = (task: string) => `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${slug(task)}`
-
-const isPortFree = async (port: number) => {
-  return new Promise<boolean>(resolve => {
-    const server = net.createServer()
-    server.once("error", () => resolve(false))
-    server.once("listening", () => {
-      server.close(() => resolve(true))
-    })
-    server.listen(port, "127.0.0.1")
-  })
-}
-
-const nextPort = async (agent: PreparedAgent) => {
-  for (let offset = 0; offset < 100; offset++) {
-    const port = agent.agent.portStart + offset
-    if (await isPortFree(port)) {
-      return port
-    }
-  }
-
-  throw new Error(`no free port available near ${agent.agent.portStart} for ${agent.id}`)
-}
-
-const fill = (items: string[], vars: Record<string, string>) => items.map(item => item.replace(/\{(\w+)\}/g, (_, key: string) => vars[key] ?? ""))
 
 const shellQuote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`
 
@@ -356,41 +332,6 @@ const hasPackageManagerFiles = (root: string) => {
   ].some(file => existsSync(path.join(root, file)))
 }
 
-const health = async (url: string, timeoutMs = 60_000) => {
-  const start = Date.now()
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const result = await fetch(url)
-      if (result.ok) return
-    } catch {}
-    await new Promise(resolve => setTimeout(resolve, 1000))
-  }
-  throw new Error(`dev server did not become ready at ${url}`)
-}
-
-const checkHealthOnce = async (url: string, timeoutMs = 1500) => {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    const response = await fetch(url, {signal: controller.signal})
-    return {ok: response.ok, status: response.status}
-  } catch (error) {
-    return {ok: false, error: error instanceof Error ? error.message : String(error)}
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-const processAlive = (pid?: number) => {
-  if (!pid || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
-
 export const provisionWorkerControlCommand = (text: string) => {
   const patterns = [
     /\bopenteam\s+["']?(launch|enqueue|serve|worker|start|watch)\b/i,
@@ -575,6 +516,250 @@ const writeOcfg = async (agent: PreparedAgent, checkout: string, runtime?: Agent
   await writeFile(path.join(dir, "opencode.json"), `${JSON.stringify(cfg, null, 2)}\n`)
 }
 
+const agentBrowserToolSource = (input: {
+  command: string
+  executablePath?: string
+  environment: Record<string, string>
+  allowedDomains: string[]
+  maxOutputChars: number
+}) => `import { tool } from "@opencode-ai/plugin"
+import { mkdir, writeFile } from "node:fs/promises"
+import path from "node:path"
+
+const BINARY = ${JSON.stringify(input.command)}
+const EXECUTABLE_PATH = ${JSON.stringify(input.executablePath ?? "")}
+const CONFIG_ENV = ${JSON.stringify(input.environment)}
+const ALLOWED_DOMAINS = ${JSON.stringify(input.allowedDomains.join(","))}
+const MAX_OUTPUT_CHARS = ${JSON.stringify(input.maxOutputChars)}
+
+const dirs = (directory: string) => {
+  const artifacts = path.join(directory, ".openteam", "artifacts", "verification", "agent-browser")
+  return {
+    artifacts,
+    profile: path.join(artifacts, "profile"),
+  }
+}
+
+const safeName = (value: string) =>
+  value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "artifact"
+
+const artifactPath = (directory: string, name: string, ext: string) =>
+  path.join(dirs(directory).artifacts, safeName(name) + "-" + Date.now() + "." + ext)
+
+const setupEnv = async (directory: string) => {
+  const browserDirs = dirs(directory)
+  await mkdir(browserDirs.profile, { recursive: true })
+  await mkdir(browserDirs.artifacts, { recursive: true })
+  return {
+    ...process.env,
+    ...CONFIG_ENV,
+    OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR: browserDirs.artifacts,
+    OPENTEAM_AGENT_BROWSER_PROFILE_DIR: browserDirs.profile,
+    OPENTEAM_BROWSER_CLI_ARTIFACTS_DIR: browserDirs.artifacts,
+    OPENTEAM_BROWSER_CLI_PROFILE_DIR: browserDirs.profile,
+    ...(EXECUTABLE_PATH ? { AGENT_BROWSER_EXECUTABLE_PATH: EXECUTABLE_PATH } : {}),
+    ...(ALLOWED_DOMAINS && !CONFIG_ENV.AGENT_BROWSER_ALLOWED_DOMAINS ? { AGENT_BROWSER_ALLOWED_DOMAINS: ALLOWED_DOMAINS } : {}),
+  }
+}
+
+const run = async (args: string[], context: { directory: string; abort: AbortSignal }, options: { rawName?: string } = {}) => {
+  const browserDirs = dirs(context.directory)
+  const env = await setupEnv(context.directory)
+  const cmd = [BINARY, "--profile", browserDirs.profile, "--screenshot-dir", browserDirs.artifacts, ...args]
+  const proc = Bun.spawn(cmd, {
+    cwd: context.directory,
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+    signal: context.abort,
+  })
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ])
+  const text = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n")
+  if (code !== 0) {
+    throw new Error(text || "agent-browser exited with code " + code)
+  }
+  if (text.length <= MAX_OUTPUT_CHARS) return text || "ok"
+  const raw = artifactPath(context.directory, options.rawName ?? args[0] ?? "output", "txt")
+  await writeFile(raw, text)
+  return text.slice(0, MAX_OUTPUT_CHARS) + "\n\n[truncated; full output: " + raw + "]"
+}
+
+export const open = tool({
+  description: "Open a URL in the checkout-local agent-browser session. Defaults to OPENTEAM_DEV_URL.",
+  args: {
+    url: tool.schema.string().optional().describe("URL to open; defaults to OPENTEAM_DEV_URL"),
+    headed: tool.schema.boolean().optional().describe("Show a headed browser window for debugging"),
+  },
+  async execute(args, context) {
+    const url = args.url || process.env.OPENTEAM_DEV_URL
+    if (!url) throw new Error("missing url and OPENTEAM_DEV_URL is not set")
+    return run([...(args.headed ? ["--headed"] : []), "open", url], context)
+  },
+})
+
+export const snapshot = tool({
+  description: "Capture the current page accessibility snapshot, optimized for interactive refs like @e1.",
+  args: {
+    interactive: tool.schema.boolean().optional().describe("Only include interactive elements; defaults to true"),
+    compact: tool.schema.boolean().optional().describe("Compact empty structural output; defaults to true"),
+    depth: tool.schema.number().optional().describe("Optional max snapshot depth"),
+  },
+  async execute(args, context) {
+    return run([
+      "snapshot",
+      ...(args.interactive === false ? [] : ["-i"]),
+      ...(args.compact === false ? [] : ["-c"]),
+      ...(args.depth ? ["-d", String(args.depth)] : []),
+      "--json",
+    ], context, { rawName: "snapshot" })
+  },
+})
+
+export const click = tool({
+  description: "Click an agent-browser selector or snapshot ref such as @e2.",
+  args: {
+    selector: tool.schema.string().describe("Selector or snapshot ref to click"),
+  },
+  async execute(args, context) {
+    return run(["click", args.selector], context)
+  },
+})
+
+export const fill = tool({
+  description: "Fill an input selected by CSS selector, semantic selector, or snapshot ref.",
+  args: {
+    selector: tool.schema.string().describe("Selector or snapshot ref to fill"),
+    value: tool.schema.string().describe("Value to enter"),
+  },
+  async execute(args, context) {
+    return run(["fill", args.selector, args.value], context)
+  },
+})
+
+export const get = tool({
+  description: "Read page state via agent-browser get commands.",
+  args: {
+    kind: tool.schema.enum(["text", "html", "value", "title", "url"]).describe("Value kind to read"),
+    selector: tool.schema.string().optional().describe("Selector/ref required for text/html/value"),
+  },
+  async execute(args, context) {
+    if ((args.kind === "text" || args.kind === "html" || args.kind === "value") && !args.selector) {
+      throw new Error("selector is required for get " + args.kind)
+    }
+    return run(["get", args.kind, ...(args.selector ? [args.selector] : []), "--json"], context)
+  },
+})
+
+export const wait = tool({
+  description: "Wait for load, milliseconds, selector, text, or URL pattern.",
+  args: {
+    kind: tool.schema.enum(["load", "ms", "selector", "text", "url"]).describe("Wait type"),
+    value: tool.schema.string().optional().describe("Milliseconds, selector, text, or URL pattern depending on kind"),
+  },
+  async execute(args, context) {
+    if (args.kind === "load") return run(["wait", "--load", args.value || "networkidle"], context)
+    if (!args.value) throw new Error("value is required for wait " + args.kind)
+    if (args.kind === "ms") return run(["wait", args.value], context)
+    if (args.kind === "text") return run(["wait", "--text", args.value], context)
+    if (args.kind === "url") return run(["wait", "--url", args.value], context)
+    return run(["wait", args.value], context)
+  },
+})
+
+export const screenshot = tool({
+  description: "Capture a screenshot under .openteam/artifacts/verification/agent-browser.",
+  args: {
+    name: tool.schema.string().optional().describe("Artifact name prefix"),
+    full: tool.schema.boolean().optional().describe("Capture full page"),
+  },
+  async execute(args, context) {
+    const file = artifactPath(context.directory, args.name || "screenshot", "png")
+    const output = await run(["screenshot", file, ...(args.full ? ["--full"] : [])], context)
+    return output + "\nscreenshot: " + file
+  },
+})
+
+export const console_messages = tool({
+  description: "Return browser console messages as JSON.",
+  args: {
+    clear: tool.schema.boolean().optional().describe("Clear console messages after reading"),
+  },
+  async execute(args, context) {
+    return run(["console", "--json", ...(args.clear ? ["--clear"] : [])], context, { rawName: "console" })
+  },
+})
+
+export const errors = tool({
+  description: "Return uncaught page errors as JSON.",
+  args: {
+    clear: tool.schema.boolean().optional().describe("Clear errors after reading"),
+  },
+  async execute(args, context) {
+    return run(["errors", "--json", ...(args.clear ? ["--clear"] : [])], context, { rawName: "errors" })
+  },
+})
+
+export const close = tool({
+  description: "Close the current agent-browser session.",
+  args: {
+    all: tool.schema.boolean().optional().describe("Close all active agent-browser sessions"),
+  },
+  async execute(args, context) {
+    return run(["close", ...(args.all ? ["--all"] : [])], context)
+  },
+})
+
+export const record_evidence = tool({
+  description: "Record browser verification evidence with openteam verify browser.",
+  args: {
+    flow: tool.schema.string().describe("Flow name or behavior verified"),
+    screenshot: tool.schema.string().optional().describe("Screenshot artifact path"),
+    consoleFile: tool.schema.string().optional().describe("Console summary file path"),
+    network: tool.schema.string().optional().describe("Short network observation summary"),
+    note: tool.schema.string().optional().describe("Additional note"),
+  },
+  async execute(args, context) {
+    const cmd = [
+      "openteam", "verify", "browser", "--state", "succeeded", "--flow", args.flow,
+      ...(process.env.OPENTEAM_DEV_URL ? ["--url", process.env.OPENTEAM_DEV_URL] : []),
+      ...(args.screenshot ? ["--screenshot", args.screenshot] : []),
+      ...(args.consoleFile ? ["--console-file", args.consoleFile] : []),
+      ...(args.network ? ["--network", args.network] : []),
+      ...(args.note ? ["--note", args.note] : []),
+    ]
+    const proc = Bun.spawn(cmd, { cwd: context.directory, env: process.env, stdout: "pipe", stderr: "pipe", signal: context.abort })
+    const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+    const text = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n")
+    if (code !== 0) throw new Error(text || "openteam verify browser exited with code " + code)
+    return text || "browser evidence recorded"
+  },
+})
+`
+
+export const writeAgentBrowserTools = async (agent: PreparedAgent, checkout: string) => {
+  const cfg = agent.app.config.browser.agentBrowserTools
+  const file = path.join(checkout, ".opencode", "tools", "agent_browser.ts")
+  if (!cfg?.enabled) {
+    await rm(file, {force: true})
+    return undefined
+  }
+
+  await ensureDir(path.dirname(file))
+  const content = agentBrowserToolSource({
+    command: cfg.command || "agent-browser",
+    executablePath: agent.app.config.browser.executablePath,
+    environment: cfg.environment ?? {},
+    allowedDomains: cfg.allowedDomains?.length ? cfg.allowedDomains : ["127.0.0.1", "localhost"],
+    maxOutputChars: cfg.maxOutputChars ?? 60_000,
+  })
+  await writeFile(file, content)
+  return file
+}
+
 const prepareSubmodules = async (agent: PreparedAgent, checkout: string) => {
   if (!existsSync(path.join(agent.repo.root, ".gitmodules"))) return
   await run("git", ["submodule", "update", "--init", "--recursive"], checkout)
@@ -592,6 +777,7 @@ const prepareCheckout = async (agent: PreparedAgent, checkout: string, runtime?:
   await syncProjectSkills(agent, checkout)
   await writeOpencodeManagedAgents(agent, checkout)
   await writeOcfg(agent, checkout, runtime)
+  await writeAgentBrowserTools(agent, checkout)
 }
 
 const writeViteWrapper = async (agent: PreparedAgent, checkout: string) => {
@@ -615,32 +801,9 @@ const writeViteWrapper = async (agent: PreparedAgent, checkout: string) => {
 }
 
 const startDev = async (agent: PreparedAgent, task: string, checkout: string, devEnv?: DevEnv) => {
-  if (!agent.repo.devCommand?.length || !agent.repo.healthUrl) {
-    throw new Error(`repo ${agent.repo.root} is not configured for web mode`)
-  }
-  const port = String(await nextPort(agent))
-  const url = agent.repo.healthUrl.replace("{port}", port)
   const viteConfig = await writeViteWrapper(agent, checkout)
-  const vars = {port, checkout, repoRoot: checkout, taskId: task, viteConfig}
-  const [cmd, ...args] = fill(agent.repo.devCommand, vars)
   const logFile = path.join(agent.paths.artifacts, `${task}-dev.log`)
-  const child = spawnLogged(cmd, args, checkout, logFile, checkoutRuntimeEnv(checkout), devEnv)
-  const ready = health(url)
-
-  const exitBeforeReady = new Promise<never>((_, reject) => {
-    const onClose = (code: number | null) => {
-      reject(new Error(`dev server exited before ready with code ${code ?? -1}`))
-    }
-
-    child.once("close", onClose)
-
-    ready.finally(() => {
-      child.off("close", onClose)
-    })
-  })
-
-  await Promise.race([ready, exitBeforeReady])
-  return {child, url, logFile}
+  return startAgentDevServer(agent, task, checkout, logFile, checkoutRuntimeEnv(checkout), devEnv, viteConfig)
 }
 
 const attachDevExitRecorder = (
@@ -677,7 +840,7 @@ const startDevMonitor = (
     checking = true
     const checkedAt = now()
     try {
-      const health = await checkHealthOnce(dev.url)
+      const health = await checkDevHealthOnce(dev.url)
       if (record.devServer?.pid && record.devServer.pid !== dev.child.pid) return
       checks += 1
       if (health.ok) {
@@ -728,17 +891,7 @@ const startDevMonitor = (
   }
 }
 
-const stopChild = async (child: ReturnType<typeof spawnLogged>, signal: NodeJS.Signals = "SIGTERM", timeoutMs = 1500) => {
-  if (!processAlive(child.pid)) return
-  await new Promise<void>(resolve => {
-    const timer = setTimeout(resolve, timeoutMs)
-    child.once("close", () => {
-      clearTimeout(timer)
-      resolve()
-    })
-    child.kill(signal)
-  })
-}
+const stopChild = stopChildProcess
 
 const wait = async (child: ReturnType<typeof spawnLogged>) => {
   return new Promise<number>((resolve, reject) => {
@@ -2119,7 +2272,7 @@ export const runTask = async (
           await maybeRunAutomaticVerification(app, runRecord, checkout, verificationPlan, projectProfile, devEnv)
           try {
             await runPhase(runRecord, "verify-dev-server", async () => {
-              await health(dev.url, 3000)
+              await waitForDevHealth(dev.url, 3000)
               await updateRunRecord(runRecord, {
                 verificationState: "succeeded",
                 devServer: {lastHealthOkAt: now()},
@@ -2171,7 +2324,7 @@ export const runTask = async (
             }
 
             await runPhase(runRecord, "verify-dev-server-after-restart", async () => {
-              await health(dev.url, 3000)
+              await waitForDevHealth(dev.url, 3000)
               await updateRunRecord(runRecord, {
                 verificationState: "succeeded",
                 devServer: {lastHealthOkAt: now()},

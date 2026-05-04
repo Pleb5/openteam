@@ -34,9 +34,16 @@ export type BrowserCfg = {
   headless: boolean
   mcp: McpCfg
   executablePath?: string
+  agentBrowserTools?: {
+    enabled?: boolean
+    command?: string
+    allowedDomains?: string[]
+    environment?: Dict
+    maxOutputChars?: number
+  }
 }
 
-export type VerificationRunnerKind = "command" | "playwright-mcp" | "desktop-command" | "android-adb" | "ios-simulator"
+export type VerificationRunnerKind = "command" | "playwright-mcp" | "browser-cli" | "desktop-command" | "android-adb" | "ios-simulator"
 export type VerificationRunnerState = "succeeded" | "failed" | "skipped" | "blocked"
 export type VerificationEvidenceType = "repo-native" | "browser" | "nostr" | "desktop" | "mobile" | "manual" | "runtime"
 

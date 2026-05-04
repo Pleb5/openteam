@@ -254,4 +254,65 @@ describe("config helpers", () => {
 
     expect(result.warnings.some(item => item.code === "verification-browser-runner-unavailable")).toBe(true)
   })
+
+  test("accepts configured browser-cli verification runners", () => {
+    const result = validateAppConfig(app({
+      verification: {
+        defaultRunners: {web: ["repo-native", "browser"]},
+        runners: {
+          "agent-browser": {
+            kind: "browser-cli",
+            enabled: true,
+            local: true,
+            modes: ["web"],
+            stacks: ["web"],
+            command: ["sh", "-c", "true"],
+            artifactsDir: ".openteam/artifacts/verification/agent-browser",
+          },
+        },
+      },
+    }))
+
+    expect(result.errors.some(item => item.code === "verification-runner-kind-invalid")).toBe(false)
+    expect(result.warnings.some(item => item.code === "verification-browser-cli-runner-unavailable")).toBe(false)
+  })
+
+  test("warns when enabled browser-cli verification has no command", () => {
+    const result = validateAppConfig(app({
+      verification: {
+        defaultRunners: {web: ["repo-native", "browser"]},
+        runners: {
+          "agent-browser": {
+            kind: "browser-cli",
+            enabled: true,
+            local: true,
+            modes: ["web"],
+            stacks: ["web"],
+            command: [],
+          },
+        },
+      },
+    }))
+
+    expect(result.warnings.some(item => item.code === "verification-browser-cli-runner-unavailable")).toBe(true)
+  })
+
+  test("validates optional agent-browser OpenCode tool config", () => {
+    const result = validateAppConfig(app({
+      browser: {
+        headless: false,
+        executablePath: "/usr/bin/chromium",
+        agentBrowserTools: {
+          enabled: true,
+          command: "agent-browser",
+          allowedDomains: ["127.0.0.1", "bad domain"],
+          maxOutputChars: -1,
+        },
+        mcp: {name: "playwright", command: ["bunx", "@playwright/mcp@latest"], environment: {}},
+      },
+    }))
+
+    expect(result.errors.some(item => item.code === "agent-browser-tools-domain-invalid")).toBe(true)
+    expect(result.errors.some(item => item.code === "agent-browser-tools-max-output-invalid")).toBe(true)
+  })
 })

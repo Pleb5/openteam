@@ -20,6 +20,7 @@ import {
   assertVerificationToolingReady,
   checkoutRuntimeEnv,
   provisionWorkerControlCommand,
+  writeAgentBrowserTools,
   writeCheckoutToolShims,
 } from "../src/launcher.js"
 import {detectOpenCodeHardFailure, detectWorkerVerificationBlockers} from "../src/opencode-log.js"
@@ -1578,10 +1579,71 @@ describe("runtime invariants", () => {
 
     expect(plan.selectedRunnerIds).toContain("repo-native")
     expect(plan.selectedRunnerIds).toContain("browser")
+    expect(plan.selectedRunnerIds).not.toContain("agent-browser")
     expect(plan.runners.find(runner => runner.id === "browser")?.kind).toBe("playwright-mcp")
     expect(plan.runners.find(runner => runner.id === "browser")?.configured).toBe(true)
     expect(saved.version).toBe(1)
     expect(saved.mode).toBe("web")
+  })
+
+  test("browser-cli agent-browser runner is opt-in and maps to browser evidence", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    const app = makeApp(runtimeRoot)
+    app.config.verification = {
+      defaultRunners: {web: ["repo-native", "browser"]},
+      runners: {
+        "agent-browser": {
+          kind: "browser-cli",
+          enabled: true,
+          local: true,
+          modes: ["web"],
+          stacks: ["web"],
+          command: [
+            "sh",
+            "-c",
+            "test -d \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" && test \"$AGENT_BROWSER_EXECUTABLE_PATH\" = \"/usr/bin/chromium\" && printf browser-cli > \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/session.txt\"",
+          ],
+          artifactsDir: ".openteam/artifacts/verification/agent-browser",
+        },
+      },
+    }
+
+    const plan = createVerificationPlan(app, "web", {stacks: ["web"]})
+    const results = await runLocalVerificationRunners({checkout, plan})
+    const evidence = runEvidenceView(runRecord(app, {
+      mode: "web",
+      state: "succeeded",
+      workerState: "succeeded",
+      doneContract: createDoneContract("builder", "web", "Verify browser-cli evidence"),
+      verification: {
+        plan,
+        results: [
+          ...results,
+          {
+            id: "repo-native",
+            kind: "command",
+            state: "succeeded",
+            evidenceType: "repo-native",
+            source: "worker",
+            logFile: ".openteam/artifacts/verification/repo-native.log",
+          },
+        ],
+      },
+    }))
+
+    const agentBrowserResult = results.find(result => result.id === "agent-browser")
+
+    expect(plan.selectedRunnerIds).toContain("agent-browser")
+    expect(plan.runners.find(runner => runner.id === "agent-browser")?.kind).toBe("browser-cli")
+    expect(agentBrowserResult?.state).toBe("succeeded")
+    expect(agentBrowserResult?.evidenceType).toBe("browser")
+    expect(agentBrowserResult?.artifacts).toContain(".openteam/artifacts/verification/agent-browser")
+    expect(agentBrowserResult?.logFile).toContain(path.join(".openteam", "artifacts", "verification", "agent-browser"))
+    expect(existsSync(path.join(checkout, ".openteam", "artifacts", "verification", "agent-browser", "profile"))).toBe(true)
+    expect(await readFile(path.join(checkout, ".openteam", "artifacts", "verification", "agent-browser", "session.txt"), "utf8")).toBe("browser-cli")
+    expect(evidence.groupSummary.browser).toBe(1)
+    expect(evidence.level).toBe("strong")
   })
 
   test("local verification command runner writes structured results and logs", async () => {
@@ -1681,6 +1743,38 @@ describe("runtime invariants", () => {
     expect(ready.openteamShim).toBe(path.join(checkout, ".openteam", "bin", "openteam"))
     expect(shim).toContain("OPENTEAM_CHECKOUT")
     expect(shim).toContain(path.join(app.root, "scripts", "openteam"))
+  })
+
+  test("agent-browser OpenCode tools are generated only when explicitly enabled", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    const app = makeApp(runtimeRoot)
+    const agent = await prepareAgent(app, "builder-01", {runtimeId: "agent-browser-tools-test"})
+    const toolFile = path.join(checkout, ".opencode", "tools", "agent_browser.ts")
+
+    expect(await writeAgentBrowserTools(agent, checkout)).toBeUndefined()
+    expect(existsSync(toolFile)).toBe(false)
+
+    app.config.browser.agentBrowserTools = {
+      enabled: true,
+      command: "agent-browser",
+      allowedDomains: ["127.0.0.1", "localhost", "app.example.test"],
+      environment: {AGENT_BROWSER_MAX_OUTPUT: "50000"},
+      maxOutputChars: 12345,
+    }
+
+    const written = await writeAgentBrowserTools(agent, checkout)
+    const source = await readFile(toolFile, "utf8")
+
+    expect(written).toBe(toolFile)
+    expect(source).toContain("export const open = tool")
+    expect(source).toContain("export const snapshot = tool")
+    expect(source).toContain("export const record_evidence = tool")
+    expect(source).toContain("AGENT_BROWSER_EXECUTABLE_PATH")
+    expect(source).toContain("/usr/bin/chromium")
+    expect(source).toContain("app.example.test")
+    expect(source).toContain("MAX_OUTPUT_CHARS = 12345")
+    expect(source).toContain(".openteam")
   })
 
   test("verify command resolves checkout from worker runtime environment", async () => {

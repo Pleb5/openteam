@@ -135,6 +135,7 @@ openteam also writes `.openteam/project-profile.json` with detected project hint
 Those hints are a checklist only; repo docs, declared scripts, and declared dev environments override them.
 openteam also writes `.openteam/verification-plan.json` with the local verification runners selected for the run.
 Workers use `openteam verify list`, `openteam verify run <runner-id>`, `openteam verify browser ...`, `openteam verify artifact ...`, and `openteam verify record <runner-id> ...` during their own loop to record structured verification evidence.
+Playwright MCP remains the default browser path; optional disabled-by-default `agent-browser` support can expose OpenCode `agent_browser_*` tools for interactive CLI-backed browser control and can execute a batch verification runner that maps its result to browser evidence when local config opts in.
 The launcher collects worker-produced evidence from `.openteam/verification-results.json`; failed or blocked worker evidence fails the run.
 Automatic post-worker runner execution is disabled by default with `verification.autoRunAfterWorker: false`.
 If evidence is missing or weak after a successful worker phase, the run finishes as `needs-review` instead of plain `succeeded`.
@@ -249,6 +250,8 @@ for each running agent so browser flows can use NIP-46 without exposing the raw 
 Practical edit points:
 
 - write relays, allowlists, and browser MCP command in `config/openteam.local.json`
+- optionally enable `browser.agentBrowserTools.enabled` after installing the external `agent-browser` CLI; openteam generates checkout-local OpenCode tools such as `agent_browser_open`, `agent_browser_snapshot`, `agent_browser_click`, and `agent_browser_screenshot` without enabling them by default
+- optionally enable `verification.runners.agent-browser` in `config/openteam.local.json` after installing the external `agent-browser` CLI; openteam gives it `.openteam/artifacts/verification/agent-browser` artifacts/profile isolation and does not add it to default web runners unless local config opts in
 - write Git tokens and Nostr secrets in `config/openteam.secrets.env`
 - map GitHub/GitLab token hosts under `config.providers`; openteam can create/reuse fork repos there and injects matching Git smart-HTTP tokens through `GIT_ASKPASS` without embedding tokens in URLs
 - publish Nostr-git PRs with branch push plus `openteam repo publish pr ...`; personal `gh auth` is not part of the default openteam path, normal PR publication requires strong verification evidence, and `--target-branch` is only for the merge target branch
@@ -329,7 +332,7 @@ In that phase, the CLI rejects worker-control commands such as `launch`, `enqueu
 
 ## Notes
 
-- The MVP assumes a separate Playwright MCP command will be provided in local config.
+- The MVP assumes a separate Playwright MCP command will be provided in local config; CLI-backed `agent-browser` verification is optional and disabled unless explicitly configured locally.
 - inbound DM control is orchestrator-only and disabled unless an allowlist is configured.
 - if `identity.sec` is missing, DM control and managed bunker startup will not work for that identity.
 - operator task-status DMs are runtime-owned; workers should not send them manually.
