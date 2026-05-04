@@ -1548,8 +1548,13 @@ const lease = (context: RepoContext, agent: PreparedAgent, item: TaskItem, mode:
 
 export const operatorTakeoverJobId = (runId: string) => `operator-takeover:${runId}`
 
+export const operatorPreviewJobId = (runId: string) => `operator-preview:${runId}`
+
 export const isOperatorTakeoverLease = (lease?: WorkerLease) =>
   lease?.workerId === "operator" && typeof lease.jobId === "string" && lease.jobId.startsWith("operator-takeover:")
+
+export const isOperatorPreviewLease = (lease?: WorkerLease) =>
+  lease?.workerId === "operator" && typeof lease.jobId === "string" && lease.jobId.startsWith("operator-preview:")
 
 export const holdRepoContextForOperator = async (app: AppCfg, contextId: string, runId: string) => {
   let held: RepoContext | undefined
@@ -1581,6 +1586,43 @@ export const holdRepoContextForOperator = async (app: AppCfg, contextId: string,
     await saveRepoRegistry(app, registry)
   })
   if (!held) throw new Error(`operator takeover failed to hold context ${contextId}`)
+  return held
+}
+
+export const holdRepoContextForOperatorPreview = async (app: AppCfg, contextId: string, runId: string) => {
+  let held: RepoContext | undefined
+  await withRepoRegistryLock(app, async () => {
+    const registry = await loadRepoRegistry(app)
+    const context = registry.contexts[contextId]
+    if (!context) throw new Error(`operator preview context not found: ${contextId}`)
+    const jobId = operatorPreviewJobId(runId)
+    if (context.state === "leased") {
+      if (context.lease?.workerId === "operator" && context.lease.jobId === jobId) {
+        held = context
+        return
+      }
+      if (context.lease?.workerId === "operator" && context.lease.jobId === operatorTakeoverJobId(runId)) {
+        held = context
+        return
+      }
+      throw new Error(`operator preview context ${contextId} is already leased by ${context.lease?.workerId ?? "unknown"}/${context.lease?.jobId ?? "unknown"}`)
+    }
+    held = {
+      ...context,
+      state: "leased",
+      lease: {
+        workerId: "operator",
+        role: "operator",
+        jobId,
+        mode: context.mode,
+        leasedAt: now(),
+      },
+      updatedAt: now(),
+    }
+    registry.contexts[contextId] = held
+    await saveRepoRegistry(app, registry)
+  })
+  if (!held) throw new Error(`operator preview failed to hold context ${contextId}`)
   return held
 }
 
@@ -1818,3 +1860,6 @@ export const releaseRepoContext = async (app: AppCfg, contextId?: string, expect
 
 export const releaseOperatorRepoContextHold = async (app: AppCfg, contextId: string | undefined, runId: string) =>
   releaseRepoContext(app, contextId, {workerId: "operator", jobId: operatorTakeoverJobId(runId)})
+
+export const releaseOperatorPreviewContextHold = async (app: AppCfg, contextId: string | undefined, runId: string) =>
+  releaseRepoContext(app, contextId, {workerId: "operator", jobId: operatorPreviewJobId(runId)})

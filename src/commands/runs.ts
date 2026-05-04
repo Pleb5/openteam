@@ -72,6 +72,7 @@ export const runEvidenceView = (record: TaskRunRecord) => {
   const skipped = results.filter(result => result.state === "skipped")
   const policy = evaluateEvidencePolicy(record.doneContract, results)
   const groups = groupEvidenceResults(results)
+  const latestPreview = [...(record.operatorPreviews ?? [])].reverse()[0]
   return {
     runId: record.runId,
     state: record.state,
@@ -96,6 +97,12 @@ export const runEvidenceView = (record: TaskRunRecord) => {
     prPolicy: record.doneContract?.prPolicy,
     groups,
     groupSummary: Object.fromEntries(Object.entries(groups).map(([name, items]) => [name, items.length])),
+    latestPreview,
+    previewCommands: {
+      preview: `openteam runs preview ${record.runId} --open`,
+      record: `openteam runs preview-record ${record.runId} --state succeeded --note "<what you verified>"`,
+      stop: `openteam runs preview-stop ${record.runId}`,
+    },
     results,
     artifacts: Array.from(new Set(results.flatMap(result => [
       ...(result.logFile ? [result.logFile] : []),
@@ -552,6 +559,7 @@ const runListView = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
       contextHeld: record.manualTakeover.contextHeld,
       handoffFile: record.manualTakeover.handoffFile,
     } : undefined,
+    latestPreview: [...(record.operatorPreviews ?? [])].reverse()[0],
     contextId: record.context?.id,
     devEnv: record.devEnv?.kind,
     devEnvSource: record.devEnv?.source,
@@ -719,6 +727,13 @@ export const runsEvidence = async (app: AppCfg, id: string, args: string[]) => {
     for (const item of view.doneContract.requiredEvidence) console.log(`required: ${item}`)
     console.log(`pr policy: ${view.doneContract.prPolicy}`)
   }
+  if (view.latestPreview) {
+    console.log(`preview: ${view.latestPreview.id} ${view.latestPreview.kind} ${view.latestPreview.state}`)
+    if (view.latestPreview.url) console.log(`preview url: ${view.latestPreview.url}`)
+  }
+  console.log(`preview command: ${view.previewCommands.preview}`)
+  console.log(`record operator evidence: ${view.previewCommands.record}`)
+  if (view.latestPreview?.state === "live") console.log(`stop preview: ${view.previewCommands.stop}`)
   for (const item of view.missingEvidence) console.log(`missing: ${item}`)
   for (const blocker of view.prBlockers) console.log(`PR blocker: ${blocker}`)
   console.log(`recommended: ${view.recommendedAction}`)

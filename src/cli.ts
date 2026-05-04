@@ -38,6 +38,7 @@ import {
 } from "./run-family-policy.js"
 import {runsObserveCommand, runsWatchCommand} from "./run-observer.js"
 import {executeOperatorTakeover, formatOperatorTakeoverResult, releaseOperatorTakeover} from "./run-takeover.js"
+import {formatOperatorPreview, recordOperatorPreviewEvidence, startOperatorPreview, stopOperatorPreview} from "./operator-preview.js"
 import {statusReport} from "./commands/status.js"
 import {recipientsFromEnv, sourceFromEnv} from "./task-context.js"
 import {runTask, enqueueTask, prepareOnly, serveAgent} from "./launcher.js"
@@ -79,6 +80,9 @@ const help = () => {
   runs watch [--active|--needs-review] [--once] [--interval-ms <ms>] [--limit <n>] [--json]
   runs continue <run-id> [--task <text>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--no-carry-evidence] [--dry-run] [--force]
   runs repair-evidence <run-id> [--task <text>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--no-carry-evidence] [--dry-run] [--force]
+  runs preview <run-id> [--open] [--json] [--restart] [--no-hold]
+  runs preview-stop <run-id> [--json]
+  runs preview-record <run-id> --state <succeeded|failed|blocked> --note <text> [--json]
   runs takeover <run-id> [--reason <text>] [--dry-run] [--no-hold] [--no-stop]
   runs takeover-release <run-id>
   runs stop <run-id>
@@ -482,6 +486,42 @@ const main = async () => {
       console.log(JSON.stringify(result, null, 2))
     } else {
       console.log(formatOperatorTakeoverResult(result))
+    }
+    return
+  }
+
+  if (cmd === "runs" && sub === "preview") {
+    const result = await startOperatorPreview(app, must(args[2] ?? "", "run-id"), {
+      open: flag(args, "--open"),
+      restart: flag(args, "--restart"),
+      noHold: flag(args, "--no-hold"),
+    })
+    if (flag(args, "--json")) {
+      console.log(JSON.stringify(result, null, 2))
+    } else {
+      console.log(formatOperatorPreview(result))
+    }
+    return
+  }
+
+  if (cmd === "runs" && sub === "preview-stop") {
+    console.log(JSON.stringify(await stopOperatorPreview(app, must(args[2] ?? "", "run-id")), null, 2))
+    return
+  }
+
+  if (cmd === "runs" && sub === "preview-record") {
+    const state = value(args, "--state")
+    if (state !== "succeeded" && state !== "failed" && state !== "blocked") throw new Error("preview-record requires --state succeeded|failed|blocked")
+    const result = await recordOperatorPreviewEvidence(app, must(args[2] ?? "", "run-id"), {
+      state,
+      note: value(args, "--note"),
+    })
+    if (flag(args, "--json")) {
+      console.log(JSON.stringify(result, null, 2))
+    } else {
+      console.log(`recorded operator preview evidence: ${result.result.id} ${result.result.state}`)
+      console.log(`evidence: ${result.evidence.level}`)
+      console.log(`PR eligible: ${result.evidence.prEligible ? "yes" : "no"}`)
     }
     return
   }

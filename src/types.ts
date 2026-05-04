@@ -129,6 +129,40 @@ export type VerificationRunnerResult = {
   note?: string
 }
 
+export type OperatorPreviewState = "starting" | "live" | "stopped" | "failed"
+
+export type OperatorPreviewKind = "live-run" | "local-dev-server"
+
+export type OperatorPreviewRecord = {
+  version: 1
+  id: string
+  kind: OperatorPreviewKind
+  state: OperatorPreviewState
+  requestedAt: string
+  startedAt?: string
+  stoppedAt?: string
+  failedAt?: string
+  runId: string
+  checkout?: string
+  contextId?: string
+  contextHeld?: boolean
+  url?: string
+  pid?: number
+  processGroup?: boolean
+  logFile?: string
+  command?: string[]
+  health?: {
+    ok: boolean
+    url?: string
+    status?: number
+    method?: string
+    error?: string
+    checkedAt: string
+  }
+  source?: "operator"
+  error?: string
+}
+
 export type ReportingCfg = {
   dmRelays: string[]
   outboxRelays: string[]
@@ -636,6 +670,7 @@ export type TaskRunRecord = {
     releasedPriorLease?: boolean
     command: string[]
   }
+  operatorPreviews?: OperatorPreviewRecord[]
 }
 
 export type AgentRuntimeState = {
