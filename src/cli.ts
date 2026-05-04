@@ -44,7 +44,7 @@ import {recipientsFromEnv, sourceFromEnv} from "./task-context.js"
 import {runTask, enqueueTask, prepareOnly, serveAgent} from "./launcher.js"
 import {dispatchOperatorRequest} from "./orchestrator.js"
 import {refreshRuntimeStatus} from "./runtime-status.js"
-import {listWorkers, startWorker, stopWorker} from "./supervisor.js"
+import {listWorkers, startJob, startWorker, stopWorker} from "./supervisor.js"
 import type {AppCfg, TaskItem, TaskMode} from "./types.js"
 import {
   destroyNostr,
@@ -65,7 +65,7 @@ const help = () => {
   status
   console prompt
   prepare <agentId|role>
-  launch <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--parallel] [--runtime-id <id>]
+  launch <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--parallel] [--runtime-id <id>] [--detach]
   enqueue <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>]
   serve [agentId|role]   # defaults to orchestrator-01 when omitted
   worker start <agentId|role> [--target <nostr-repo|hint|alias>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--name <worker-name>]
@@ -80,6 +80,7 @@ const help = () => {
   runs watch [--active|--needs-review] [--once] [--interval-ms <ms>] [--limit <n>] [--json]
   runs continue <run-id> [--task <text>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--no-carry-evidence] [--dry-run] [--force]
   runs repair-evidence <run-id> [--task <text>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--no-carry-evidence] [--dry-run] [--force]
+  runs retry <run-id> [--task <text>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--dry-run] [--force]
   runs preview <run-id> [--open] [--json] [--restart] [--no-hold]
   runs preview-stop <run-id> [--json]
   runs preview-record <run-id> --state <succeeded|failed|blocked> --note <text> [--json]
@@ -341,6 +342,25 @@ const main = async () => {
     const id = worker(app, sub)
     const opts = taskOpts(args)
     assertAppConfigValid(app, {capability: "launch", agentId: id, mode: opts.mode ?? "web"})
+    if (flag(args, "--detach")) {
+      const entry = await startJob(app, {
+        agentId: id,
+        role: app.config.agents[id]?.role || id,
+        task,
+        target: opts.target,
+        mode: opts.mode,
+        model: opts.model,
+        modelProfile: opts.modelProfile,
+        modelVariant: opts.modelVariant,
+        runtimeId: opts.runtimeId,
+        parallel: opts.parallel,
+        recipients: opts.recipients,
+        source: opts.source,
+        subject: opts.subject,
+      })
+      console.log(JSON.stringify(entry, null, 2))
+      return
+    }
     const result = await runTask(app, id, {
       id: "",
       task,
@@ -432,7 +452,7 @@ const main = async () => {
     return
   }
 
-  if (cmd === "runs" && (sub === "continue" || sub === "repair-evidence")) {
+  if (cmd === "runs" && (sub === "continue" || sub === "repair-evidence" || sub === "retry")) {
     const record = await readRunRecord(app, must(args[2] ?? "", "run-id"))
     const explicitTask = Boolean(value(args, "--task").trim())
     const item = createContinuationTaskItem(record, {
@@ -441,7 +461,7 @@ const main = async () => {
       model: value(args, "--model") || undefined,
       modelProfile: value(args, "--model-profile") || undefined,
       modelVariant: value(args, "--variant") || undefined,
-      carryEvidence: !flag(args, "--no-carry-evidence"),
+      carryEvidence: sub === "retry" ? false : !flag(args, "--no-carry-evidence"),
     })
     const agentId = worker(app, item.agentId)
     assertAppConfigValid(app, {capability: "launch", agentId, mode: item.mode})

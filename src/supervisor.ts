@@ -6,7 +6,7 @@ import {prepareAgent} from "./config.js"
 import {assertAppConfigValid} from "./config-validate.js"
 import {PROFILE_SYNC_DELAY_MS, sleep, syncGraspServers, syncOwnDmRelays, syncOwnOutboxRelays, syncProfileTokens} from "./nostr.js"
 import {encodeTaskContextEnv} from "./task-context.js"
-import type {AppCfg, TaskMode, TaskSource} from "./types.js"
+import type {AppCfg, TaskItem, TaskMode, TaskSource} from "./types.js"
 
 export type ManagedWorker = {
   name: string
@@ -20,6 +20,7 @@ export type ManagedWorker = {
   modelProfile?: string
   modelVariant?: string
   task?: string
+  subject?: TaskItem["subject"]
   parallel?: boolean
   recipients?: string[]
   source?: TaskSource
@@ -191,9 +192,11 @@ export const startJob = async (
     modelVariant?: string
     task: string
     name?: string
+    runtimeId?: string
     parallel?: boolean
     recipients?: string[]
     source?: TaskSource
+    subject?: TaskItem["subject"]
   },
 ) => {
   assertAppConfigValid(app, {capability: "launch", agentId: args.agentId, mode: args.mode ?? app.config.repos[app.config.agents[args.agentId]?.repo || ""]?.mode ?? "web"})
@@ -202,7 +205,7 @@ export const startJob = async (
 
   const suffix = uniqueSuffix()
   const baseName = args.name || `${args.role}-job-${slug(args.target || args.agentId)}-${jobSlug(args.task)}-${suffix}`
-  const runtimeId = `${args.agentId}-${baseName}`
+  const runtimeId = args.runtimeId || `${args.agentId}-${baseName}`
   const workers = await pruneDead(app)
   const existing = workers.find(item => item.name === baseName)
   if (existing && alive(existing.pid)) {
@@ -227,6 +230,9 @@ export const startJob = async (
   if (args.modelProfile) cliArgs.push("--model-profile", args.modelProfile)
   if (args.modelVariant) cliArgs.push("--variant", args.modelVariant)
   if (args.parallel) cliArgs.push("--parallel")
+  if (args.subject?.eventId) cliArgs.push("--subject-event", args.subject.eventId)
+  if (args.subject?.repoTarget) cliArgs.push("--subject-target", args.subject.repoTarget)
+  if (args.subject?.path) cliArgs.push("--subject-path", args.subject.path)
 
   const child = spawn(script, cliArgs, {
     cwd: app.root,
@@ -249,6 +255,7 @@ export const startJob = async (
     modelProfile: args.modelProfile,
     modelVariant: args.modelVariant,
     task: args.task,
+    subject: args.subject,
     parallel: args.parallel,
     recipients: args.recipients,
     source: args.source,

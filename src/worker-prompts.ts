@@ -32,6 +32,7 @@ const repoRelayContext = (policy?: RepoRelayPolicy, defaultPublishScope = "repo"
 
 const workerSafetyLines = () => [
   `The repository environment has been provisioned by the orchestrator before handoff. Start cleanly from the prepared repo context.`,
+  `Do not run optional repo onboarding tools such as \`bd onboard\` unless the executable is present. If such a tool is unavailable, continue from .openteam/task.json, the attached role files, repo docs, and .openteam/project-profile.json unless the repo explicitly requires that tool.`,
   `Use checkout-local scratch space such as .openteam/tmp for repro clones or temporary files; avoid /tmp unless the operator explicitly grants broader filesystem access.`,
   `Use OPENTEAM_TMP_DIR, OPENTEAM_CACHE_DIR, and OPENTEAM_ARTIFACTS_DIR for temporary files, caches, repro clones, and generated evidence.`,
   `Do not run GUI openers, system package installs, or writes outside the managed checkout/runtime. Stop with a concrete blocker when those are required.`,

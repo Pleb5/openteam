@@ -153,7 +153,7 @@ const evidenceText = (level?: string, prEligible?: boolean) => {
 
 const nextForState = (runId: string, state: string, recommended?: string) => {
   if (state === "needs-review") return `openteam runs evidence ${runId}`
-  if (state === "failed" || state === "stale" || state === "interrupted") return `openteam runs show ${runId}`
+  if (state === "failed" || state === "stale" || state === "interrupted") return recommended ? truncate(recommended, 120) : `openteam runs show ${runId}`
   if (state === "running") return `openteam runs observe ${runId}`
   return recommended ? truncate(recommended, 120) : `openteam runs show ${runId}`
 }

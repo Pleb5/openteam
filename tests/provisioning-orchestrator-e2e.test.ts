@@ -922,6 +922,50 @@ describe("Round 4 - run diagnosis and stale cleanup", () => {
     expect(summary.staleReasons?.join(" ")).toContain("OpenCode log contains hard failure")
   })
 
+  test("summaries turn needs-review OpenCode database locks into retryable failed state", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    const app = makeApp(runtimeRoot)
+    const logFile = path.join(runtimeRoot, "worker.log")
+    await writeFile(logFile, "Error: database is locked\n")
+    const [summary] = await summarizeRuns(app, [{
+      record: runRecord(app, {
+        state: "needs-review",
+        workerState: "succeeded",
+        verificationState: "needs-review",
+        process: {},
+        context: {id: "ctx1", checkout, branch: "openteam/test"},
+        logs: {opencode: logFile},
+        phases: [{name: "opencode-worker", state: "succeeded"}],
+      }),
+    }])
+
+    expect(summary.state).toBe("failed")
+    expect(summary.storedState).toBe("needs-review")
+    expect(summary.failureCategory).toBe("opencode-database-locked")
+    expect(summary.recommendedAction).toBe("openteam runs retry builder-01-task-a")
+  })
+
+  test("diagnose reports stopped dev servers as stopped after healthy run", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const diagnosis = await diagnoseRun(app, runRecord(app, {
+      state: "succeeded",
+      process: {},
+      devServer: {
+        url: "http://127.0.0.1:9",
+        startedAt: "2026-04-25T00:00:00.000Z",
+        stoppedAt: "2026-04-25T00:01:00.000Z",
+        lastHealthOkAt: "2026-04-25T00:00:30.000Z",
+      },
+      phases: [{name: "stop-dev-server", state: "succeeded"}],
+    }))
+
+    expect(diagnosis.devServer.status).toBe("stopped after healthy run")
+    expect(diagnosis.devServer.health.ok).toBe(false)
+  })
+
   test("finished runs with matching leased contexts produce cleanup reasons", async () => {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
     const checkout = path.join(runtimeRoot, "checkout")
@@ -1689,6 +1733,61 @@ describe("Round 7 - continuation and repair flows", () => {
 
     expect(gate.allowed).toBe(false)
     expect(gate.blockers.join("\n")).toContain("stale and has no carried evidence")
+  })
+
+  test("run-family gate allows retry for no-progress OpenCode database locks", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    const app = makeApp(runtimeRoot)
+    const context = leasedContext(checkout)
+    context.state = "idle"
+    context.lease = undefined
+    await writeRegistry(app, registryWith(identity(), {ctx1: context}))
+    const logFile = path.join(runtimeRoot, "worker.log")
+    await writeFile(logFile, "Error: database is locked\n")
+    const record = runRecord(app, {
+      state: "failed",
+      failureCategory: "opencode-database-locked",
+      context: {id: "ctx1", checkout, branch: "openteam/test"},
+      logs: {opencode: logFile},
+      doneContract: createDoneContract("builder", "code", "Fix helper crash"),
+      verification: {plan: createVerificationPlan(app, "code", {stacks: []}), results: []},
+    })
+    const item = createContinuationTaskItem(record, {kind: "retry"})
+
+    const gate = await evaluateContinuationGate(app, record, item, {explicitTask: false})
+
+    expect(gate.allowed).toBe(true)
+    expect(gate.blockers).toHaveLength(0)
+  })
+
+  test("run-family gate blocks retry when the prior run has implementation progress", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const checkout = await initRepo()
+    await writeFile(path.join(checkout, "src.txt"), "changed\n")
+    const baseCommit = runGit(checkout, ["rev-parse", "HEAD"])
+    const context = leasedContext(checkout, {baseCommit})
+    context.state = "idle"
+    context.lease = undefined
+    await writeRegistry(app, registryWith(identity(), {ctx1: context}))
+    const logFile = path.join(runtimeRoot, "worker.log")
+    await writeFile(logFile, "Error: database is locked\n")
+    const record = runRecord(app, {
+      state: "failed",
+      failureCategory: "opencode-database-locked",
+      context: {id: "ctx1", checkout, branch: "openteam/test", baseCommit},
+      logs: {opencode: logFile},
+      doneContract: createDoneContract("builder", "code", "Fix helper crash"),
+      verification: {plan: createVerificationPlan(app, "code", {stacks: []}), results: []},
+    })
+    const item = createContinuationTaskItem(record, {kind: "retry"})
+
+    const gate = await evaluateContinuationGate(app, record, item, {explicitTask: false})
+
+    expect(gate.allowed).toBe(false)
+    expect(gate.blockers.join("\n")).toContain("implementation progress")
   })
 
   test("run-family launch accounting records queued continuation attempts immediately", async () => {

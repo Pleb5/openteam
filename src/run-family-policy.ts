@@ -294,12 +294,27 @@ export const evaluateContinuationGate = async (
   warnings.push(...context.warnings)
 
   const diagnosis = await diagnoseRun(app, record).catch(() => undefined)
+  const retryRequested = item.continuation?.kind === "retry"
   if (record.state === "running" && !diagnosis?.stale) {
     blockers.push(`run ${record.runId} is still running; stop it or wait for it to finish before continuing`)
   }
   const carriedEvidence = item.continuation?.evidenceResults.filter(result => result.state === "succeeded") ?? []
-  if ((record.state === "stale" || diagnosis?.stale) && policy.level === "none" && carriedEvidence.length === 0) {
+  if (!retryRequested && (record.state === "stale" || diagnosis?.stale) && policy.level === "none" && carriedEvidence.length === 0) {
     blockers.push(`prior run ${record.runId} is stale and has no carried evidence; report the stale blocker or use --force with a genuinely different task`)
+  }
+
+  if (retryRequested) {
+    const progress = diagnosis?.implementationProgress
+    const retryable = Boolean(diagnosis?.hardFailure?.retryable || record.failureCategory === "opencode-database-locked" || record.failureCategory === "model-provider-server-error")
+    if (!retryable) {
+      blockers.push(`prior run ${record.runId} is not a retryable infrastructure failure`)
+    }
+    if (!progress?.checkoutExists) {
+      blockers.push(`prior run ${record.runId} has no available checkout to retry safely`)
+    }
+    if (progress?.hasImplementationProgress) {
+      blockers.push(`prior run ${record.runId} appears to have implementation progress; use runs continue or repair-evidence with an explicit delta instead`)
+    }
   }
 
   const category = record.failureCategory
@@ -308,7 +323,7 @@ export const evaluateContinuationGate = async (
     blockers.push(`family ${familyKey} already has ${categoryCount} attempts ending with ${category}; report a blocker instead of launching another similar continuation`)
   }
 
-  if (!taskStatesMaterialDifference(record, item, policy, Boolean(options.explicitTask))) {
+  if (!retryRequested && !taskStatesMaterialDifference(record, item, policy, Boolean(options.explicitTask))) {
     blockers.push("continuation task must state what is different from the prior attempt")
   }
 

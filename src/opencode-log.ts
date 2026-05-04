@@ -1,28 +1,69 @@
 const stripAnsi = (value: string) =>
   value.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
 
+export type OpenCodeHardFailureCategory =
+  | "opencode-database-locked"
+  | "model-config-invalid"
+  | "model-provider-auth-failed"
+  | "model-provider-server-error"
+  | "tool-permission-rejected"
+  | "opencode-policy-blocked"
+  | "publication-blocked"
+  | "opencode-runtime-error"
+
+export type OpenCodeHardFailure = {
+  category: OpenCodeHardFailureCategory
+  reason: string
+  evidence: string
+  retryable: boolean
+}
+
+const cleanEvidence = (value: string) =>
+  value.replace(/\s+/g, " ").slice(0, 240)
+
+const failure = (
+  match: string,
+  category: OpenCodeHardFailureCategory,
+  reason: string,
+  retryable = false,
+): OpenCodeHardFailure => ({
+  category,
+  reason,
+  evidence: cleanEvidence(match),
+  retryable,
+})
+
 export const detectOpenCodeHardFailure = (text: string) => {
   const clean = stripAnsi(text)
-  const checks: Array<[RegExp, string]> = [
-    [/ProviderModelNotFoundError/i, "configured opencode model was not found by provider"],
-    [/Model not found:\s*[^\n.]+/i, "configured opencode model was not found by provider"],
-    [/No provider found for model|Provider not found|Unknown provider/i, "configured opencode provider was not found"],
-    [/invalid (?:model )?variant|unknown variant/i, "configured opencode model variant was not accepted"],
-    [/AuthenticationError|Unauthorized|invalid api key|missing api key/i, "model provider authentication failed"],
-    [/"code"\s*:\s*"server_error"/i, "model provider returned server_error"],
-    [/"type"\s*:\s*"server_error"/i, "model provider returned server_error"],
-    [/permission requested:[\s\S]{0,300}auto-rejecting/i, "tool permission request was auto-rejected"],
-    [/The user rejected permission to use this specific tool call\./i, "tool permission request was rejected"],
-    [/sandbox (?:denied|blocked|rejected) the requested (?:tool|command|operation)/i, "sandbox policy blocked the requested operation"],
-    [/operation blocked by OpenCode policy/i, "OpenCode policy blocked the requested operation"],
-    [/Publication is still blocked|No branch push occurred|No PR URL was recorded|No upstream PR was created/i, "worker reported publication was blocked"],
+  const checks: Array<[RegExp, OpenCodeHardFailureCategory, string, boolean?]> = [
+    [/Error:\s*database is locked/i, "opencode-database-locked", "OpenCode runtime database was locked", true],
+    [/\bdatabase is locked\b/i, "opencode-database-locked", "OpenCode runtime database was locked", true],
+    [/ProviderModelNotFoundError/i, "model-config-invalid", "configured opencode model was not found by provider"],
+    [/Model not found:\s*[^\n.]+/i, "model-config-invalid", "configured opencode model was not found by provider"],
+    [/No provider found for model|Provider not found|Unknown provider/i, "model-config-invalid", "configured opencode provider was not found"],
+    [/invalid (?:model )?variant|unknown variant/i, "model-config-invalid", "configured opencode model variant was not accepted"],
+    [/AuthenticationError|Unauthorized|invalid api key|missing api key/i, "model-provider-auth-failed", "model provider authentication failed"],
+    [/"code"\s*:\s*"server_error"/i, "model-provider-server-error", "model provider returned server_error", true],
+    [/"type"\s*:\s*"server_error"/i, "model-provider-server-error", "model provider returned server_error", true],
+    [/permission requested:[\s\S]{0,300}auto-rejecting/i, "tool-permission-rejected", "tool permission request was auto-rejected"],
+    [/The user rejected permission to use this specific tool call\./i, "tool-permission-rejected", "tool permission request was rejected"],
+    [/sandbox (?:denied|blocked|rejected) the requested (?:tool|command|operation)/i, "opencode-policy-blocked", "sandbox policy blocked the requested operation"],
+    [/operation blocked by OpenCode policy/i, "opencode-policy-blocked", "OpenCode policy blocked the requested operation"],
+    [/Publication is still blocked|No branch push occurred|No PR URL was recorded|No upstream PR was created/i, "publication-blocked", "worker reported publication was blocked"],
+    [/\b(?:panic|fatal panic|unhandled exception|uncaught exception)\b/i, "opencode-runtime-error", "OpenCode runtime crashed or threw an unhandled exception"],
   ]
-  for (const [pattern, reason] of checks) {
+  for (const [pattern, category, reason, retryable] of checks) {
     const match = clean.match(pattern)
     if (match) {
-      return {reason, evidence: match[0].replace(/\s+/g, " ").slice(0, 240)}
+      return failure(match[0], category, reason, Boolean(retryable))
     }
   }
+
+  const lastLine = lastMeaningfulLogLine(clean)
+  if (lastLine?.match(/^Error:\s+\S+/i)) {
+    return failure(lastLine, "opencode-runtime-error", "OpenCode exited with a terminal runtime error")
+  }
+
   return undefined
 }
 

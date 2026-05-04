@@ -1478,6 +1478,8 @@ describe("runtime invariants", () => {
 
   test("OpenCode logs detect infrastructure hard failures", () => {
     expect(detectOpenCodeHardFailure('Error: {"type":"server_error","code":"server_error"}')?.reason).toContain("server_error")
+    expect(detectOpenCodeHardFailure("Error: database is locked")?.category).toBe("opencode-database-locked")
+    expect(detectOpenCodeHardFailure("Error: database is locked")?.retryable).toBe(true)
     expect(detectOpenCodeHardFailure("! permission requested: external_directory (/tmp/*); auto-rejecting")?.reason).toContain("auto-rejected")
     expect(detectOpenCodeHardFailure("sandbox denied the requested command")?.reason).toContain("sandbox policy")
     expect(detectOpenCodeHardFailure("normal repo command failed with Error: test output")).toBeUndefined()

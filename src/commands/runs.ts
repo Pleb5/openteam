@@ -6,6 +6,7 @@ import {evaluateEvidencePolicy, evidenceLevel, groupEvidenceResults, verificatio
 import {detectOpenCodeBlockedState, detectOpenCodeHardFailure, detectWorkerVerificationBlockers, lastMeaningfulLogLine} from "../opencode-log.js"
 import {loadRepoRegistry, releaseRepoContext} from "../repo.js"
 import {evaluateRunRecord, type RunEvalResult} from "../run-evals.js"
+import {runImplementationProgressSignals} from "../run-progress.js"
 import type {AgentRuntimeState, AppCfg, TaskRunRecord} from "../types.js"
 
 const value = (args: string[], key: string) => {
@@ -239,6 +240,15 @@ export const checkUrl = async (url?: string) => {
   return {...get, head}
 }
 
+const devServerStatus = (record: TaskRunRecord, health: Awaited<ReturnType<typeof checkUrl>>) => {
+  const url = record.devServer?.url || record.browser?.url || record.result?.url
+  if (!url) return "none"
+  if (record.devServer?.stoppedAt) {
+    return record.devServer.lastHealthOkAt ? "stopped after healthy run" : "stopped after unhealthy run"
+  }
+  return health.ok ? "running healthy" : "running down"
+}
+
 export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
   const registry = await loadRepoRegistry(app)
   const context = record.context?.id ? registry.contexts[record.context.id] : undefined
@@ -248,6 +258,7 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
   const knownTaskPids = taskPids(record)
   const anyTaskPidAlive = knownTaskPids.some(pidAlive)
   const health = await checkUrl(record.browser?.url || record.devServer?.url || record.result?.url)
+  const devStatus = devServerStatus(record, health)
   const runningPhase = latestRunningPhase(record)
   const logs = {
     opencode: await logInfo(record.logs?.opencode),
@@ -306,7 +317,7 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
     }
   }
 
-  if (record.state !== "running" && record.state !== "failed" && record.state !== "stale" && hardFailure) {
+  if (record.state !== "running" && record.state !== "stale" && hardFailure) {
     reasons.push(`OpenCode log contains hard failure: ${hardFailure.reason}`)
   }
 
@@ -352,6 +363,8 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
       devUrlHealthy: health.ok,
     })
     : undefined
+  const implementationProgress = await runImplementationProgressSignals(record, {includeCheckoutEvidence: record.state !== "running"}).catch(() => undefined)
+  const recommendedAction = recommendedActionForDiagnosis(record, {hardFailure, stale, implementationProgress})
 
   return {
     runId: record.runId,
@@ -380,6 +393,7 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
     },
     devServer: {
       ...record.devServer,
+      status: devStatus,
       health,
     },
     provision: {
@@ -390,6 +404,8 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
       logFile: record.logs?.provision,
     },
     hardFailure,
+    implementationProgress,
+    recommendedAction,
     verificationBlockers,
     verification: record.verification,
     browser: record.browser,
@@ -440,10 +456,33 @@ export const categorizeStaleRun = (
 }
 
 const hardFailureCategory = (diagnosis?: RunDiagnosis) => {
+  if (diagnosis?.hardFailure?.category) return diagnosis.hardFailure.category
   const reason = diagnosis?.hardFailure?.reason ?? ""
   if (!reason) return undefined
   if (/model|provider|variant|authentication/i.test(reason)) return "model-config-invalid"
   return "opencode-hard-failure"
+}
+
+const recommendedActionForDiagnosis = (
+  record: TaskRunRecord,
+  diagnosis: {
+    hardFailure?: {retryable?: boolean}
+    stale: boolean
+    implementationProgress?: Awaited<ReturnType<typeof runImplementationProgressSignals>>
+  },
+) => {
+  if (
+    diagnosis.hardFailure?.retryable &&
+    diagnosis.implementationProgress?.checkoutExists &&
+    !diagnosis.implementationProgress.hasImplementationProgress
+  ) {
+    return `openteam runs retry ${record.runId}`
+  }
+  if (diagnosis.stale) return `openteam runs cleanup-stale --dry-run`
+  if (record.state === "needs-review") return `openteam runs evidence ${record.runId}`
+  if (record.state === "failed" || record.state === "interrupted") return `openteam runs show ${record.runId}`
+  if (record.state === "running") return `openteam runs observe ${record.runId}`
+  return record.result?.recommendedAction ?? `openteam runs show ${record.runId}`
 }
 
 const effectiveRunState = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
@@ -473,6 +512,8 @@ export const compactDiagnosis = (diagnosis?: RunDiagnosis) => diagnosis ? {
   stale: diagnosis.stale,
   reasons: diagnosis.reasons,
   hardFailure: diagnosis.hardFailure,
+  implementationProgress: diagnosis.implementationProgress,
+  recommendedAction: diagnosis.recommendedAction,
   staleFailureCategory: diagnosis.staleFailureCategory,
   verificationBlockers: diagnosis.verificationBlockers,
   activePhase: diagnosis.activePhase?.name,
@@ -484,6 +525,7 @@ export const compactDiagnosis = (diagnosis?: RunDiagnosis) => diagnosis ? {
   activePhaseDurationMs: diagnosis.activePhaseDurationMs,
   opencodeProgress: diagnosis.opencodeProgress,
   devUrl: diagnosis.devServer.health.url,
+  devStatus: diagnosis.devServer.status,
   devUrlHealthy: diagnosis.devServer.health.ok,
   devUrlError: diagnosis.devServer.health.error,
   contextState: diagnosis.context?.state,
@@ -524,6 +566,7 @@ const runListView = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
     workerState: record.workerState,
     verificationState: record.verificationState,
     failureCategory: state === "failed" ? hardFailureCategory(diagnosis) ?? record.failureCategory : record.failureCategory,
+    recommendedAction: compact?.recommendedAction ?? record.result?.recommendedAction,
     staleFailureCategory: compact?.staleFailureCategory,
     provisionState: record.provisionState,
     provisionFailureCategory: record.provisionFailureCategory,
@@ -532,6 +575,7 @@ const runListView = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
     liveSignals: compact ? {
       anyPidAlive: compact.anyPidAlive,
       anyTaskPidAlive: compact.anyTaskPidAlive,
+      devStatus: compact.devStatus,
       devUrlHealthy: compact.devUrlHealthy,
       newestLogAgeMs: compact.newestLogAgeMs,
       opencodeLogAgeMs: compact.opencodeProgress.logAgeMs,
@@ -600,7 +644,10 @@ const printDiagnosis = (diagnosis: Awaited<ReturnType<typeof diagnoseRun>>) => {
   if (diagnosis.opencodeProgress.stallSeverity) console.log(`opencode stall: ${diagnosis.opencodeProgress.stallSeverity}`)
   if (diagnosis.opencodeProgress.blocked) console.log(`opencode blocked: ${diagnosis.opencodeProgress.blocked.kind} (${diagnosis.opencodeProgress.blocked.reason})`)
   console.log(`dev url: ${diagnosis.devServer.health.url ?? "(none)"}`)
-  console.log(`dev health: ${diagnosis.devServer.health.ok ? "ok" : "down"}${diagnosis.devServer.health.error ? ` (${diagnosis.devServer.health.error})` : ""}`)
+  console.log(`dev status: ${diagnosis.devServer.status}`)
+  if (!diagnosis.devServer.status.startsWith("stopped after")) {
+    console.log(`dev health: ${diagnosis.devServer.health.ok ? "ok" : "down"}${diagnosis.devServer.health.error ? ` (${diagnosis.devServer.health.error})` : ""}`)
+  }
   if (diagnosis.provision.state) console.log(`provision: ${diagnosis.provision.state}${diagnosis.provision.failureCategory ? ` (${diagnosis.provision.failureCategory})` : ""}`)
   if (diagnosis.provision.projectProfilePath) console.log(`project profile: ${diagnosis.provision.projectProfilePath}`)
   if (diagnosis.provision.verificationToolingReady !== undefined) console.log(`verification tooling ready: ${diagnosis.provision.verificationToolingReady ? "yes" : "no"}`)
@@ -612,6 +659,10 @@ const printDiagnosis = (diagnosis: Awaited<ReturnType<typeof diagnoseRun>>) => {
     const details = result.blocker ?? result.error ?? result.skippedReason ?? result.logFile ?? ""
     console.log(`verification result: ${result.id} ${result.state}${details ? ` (${details})` : ""}`)
   }
+  if (diagnosis.implementationProgress) {
+    console.log(`implementation progress: ${diagnosis.implementationProgress.hasImplementationProgress ? "yes" : "no"}`)
+    for (const reason of diagnosis.implementationProgress.reasons) console.log(`progress reason: ${reason}`)
+  }
   console.log(`context: ${diagnosis.context ? `${diagnosis.context.id} ${diagnosis.context.state}` : "(none)"}`)
   if (diagnosis.manualTakeover) {
     console.log(`manual takeover: ${diagnosis.manualTakeover.contextHeld ? "held" : "not held"}`)
@@ -620,6 +671,7 @@ const printDiagnosis = (diagnosis: Awaited<ReturnType<typeof diagnoseRun>>) => {
   for (const reason of diagnosis.reasons) {
     console.log(`reason: ${reason}`)
   }
+  console.log(`recommended: ${diagnosis.recommendedAction}`)
 }
 
 const markRunTerminal = async (

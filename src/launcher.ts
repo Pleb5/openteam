@@ -20,7 +20,7 @@ import {buildFinalResponseRecord, createOutputTailCapture, type OutputTailSnapsh
 import {redactSensitiveText} from "./log-redaction.js"
 import {assertModelSelectionValid, resolveModelSelection} from "./model-profiles.js"
 import {selectOpencodePrimaryAgent, writeOpencodeManagedAgents} from "./opencode-agents.js"
-import {detectOpenCodeHardFailure} from "./opencode-log.js"
+import {detectOpenCodeHardFailure, type OpenCodeHardFailure} from "./opencode-log.js"
 import {dispatchOperatorRequest, type DispatchContext} from "./orchestrator.js"
 import {detectProjectProfile, writeProjectProfile, type ProjectProfile} from "./project-profile.js"
 import {writeRepoPublishContext, type RepoPublishScope} from "./repo-publish.js"
@@ -32,6 +32,7 @@ import {
   writeDmReportState,
 } from "./reporting-policy.js"
 import {readGitSubmodules, releaseRepoContext, resolveRepoAnnouncementTarget, resolveRepoRelayPolicy, resolveRepoTarget} from "./repo.js"
+import {runImplementationProgressSignals} from "./run-progress.js"
 import {continuationEvidenceForCarry} from "./run-continuation.js"
 import {formatObservationEvent, observeRuns} from "./run-observer.js"
 import {prepareTaskSubject, resolveTaskSubject} from "./subject.js"
@@ -130,6 +131,12 @@ const fill = (items: string[], vars: Record<string, string>) => items.map(item =
 
 const shellQuote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`
 
+const runtimeName = (value: string) =>
+  value
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 160) || "session"
+
 export const checkoutRuntimeDirs = (checkout: string) => {
   const root = path.join(checkout, ".openteam")
   return {
@@ -172,6 +179,40 @@ export const checkoutRuntimeEnv = (checkout: string, env: Record<string, string>
     npm_config_store_dir: dirs.pnpmStore,
     ...env,
     PATH: pathValue,
+  }
+}
+
+export const opencodeRuntimeDirs = (checkout: string, stateId: string, attempt = 1) => {
+  const root = path.join(checkoutRuntimeDirs(checkout).root, "opencode", runtimeName(stateId), `attempt-${attempt}`)
+  return {
+    root,
+    data: path.join(root, "data"),
+    state: path.join(root, "state"),
+    cache: path.join(root, "cache"),
+    tmp: path.join(root, "tmp"),
+  }
+}
+
+const opencodeRuntimeEnv = async (
+  checkout: string,
+  stateId: string,
+  attempt: number,
+  env: Record<string, string> = {},
+) => {
+  const dirs = opencodeRuntimeDirs(checkout, stateId, attempt)
+  await Promise.all(Object.values(dirs).map(dir => ensureDir(dir)))
+  return {
+    ...checkoutRuntimeEnv(checkout, env),
+    TMPDIR: dirs.tmp,
+    TMP: dirs.tmp,
+    TEMP: dirs.tmp,
+    XDG_DATA_HOME: dirs.data,
+    XDG_STATE_HOME: dirs.state,
+    XDG_CACHE_HOME: dirs.cache,
+    OPENCODE_DATA_DIR: dirs.data,
+    OPENCODE_STATE_DIR: dirs.state,
+    OPENTEAM_OPENCODE_STATE_DIR: dirs.root,
+    OPENTEAM_OPENCODE_ATTEMPT: String(attempt),
   }
 }
 
@@ -706,6 +747,28 @@ const wait = async (child: ReturnType<typeof spawnLogged>) => {
   })
 }
 
+class OpenCodeHardFailureError extends Error {
+  hardFailure: OpenCodeHardFailure
+  logFile: string
+  finalResponse?: ReturnType<typeof buildFinalResponseRecord>
+
+  constructor(hardFailure: OpenCodeHardFailure, logFile: string, finalResponse?: ReturnType<typeof buildFinalResponseRecord>) {
+    super(`OpenCode hard failure: ${hardFailure.reason}; category: ${hardFailure.category}; evidence: ${hardFailure.evidence}`)
+    this.name = "OpenCodeHardFailureError"
+    this.hardFailure = hardFailure
+    this.logFile = logFile
+    this.finalResponse = finalResponse
+  }
+}
+
+const openCodeHardFailureFromError = (error: unknown) => {
+  if (error instanceof OpenCodeHardFailureError) return error.hardFailure
+  const text = formatError(error)
+  const category = text.match(/OpenCode hard failure:[^\n]*category:\s*([a-z0-9-]+)/i)?.[1]
+  if (!category) return undefined
+  return {category, reason: "OpenCode hard failure", evidence: text.slice(0, 240), retryable: false}
+}
+
 const runOpencodeSession = async (
   agent: PreparedAgent,
   checkout: string,
@@ -717,6 +780,7 @@ const runOpencodeSession = async (
   env: Record<string, string> = {},
   devEnv?: DevEnv,
   primaryAgent?: string,
+  options: {stateId?: string; attempt?: number} = {},
 ) => {
   const files = attachFiles(agent)
   const opencodeAgent = primaryAgent ?? selectOpencodePrimaryAgent(agent)
@@ -736,26 +800,99 @@ const runOpencodeSession = async (
 
   args.push("--", prompt)
 
+  const attempt = options.attempt ?? 1
+  const stateId = options.stateId ?? title
   const opencodeBinary = resolveHostCommand(agent.app.config.opencode.binary)
-  const child = spawnLogged(opencodeBinary, args, checkout, logFile, checkoutRuntimeEnv(checkout, env), devEnv)
+  const child = spawnLogged(opencodeBinary, args, checkout, logFile, await opencodeRuntimeEnv(checkout, stateId, attempt, env), devEnv)
   await onStart?.(child.pid)
   const code = await wait(child)
   const output = child.outputSnapshot()
+  const finalResponse = buildFinalResponseRecord({
+    text: output.text,
+    truncated: output.truncated,
+    logFile,
+  })
   const hardFailure = existsSync(logFile)
     ? detectOpenCodeHardFailure(await readFile(logFile, "utf8"))
     : undefined
   if (hardFailure) {
-    throw new Error(`OpenCode hard failure: ${hardFailure.reason}; evidence: ${hardFailure.evidence}`)
+    throw new OpenCodeHardFailureError(hardFailure, logFile, finalResponse)
   }
   return {
     code,
     pid: child.pid,
-    finalResponse: buildFinalResponseRecord({
-      text: output.text,
-      truncated: output.truncated,
-      logFile,
-    }),
+    finalResponse,
   }
+}
+
+const opencodeAttemptLogFile = (logFile: string, attempt: number) => {
+  if (attempt <= 1) return logFile
+  const ext = path.extname(logFile)
+  const base = ext ? logFile.slice(0, -ext.length) : logFile
+  return `${base}-retry-${attempt}${ext || ".log"}`
+}
+
+const runWorkerOpencodeSessionWithRetry = async (input: {
+  agent: PreparedAgent
+  checkout: string
+  idTask: string
+  prompt: string
+  logFile: string
+  modelSelection: ResolvedModelSelection
+  runRecord: TaskRunRecord
+  env: Record<string, string>
+  devEnv?: DevEnv
+}) => {
+  const maxAttempts = 2
+  let lastError: unknown
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const attemptLogFile = opencodeAttemptLogFile(input.logFile, attempt)
+    const attempts = Array.from(new Set([...(input.runRecord.logs?.opencodeAttempts ?? []), attemptLogFile]))
+    await updateRunRecord(input.runRecord, {logs: {opencode: attemptLogFile, opencodeAttempts: attempts}})
+
+    try {
+      return await runOpencodeSession(
+        input.agent,
+        input.checkout,
+        input.idTask,
+        input.prompt,
+        attemptLogFile,
+        input.modelSelection,
+        pid => updateRunRecord(input.runRecord, {process: {opencodePid: pid}}),
+        input.env,
+        input.devEnv,
+        undefined,
+        {stateId: input.runRecord.runId, attempt},
+      )
+    } catch (error) {
+      lastError = error
+      const hardFailure = error instanceof OpenCodeHardFailureError ? error.hardFailure : undefined
+      const progress = await runImplementationProgressSignals(input.runRecord, {
+        checkout: input.checkout,
+        includeCheckoutEvidence: true,
+      })
+      const canRetry =
+        attempt < maxAttempts &&
+        hardFailure?.category === "opencode-database-locked" &&
+        hardFailure.retryable &&
+        !progress.hasImplementationProgress
+
+      if (!canRetry) throw error
+
+      await skipRunPhase(input.runRecord, "opencode-worker-retry-backoff", {
+        attempt,
+        nextAttempt: attempt + 1,
+        failureCategory: hardFailure.category,
+        reason: hardFailure.reason,
+        evidence: hardFailure.evidence,
+        progressReasons: progress.reasons,
+      })
+      await sleep(1500)
+    }
+  }
+
+  throw lastError ?? new Error("OpenCode worker retry exhausted without a recorded error")
 }
 
 const runProvisioningPhase = async (
@@ -1072,6 +1209,8 @@ export const contextBusyContextId = (error: unknown) => {
 }
 
 const taskFailureCategory = (error: unknown) => {
+  const hardFailure = openCodeHardFailureFromError(error)
+  if (hardFailure) return hardFailure.category
   const text = formatError(error)
   if (contextBusyContextId(error)) return "context-busy"
   if (/model|provider|variant/i.test(text) && /opencode|provider\/model|not found|invalid|required/i.test(text)) return "model-config-invalid"
@@ -1953,13 +2092,23 @@ export const runTask = async (
         const session = await runPhase(
           runRecord,
           "opencode-worker",
-          () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, modelSelection, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}}), {
-            OPENTEAM_RUN_ID: runRecord.runId,
-            OPENTEAM_RUN_FILE: runRecord.runFile,
-            OPENTEAM_TASK_MANIFEST: taskManifestFile,
-            OPENTEAM_DEV_URL: dev.url,
-            ...subjectEnv(resolvedSubject),
-          }, devEnv),
+          () => runWorkerOpencodeSessionWithRetry({
+            agent,
+            checkout,
+            idTask,
+            prompt,
+            logFile,
+            modelSelection,
+            runRecord,
+            env: {
+              OPENTEAM_RUN_ID: runRecord.runId,
+              OPENTEAM_RUN_FILE: runRecord.runFile,
+              OPENTEAM_TASK_MANIFEST: taskManifestFile,
+              OPENTEAM_DEV_URL: dev.url,
+              ...subjectEnv(resolvedSubject),
+            },
+            devEnv,
+          }),
           {logFile},
         )
         code = session.code
@@ -2062,12 +2211,22 @@ export const runTask = async (
       const session = await runPhase(
         runRecord,
         "opencode-worker",
-        () => runOpencodeSession(agent, checkout, idTask, prompt, logFile, modelSelection, pid => updateRunRecord(runRecord, {process: {opencodePid: pid}}), {
-          OPENTEAM_RUN_ID: runRecord.runId,
-          OPENTEAM_RUN_FILE: runRecord.runFile,
-          OPENTEAM_TASK_MANIFEST: taskManifestFile,
-          ...subjectEnv(resolvedSubject),
-        }, devEnv),
+        () => runWorkerOpencodeSessionWithRetry({
+          agent,
+          checkout,
+          idTask,
+          prompt,
+          logFile,
+          modelSelection,
+          runRecord,
+          env: {
+            OPENTEAM_RUN_ID: runRecord.runId,
+            OPENTEAM_RUN_FILE: runRecord.runFile,
+            OPENTEAM_TASK_MANIFEST: taskManifestFile,
+            ...subjectEnv(resolvedSubject),
+          },
+          devEnv,
+        }),
         {logFile},
       )
       code = session.code
@@ -2086,6 +2245,7 @@ export const runTask = async (
       ? await applyEvidenceQualityGate(runRecord)
       : evaluateEvidencePolicy(runRecord.doneContract, runRecord.verification?.results ?? [])
     const state = code === 0 ? evidencePolicy.finalStateForSuccessfulWorker : "failed"
+    const finalOpencodeLogFile = runRecord.logs?.opencode ?? logFile
     const result: LaunchResult = {
       id: idTask,
       state,
@@ -2119,7 +2279,7 @@ export const runTask = async (
       checkout,
       branch,
       url,
-      logFile,
+      logFile: finalOpencodeLogFile,
       baseAgentId: agent.configId,
       runtimeId: agent.id,
       parallel: item.parallel,
@@ -2149,7 +2309,7 @@ export const runTask = async (
         prEligible: evidencePolicy.prEligible,
         recommendedAction: evidencePolicy.recommendedAction,
         url: url || undefined,
-        logFile,
+        logFile: finalOpencodeLogFile,
         result,
       }),
       item.recipients,
@@ -2159,9 +2319,11 @@ export const runTask = async (
   } catch (error) {
     taskError = error
     runError = error
+    const hardFailureError = error instanceof OpenCodeHardFailureError ? error : undefined
     await updateRunRecord(runRecord, {
       workerState: runRecord.workerState ?? "failed",
       failureCategory: runRecord.failureCategory ?? taskFailureCategory(error),
+      ...(hardFailureError?.finalResponse ? {finalResponse: hardFailureError.finalResponse} : {}),
     }).catch(() => undefined)
     await mergeState(agent, {
       running: false,

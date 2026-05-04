@@ -38,6 +38,7 @@ export type RunObservationSnapshot = {
   opencodeBlockedReason?: string
   opencodeStallSeverity?: "warning" | "critical"
   devUrl?: string
+  devStatus?: string
   devHealthy: boolean
   devError?: string
   evidenceLevel: string
@@ -108,7 +109,7 @@ const writeObservationState = async (state: RunObservationState) => {
 const effectiveState = (record: TaskRunRecord, diagnosis: Awaited<ReturnType<typeof diagnoseRun>>) => {
   if (diagnosis.stale) return "stale"
   if (
-    record.state === "succeeded" && (
+    (record.state === "succeeded" || record.state === "needs-review") && (
       diagnosis.hardFailure ||
       record.workerState === "failed" ||
       (
@@ -146,7 +147,7 @@ export const snapshotRunObservation = async (
     task: record.task,
     workerState: record.workerState,
     verificationState: record.verificationState,
-    failureCategory: record.failureCategory,
+    failureCategory: record.failureCategory ?? diagnosis.hardFailure?.category,
     activePhase: diagnosis.activePhase?.name,
     activePhaseDurationMs: diagnosis.activePhaseDurationMs,
     stale: diagnosis.stale,
@@ -161,6 +162,7 @@ export const snapshotRunObservation = async (
     opencodeBlockedReason: diagnosis.opencodeProgress.blocked?.reason,
     opencodeStallSeverity: diagnosis.opencodeProgress.stallSeverity,
     devUrl: devHealth.url,
+    devStatus: diagnosis.devServer.status,
     devHealthy: devHealth.ok,
     devError: devHealth.error,
     evidenceLevel: evidence.level,
@@ -172,7 +174,11 @@ export const snapshotRunObservation = async (
     contextLeaseMatchesRun: diagnosis.context?.leaseMatchesRun,
     finishedAt: record.finishedAt,
     durationMs: record.durationMs,
-    recommendedAction: evidence.recommendedAction,
+    recommendedAction: diagnosis.hardFailure
+      ? diagnosis.recommendedAction
+      : record.state === "needs-review"
+        ? evidence.recommendedAction
+        : diagnosis.recommendedAction ?? evidence.recommendedAction,
   }
 }
 
@@ -309,7 +315,7 @@ const printSnapshot = (snapshot: RunObservationSnapshot) => {
   if (snapshot.opencodeLogAgeMs !== undefined) console.log(`opencode log age ms: ${snapshot.opencodeLogAgeMs}`)
   if (snapshot.opencodeStallSeverity) console.log(`opencode stall: ${snapshot.opencodeStallSeverity}`)
   if (snapshot.opencodeBlockedKind) console.log(`opencode blocked: ${snapshot.opencodeBlockedKind}${snapshot.opencodeBlockedReason ? ` (${snapshot.opencodeBlockedReason})` : ""}`)
-  console.log(`dev: ${snapshot.devUrl ?? "(none)"} ${snapshot.devHealthy ? "healthy" : "down"}${snapshot.devError ? ` (${snapshot.devError})` : ""}`)
+  console.log(`dev: ${snapshot.devUrl ?? "(none)"} ${snapshot.devStatus ?? (snapshot.devHealthy ? "healthy" : "down")}${snapshot.devError && !snapshot.devStatus?.startsWith("stopped after") ? ` (${snapshot.devError})` : ""}`)
   console.log(`evidence: ${snapshot.evidenceLevel}`)
   console.log(`PR eligible: ${snapshot.prEligible ? "yes" : "no"}`)
   console.log(`missing evidence: ${snapshot.missingEvidenceCount}`)

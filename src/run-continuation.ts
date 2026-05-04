@@ -71,6 +71,14 @@ export const defaultContinuationTask = (
     ].filter(Boolean).join("\n")
   }
 
+  if (kind === "retry") {
+    return [
+      `Retry prior run ${record.runId} because it failed before implementation progress was recorded.`,
+      `Start from the original task, inspect the prepared checkout normally, record fresh verification evidence, and publish only if evidence becomes strong and role policy allows it.`,
+      `Original task: ${record.task}`,
+    ].join("\n")
+  }
+
   return [
     `Continue from prior run ${record.runId}.`,
     `Inspect the current checkout state and prior evidence, finish any incomplete task work, record structured verification evidence, and publish only if evidence becomes strong and role policy allows it.`,
@@ -90,7 +98,7 @@ export const createContinuationTaskItem = (
   },
 ): TaskItem => {
   const agentId = record.baseAgentId || record.agentId
-  const continuation = createRunContinuation(record, options.kind, options.carryEvidence ?? true)
+  const continuation = createRunContinuation(record, options.kind, options.carryEvidence ?? options.kind !== "retry")
   return {
     id: taskId(options.kind, record),
     task: options.task?.trim() || defaultContinuationTask(record, options.kind),
@@ -131,6 +139,7 @@ export const continuationPromptLines = (continuation?: TaskContinuation) => {
     continuation.recommendedAction ? `Prior recommended action: ${continuation.recommendedAction}` : "",
     continuation.missingEvidence.length > 0 ? `Prior missing evidence: ${continuation.missingEvidence.join("; ")}` : "",
     continuation.prBlockers.length > 0 ? `Prior PR blockers: ${continuation.prBlockers.join("; ")}` : "",
+    continuation.kind === "retry" ? `Retry mode requires that the prior run made no implementation progress; treat prior logs as failure context only and record fresh evidence for this run.` : "",
     continuation.carryEvidence
       ? `Prior successful verification results have been carried into this checkout as context; failed or blocked prior results remain prompt context only. Add new evidence for what you verify now.`
       : `Prior verification results were not carried forward; record fresh evidence for this run.`,

@@ -273,7 +273,7 @@ export type AppCfg = {
 
 export type TaskState = "queued" | "running" | "succeeded" | "needs-review" | "failed" | "interrupted" | "stale"
 
-export type TaskContinuationKind = "continue" | "repair-evidence"
+export type TaskContinuationKind = "continue" | "repair-evidence" | "retry"
 
 export type TaskContinuation = {
   version: 1
@@ -617,6 +617,7 @@ export type TaskRunRecord = {
   doneContract?: DoneContract
   logs?: {
     opencode?: string
+    opencodeAttempts?: string[]
     provision?: string
     dev?: string
   }
