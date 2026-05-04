@@ -227,6 +227,9 @@ Worker process policy:
 - Nostr-git PR publication should use `openteam repo publish pr ...` after pushing the branch; global `gh auth` is not part of the default publication path
 - for NIP-34 PRs, `branch-name` means the target branch to merge into; use `--target-branch` for that and never pass the worker/source branch as `--branch`
 - when publishing an upstream PR from an orchestrator-owned fork, `openteam repo publish pr ...` infers source fork `clone` URLs and repo owner/maintainer `p` recipients from `.openteam/repo-context.json`
+- when publishing a PR from a submodule, `openteam repo publish pr ...` must target the top-level repo owner's active kind `30617` submodule repo announcement whose `clone` URL matches the parent `.gitmodules` URL, but the PR source `clone` tag must be an openteam-controlled fork that advertises the PR tip commit
+- if the only owner announcements matching a submodule clone URL are deleted, PR publication must fail instead of falling back to the orchestrator fork or stale d-tag
+- submodule checkouts must not rely on host-global Git credentials; openteam disables ambient submodule credential helpers during preparation and rewires submodule `origin` to the openteam fork before publishing
 - Normal `repo publish pr` and `repo publish pr-update` require strong evidence from the active run/checkout; use `--draft` or `--wip` only when incomplete verification is intentional
 - workers should treat GUI openers, system package installs, writes outside checkout/runtime, and broad destructive cleanup as blockers unless explicitly authorized
 - non-orchestrator workers should not ask interactive questions or inspect orchestrator lifecycle internals such as stale cleanup, continuation gates, worker stopping, repo-context lease release, or `runtime/runs`; see `docs/opencode-runtime-behavior-plan.md`

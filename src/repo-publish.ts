@@ -1,4 +1,5 @@
 import {existsSync} from "node:fs"
+import {spawnSync} from "node:child_process"
 import {mkdir, readFile, writeFile} from "node:fs/promises"
 import path from "node:path"
 import {prepareAgent} from "./config.js"
@@ -15,11 +16,16 @@ import {
   REPO_EVENT_KINDS,
   TAG_NAMESPACE_GIT_ROLE,
 } from "./events.js"
+import {configureCheckoutGitAuth, gitAuthEnv} from "./git-auth.js"
 import {publishEventDetailed, secretKey, type PublishSummary} from "./nostr.js"
 import {
+  ensureOrchestratorForkForRepo,
   resolveRepoAnnouncementTarget,
+  resolveOwnerRepoAnnouncementByCloneUrl,
   resolveRepoRelayPolicy,
+  readGitSubmodules,
   type RepoRelayPolicy,
+  type GitSubmodule,
 } from "./repo.js"
 import type {AppCfg, PreparedAgent, RepoIdentity, ResolvedRepoTarget} from "./types.js"
 
@@ -73,6 +79,15 @@ export type ResolvedRepoPublishTarget = {
   policy: RepoRelayPolicy
   target: string
   scope: RepoPublishScope
+  sourceCloneUrls?: string[]
+  sourceCheckout?: string
+  sourceBranch?: string
+  sourceAuthUsername?: string
+  managedSource?: boolean
+  submodule?: {
+    path: string
+    url: string
+  }
 }
 
 export type RepoPublishResult = {
@@ -90,6 +105,8 @@ type ResolveOptions = {
   context?: string
   scope?: RepoPublishScope
   cwd?: string
+  preferSubmodule?: boolean
+  dryRun?: boolean
 }
 
 type PublishOptions = ResolveOptions & {
@@ -186,6 +203,107 @@ const isPubkey = (value: string) => /^[0-9a-f]{64}$/i.test(value)
 const repoContextFile = (checkout: string) => path.join(checkout, ".openteam", "repo-context.json")
 
 const repoAddress = (identity: RepoIdentity) => identity.key
+
+const slashPath = (value: string) => path.normalize(value).replace(/\\/g, "/")
+
+const isInsideCheckout = (checkout: string, value: string) => {
+  const relative = path.relative(path.resolve(checkout), path.resolve(value))
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))
+}
+
+const submoduleContainsPath = (submodule: GitSubmodule, relativePath: string) => {
+  const modulePath = slashPath(submodule.path)
+  const relative = slashPath(relativePath)
+  return relative === modulePath || relative.startsWith(`${modulePath}/`)
+}
+
+const submoduleForPublishPath = async (checkout: string, cwd: string) => {
+  const submodules = await readGitSubmodules(checkout)
+  if (submodules.length === 0) return undefined
+
+  const candidates: string[] = []
+  if (isInsideCheckout(checkout, cwd)) {
+    const relative = slashPath(path.relative(path.resolve(checkout), path.resolve(cwd)))
+    if (relative && relative !== ".") candidates.push(relative)
+  }
+  const subjectPath = process.env.OPENTEAM_SUBJECT_PATH?.trim()
+  if (subjectPath) candidates.push(slashPath(subjectPath))
+
+  for (const candidate of candidates) {
+    const matches = submodules
+      .filter(submodule => submoduleContainsPath(submodule, candidate))
+      .sort((a, b) => b.path.length - a.path.length)
+    if (matches[0]) return matches[0]
+  }
+}
+
+const runGit = (cwd: string, args: string[], env?: Record<string, string | undefined>) => {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    env: env ? {...process.env, ...env} : process.env,
+  })
+  if (result.status !== 0) {
+    throw new Error(result.stderr.trim() || `git ${args.join(" ")} failed`)
+  }
+  return result.stdout.trim()
+}
+
+const ensureRemote = (checkout: string, name: string, url: string) => {
+  if (runGit(checkout, ["remote"], undefined).split(/\r?\n/).includes(name)) {
+    runGit(checkout, ["remote", "set-url", name, url])
+    return
+  }
+  runGit(checkout, ["remote", "add", name, url])
+}
+
+const configureManagedSourceRemote = async (
+  app: AppCfg,
+  checkout: string,
+  sourceUrl: string,
+  upstreamUrl: string,
+  authUsername?: string,
+) => {
+  ensureRemote(checkout, "origin", sourceUrl)
+  if (upstreamUrl && upstreamUrl !== sourceUrl) ensureRemote(checkout, "upstream", upstreamUrl)
+
+  const auth = await configureCheckoutGitAuth(app, checkout, [sourceUrl], authUsername)
+  if (!auth) return
+  runGit(checkout, ["config", "--local", "--replace-all", "credential.helper", ""])
+  runGit(checkout, ["config", "--local", "--add", "credential.helper", auth.helperCommand])
+  runGit(checkout, ["config", "--local", "--replace-all", "credential.useHttpPath", "true"])
+}
+
+const currentBranch = (checkout: string) => {
+  const result = spawnSync("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], {cwd: checkout, encoding: "utf8"})
+  return result.status === 0 ? result.stdout.trim() : ""
+}
+
+const safeSourceBranch = (checkout: string, tip: string) =>
+  currentBranch(checkout) || `openteam/pr-${tip.slice(0, 12)}`
+
+const normalizeCloneUrl = (value: string) => value.trim().replace(/\/+$/, "").replace(/\.git$/i, "").toLowerCase()
+
+const sameCloneSet = (left: string[], right: string[]) => {
+  const a = left.map(normalizeCloneUrl).sort()
+  const b = right.map(normalizeCloneUrl).sort()
+  return a.length === b.length && a.every((value, index) => value === b[index])
+}
+
+const hasLocalCommit = (checkout: string, tip: string) => {
+  const result = spawnSync("git", ["cat-file", "-e", `${tip}^{commit}`], {cwd: checkout, encoding: "utf8"})
+  return result.status === 0
+}
+
+const remoteContainsTip = (app: AppCfg, checkout: string, cloneUrl: string, tip: string, authUsername?: string) => {
+  const result = spawnSync("git", ["ls-remote", cloneUrl], {
+    cwd: checkout,
+    encoding: "utf8",
+    env: {...process.env, ...(gitAuthEnv(app, cloneUrl, authUsername) ?? {})},
+  })
+  if (result.status !== 0) return false
+  return result.stdout.split(/\r?\n/).some(line => line.split(/\s+/)[0] === tip)
+}
 
 export const repoPublishContextPath = repoContextFile
 
@@ -286,6 +404,70 @@ export const loadRepoPublishContext = async (file?: string, cwd = process.cwd())
   return context
 }
 
+const resolveSubmodulePublishTarget = async (
+  app: AppCfg,
+  agent: PreparedAgent,
+  context: RepoPublishContext,
+  cwd: string,
+  dryRun = false,
+): Promise<ResolvedRepoPublishTarget | undefined> => {
+  if (!context.checkout) return undefined
+  const submodule = await submoduleForPublishPath(context.checkout, cwd)
+  if (!submodule) return undefined
+  if (!submodule.url) {
+    throw new Error(`submodule ${submodule.path} has no url in .gitmodules; refusing to publish PR without an owner-announced submodule repo`)
+  }
+
+  const owner = context.upstreamRepo ?? context.repo
+  const identity = await resolveOwnerRepoAnnouncementByCloneUrl(app, owner, submodule.url, context.target)
+  const submoduleCheckout = path.join(context.checkout, submodule.path)
+  const policy = resolveRepoRelayPolicy(app, identity, {target: identity.key})
+  if (dryRun) {
+    return {
+      agent,
+      context,
+      identity,
+      policy,
+      target: identity.key,
+      scope: "repo",
+      sourceCheckout: submoduleCheckout,
+      managedSource: true,
+      submodule: {
+        path: submodule.path,
+        url: submodule.url,
+      },
+    }
+  }
+  const fork = await ensureOrchestratorForkForRepo(app, identity, submodule.url)
+  const sourceCloneUrls = uniq([
+    ...(fork.fork?.forkCloneUrls ?? []),
+    ...(fork.fork?.forkCloneUrl ? [fork.fork.forkCloneUrl] : []),
+    ...fork.identity.cloneUrls,
+    fork.source,
+  ])
+  if (sourceCloneUrls.length === 0) {
+    throw new Error(`openteam could not resolve a source fork clone URL for submodule repo ${identity.key}`)
+  }
+  await configureManagedSourceRemote(app, submoduleCheckout, sourceCloneUrls[0], submodule.url, fork.authUsername)
+  return {
+    agent,
+    context,
+    identity,
+    policy,
+    target: identity.key,
+    scope: "repo",
+    sourceCloneUrls,
+    sourceCheckout: submoduleCheckout,
+    sourceBranch: currentBranch(submoduleCheckout) || undefined,
+    sourceAuthUsername: fork.authUsername,
+    managedSource: true,
+    submodule: {
+      path: submodule.path,
+      url: submodule.url,
+    },
+  }
+}
+
 export const resolveRepoPublishTarget = async (
   app: AppCfg,
   options: ResolveOptions = {},
@@ -295,6 +477,16 @@ export const resolveRepoPublishTarget = async (
 
   if (context) {
     const agent = await prepareAgent(app, options.agentId || context.agentId)
+    if (options.preferSubmodule) {
+      const submoduleTarget = await resolveSubmodulePublishTarget(app, agent, context, options.cwd ?? process.cwd(), options.dryRun)
+      if (submoduleTarget) return submoduleTarget
+    }
+    if (options.target) {
+      const resolved = await resolveRepoAnnouncementTarget(app, agent, options.target)
+      const explicitScope = options.scope ?? (context.upstreamRepo?.key === resolved.identity.key ? "upstream" : "repo")
+      const policy = resolveRepoRelayPolicy(app, resolved.identity, {target: options.target})
+      return {agent, context, identity: resolved.identity, policy, target: options.target, scope: explicitScope}
+    }
     if (!isPublishScope(requestedScope)) {
       throw new Error(`invalid repo publish scope: ${String(requestedScope)}`)
     }
@@ -596,14 +788,76 @@ export const repoMaintainerPubkeys = (identity: Pick<RepoIdentity, "ownerPubkey"
 ]).filter(isPubkey)
 
 export const pullRequestCloneUrlsForTarget = (
-  target: Pick<ResolvedRepoPublishTarget, "scope" | "identity" | "context">,
+  target: Pick<ResolvedRepoPublishTarget, "scope" | "identity" | "context" | "sourceCloneUrls">,
   explicit: string[] = [],
 ) => {
+  if (target.sourceCloneUrls && target.sourceCloneUrls.length > 0) {
+    const managed = uniq(target.sourceCloneUrls)
+    if (explicit.length > 0 && !sameCloneSet(explicit, managed)) {
+      throw new Error("submodule PR source clone URLs are managed by openteam; do not override them with --clone")
+    }
+    return managed
+  }
   if (explicit.length > 0) return uniq(explicit)
   if (target.scope !== "upstream") return []
   const source = target.context?.repo
   if (!source || source.key === target.identity.key) return []
   return uniq(source.cloneUrls)
+}
+
+export const preparePullRequestSourceCloneUrls = async (
+  app: AppCfg,
+  target: Pick<ResolvedRepoPublishTarget, "scope" | "identity" | "context" | "sourceCloneUrls" | "sourceCheckout" | "sourceBranch" | "sourceAuthUsername" | "managedSource">,
+  explicit: string[],
+  tipCommitOid: string,
+  options: {dryRun?: boolean} = {},
+) => {
+  const cloneUrls = pullRequestCloneUrlsForTarget(target, explicit)
+  if (options.dryRun) return cloneUrls
+  if (cloneUrls.length === 0) return []
+
+  if (target.managedSource) {
+    if (!target.sourceCheckout) {
+      throw new Error("managed PR source is missing a local checkout; refusing to publish unverifiable clone URLs")
+    }
+    if (!hasLocalCommit(target.sourceCheckout, tipCommitOid)) {
+      throw new Error(`PR tip ${tipCommitOid} is not present in the managed source checkout`)
+    }
+    const branch = target.sourceBranch || safeSourceBranch(target.sourceCheckout, tipCommitOid)
+    const pushed: string[] = []
+    const failures: string[] = []
+    for (const cloneUrl of cloneUrls) {
+      try {
+        runGit(target.sourceCheckout, ["push", cloneUrl, `${tipCommitOid}:refs/heads/${branch}`], gitAuthEnv(app, cloneUrl, target.sourceAuthUsername))
+        if (!remoteContainsTip(app, target.sourceCheckout, cloneUrl, tipCommitOid, target.sourceAuthUsername)) {
+          throw new Error("remote did not advertise pushed tip")
+        }
+        pushed.push(cloneUrl)
+      } catch (error) {
+        failures.push(`${cloneUrl}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    if (pushed.length === 0) {
+      throw new Error([
+        `PR tip ${tipCommitOid} was not pushed to any openteam-managed source clone`,
+        ...failures,
+      ].join("\n"))
+    }
+    if (failures.length > 0) {
+      process.stderr.write(`some managed PR source pushes failed:\n${failures.join("\n")}\n`)
+    }
+    return pushed
+  }
+
+  const verified = cloneUrls.filter(cloneUrl => remoteContainsTip(app, process.cwd(), cloneUrl, tipCommitOid))
+  if (verified.length === 0) {
+    throw new Error(`PR tip ${tipCommitOid} was not advertised by any PR source clone URL; push the branch to an openteam-controlled fork before publishing`)
+  }
+  if (verified.length !== cloneUrls.length) {
+    const missing = cloneUrls.filter(cloneUrl => !verified.includes(cloneUrl))
+    process.stderr.write(`dropping PR clone URLs that do not advertise ${tipCommitOid}:\n${missing.join("\n")}\n`)
+  }
+  return verified
 }
 
 export const upstreamPullRequestNeedsClone = (

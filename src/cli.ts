@@ -97,7 +97,7 @@ const help = () => {
   repo publish label --label <label> [--target-id <event-id>] [--namespace <ns>] [--p <pubkey>] [--delete] [--dry-run]
   repo publish role-label --target-id <event-id> --role <assignee|reviewer> --p <pubkey> [--dry-run]
   repo publish status --root-id <event-id> --state <open|applied|closed|draft> [--content <text>] [--dry-run]
-  repo publish pr --tip <commit> [--subject <text>] [--clone <url>] [--target-branch <name>] [--draft|--wip] [--dry-run]
+  repo publish pr --tip <commit> [--subject <text>] [--clone <url>] [--target-branch <name>] [--draft|--wip] [--dry-run]  # emits initial open/draft status after publish
   repo publish pr-update --pr-id <event-id> --pr-author <pubkey> --tip <commit> [--draft|--wip] [--dry-run]
   service install|start|stop|restart|status|logs|enable|disable
   relay sync <agentId>

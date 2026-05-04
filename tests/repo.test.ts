@@ -10,12 +10,15 @@ import {
   ensureGithubForkRepo,
   ensureGitlabForkRepo,
   forkEventTags,
+  activeLatestRepoAnnouncementEvents,
   parseRepoReference,
   pushForkTargets,
   repoIdentityFromAnnouncement,
   releaseRepoContext,
   resolveRepoRelayPolicy,
+  selectOwnerRepoAnnouncementByCloneUrl,
   type ProviderApiFetch,
+  type RepoAnnouncementEvent,
 } from "../src/repo.js"
 import type {AppCfg, ProviderCfg, RepoIdentity, RepoRegistry} from "../src/types.js"
 
@@ -140,6 +143,81 @@ describe("repo announcements", () => {
       "https://fallback.example/repos/flotilla-budabit.git",
     ])
     expect(identity?.relays).toEqual(["wss://relay-one.example", "wss://relay-two.example"])
+  })
+
+  test("deleted repo announcements suppress older announcements for the same d tag", () => {
+    const oldActive: RepoAnnouncementEvent = {
+      id: "old-event",
+      pubkey,
+      created_at: 10,
+      content: "",
+      tags: [["d", "nostr-git-fork"], ["clone", "https://github.com/Pleb5/nostr-git-fork.git"]],
+    }
+    const deleted: RepoAnnouncementEvent = {
+      id: "deleted-event",
+      pubkey,
+      created_at: 20,
+      content: "",
+      tags: [["d", "nostr-git-fork"], ["clone", "https://github.com/Pleb5/nostr-git-fork.git"], ["deleted", "true"]],
+    }
+
+    expect(repoIdentityFromAnnouncement(deleted)).toBeUndefined()
+    expect(activeLatestRepoAnnouncementEvents([oldActive, deleted])).toEqual([])
+  })
+
+  test("selects latest active owner announcement matching a submodule clone URL", () => {
+    const cloneUrl = "https://github.com/Pleb5/nostr-git-fork.git"
+    const events: RepoAnnouncementEvent[] = [
+      {
+        id: "old-fork",
+        pubkey,
+        created_at: 10,
+        content: "",
+        tags: [["d", "nostr-git-fork"], ["clone", cloneUrl]],
+      },
+      {
+        id: "deleted-fork",
+        pubkey,
+        created_at: 30,
+        content: "",
+        tags: [["d", "nostr-git-fork"], ["clone", cloneUrl], ["deleted", "true"]],
+      },
+      {
+        id: "renamed-active",
+        pubkey,
+        created_at: 20,
+        content: "",
+        tags: [["d", "nostr-git"], ["clone", cloneUrl], ["clone", "https://github.com/chebizarro/nostr-git.git"]],
+      },
+    ]
+
+    const selected = selectOwnerRepoAnnouncementByCloneUrl(events, pubkey, `${cloneUrl}/`)
+
+    expect(selected.identity?.key).toBe(`30617:${pubkey}:nostr-git`)
+    expect(selected.deletedMatches.map(match => match.key)).toEqual([`30617:${pubkey}:nostr-git-fork`])
+  })
+
+  test("reports only deleted owner announcements matching a submodule clone URL", () => {
+    const cloneUrl = "https://github.com/Pleb5/nostr-git-fork.git"
+    const selected = selectOwnerRepoAnnouncementByCloneUrl([
+      {
+        id: "old-fork",
+        pubkey,
+        created_at: 10,
+        content: "",
+        tags: [["d", "nostr-git-fork"], ["clone", cloneUrl]],
+      },
+      {
+        id: "deleted-fork",
+        pubkey,
+        created_at: 30,
+        content: "",
+        tags: [["d", "nostr-git-fork"], ["clone", cloneUrl], ["deleted", "true"]],
+      },
+    ], pubkey, cloneUrl)
+
+    expect(selected.identity).toBeUndefined()
+    expect(selected.deletedMatches.map(match => match.key)).toEqual([`30617:${pubkey}:nostr-git-fork`])
   })
 })
 

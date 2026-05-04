@@ -24,12 +24,18 @@ import type {
 
 const DEFAULT_REPO_DISCOVERY_RELAYS = ["wss://nos.lol", "wss://relay.damus.io", "wss://purplepag.es"]
 
-type RepoAnnouncementEvent = {
+export type RepoAnnouncementEvent = {
   id: string
   pubkey: string
   created_at: number
   tags: string[][]
   content: string
+}
+
+export type GitSubmodule = {
+  name: string
+  path: string
+  url?: string
 }
 
 type TargetProfile = {
@@ -91,6 +97,17 @@ const tagTailValues = (tags: string[][], names: string[]) =>
     .flatMap(tag => tag.slice(1).filter(Boolean))
 
 const firstTag = (tags: string[][], names: string[]) => tagValues(tags, names)[0]
+
+const deletedTagValue = (value: string | undefined) => {
+  const normalized = (value ?? "true").trim().toLowerCase()
+  return normalized === "true" || normalized === "1" || normalized === "yes"
+}
+
+export const isDeletedRepoAnnouncement = (event: Pick<RepoAnnouncementEvent, "tags">) =>
+  event.tags.some(tag => tag[0] === "deleted" && deletedTagValue(tag[1]))
+
+export const isDeletedRepoIdentity = (identity: Pick<RepoIdentity, "rawTags">) =>
+  isDeletedRepoAnnouncement({tags: identity.rawTags})
 
 const registryFile = (app: AppCfg) => path.join(app.config.runtimeRoot, "repos", "registry.json")
 const registryLockDir = (app: AppCfg) => path.join(app.config.runtimeRoot, "repos", ".registry.lock")
@@ -165,6 +182,26 @@ const runGit = (args: string[], cwd: string, env?: Record<string, string | undef
     throw new Error(result.stderr?.trim() || `git ${args.join(" ")} exited with code ${result.status ?? -1}`)
   }
   return result.stdout.trim()
+}
+
+export const readGitSubmodules = async (checkout: string): Promise<GitSubmodule[]> => {
+  const gitmodules = path.join(checkout, ".gitmodules")
+  if (!existsSync(gitmodules)) return []
+
+  const result = spawnSync("git", ["config", "--file", gitmodules, "--get-regexp", "^submodule\\..*\\.(path|url)$"], {cwd: checkout, encoding: "utf8"})
+  if (result.status !== 0 && !result.stdout.trim()) return []
+
+  const modules = new Map<string, Partial<GitSubmodule>>()
+  for (const line of result.stdout.split(/\r?\n/).filter(Boolean)) {
+    const match = line.match(/^submodule\.(.+)\.(path|url)\s+(.+)$/)
+    if (!match) continue
+    const [, name, key, value] = match
+    const current = modules.get(name) ?? {name}
+    modules.set(name, {...current, [key]: value})
+  }
+
+  return [...modules.values()]
+    .filter((item): item is GitSubmodule => Boolean(item.name && item.path))
 }
 
 const tryGit = (args: string[], cwd: string) => {
@@ -303,6 +340,11 @@ const cloneUrlsFrom = (event: RepoAnnouncementEvent) => {
   return uniq([...fromTags, ...fromContent])
 }
 
+const repoAnnouncementEventKey = (event: RepoAnnouncementEvent) => {
+  const identifier = firstTag(event.tags, ["d"])
+  return identifier ? repoKey(event.pubkey, identifier) : ""
+}
+
 const identityFromEvent = (event: RepoAnnouncementEvent, sourceHint?: string): RepoIdentity | undefined => {
   const identifier = firstTag(event.tags, ["d"])
   if (!identifier) return
@@ -329,7 +371,23 @@ const identityFromEvent = (event: RepoAnnouncementEvent, sourceHint?: string): R
 }
 
 export const repoIdentityFromAnnouncement = (event: RepoAnnouncementEvent, sourceHint?: string) =>
-  identityFromEvent(event, sourceHint)
+  isDeletedRepoAnnouncement(event) ? undefined : identityFromEvent(event, sourceHint)
+
+export const latestRepoAnnouncementEvents = (events: RepoAnnouncementEvent[]) => {
+  const byKey = new Map<string, RepoAnnouncementEvent>()
+  for (const event of events) {
+    const key = repoAnnouncementEventKey(event)
+    if (!key) continue
+    const previous = byKey.get(key)
+    if (!previous || previous.created_at < event.created_at) {
+      byKey.set(key, event)
+    }
+  }
+  return [...byKey.values()]
+}
+
+export const activeLatestRepoAnnouncementEvents = (events: RepoAnnouncementEvent[]) =>
+  latestRepoAnnouncementEvents(events).filter(event => !isDeletedRepoAnnouncement(event))
 
 const localHintValues = (hint: string) => {
   const values = [hint]
@@ -405,6 +463,14 @@ type ForkStorageProvider = {
 
 type ForkTargetPlan = ForkClonePlan & {
   provider: RepoFork["provider"]
+  authUsername?: string
+}
+
+export type OrchestratorForkResolution = {
+  identity: RepoIdentity
+  source: string
+  upstream?: RepoIdentity
+  fork?: RepoFork
   authUsername?: string
 }
 
@@ -933,7 +999,7 @@ const discoverOrchestratorFork = async (app: AppCfg, ownerPubkey: string, upstre
     limit: 200,
   }).catch(() => []) as RepoAnnouncementEvent[]
 
-  const event = latest(broad.filter(item => {
+  const event = latest(activeLatestRepoAnnouncementEvents(broad).filter(item => {
     const id = firstTag(item.tags, ["d"])
     const linked = item.tags.some(tag => tag.slice(1).includes(upstream.key))
     return id === expectedD || linked
@@ -1014,7 +1080,7 @@ const publishForkAnnouncement = async (
   } satisfies RepoIdentity
 }
 
-const ensureOrchestratorFork = async (app: AppCfg, upstream: RepoIdentity, upstreamCloneUrl: string) => {
+const ensureOrchestratorFork = async (app: AppCfg, upstream: RepoIdentity, upstreamCloneUrl: string): Promise<OrchestratorForkResolution> => {
   const owner = await orchestratorOwner(app)
   if (upstream.ownerPubkey === owner.pubkey) {
     return {identity: upstream, source: upstreamCloneUrl, authUsername: undefined}
@@ -1023,7 +1089,7 @@ const ensureOrchestratorFork = async (app: AppCfg, upstream: RepoIdentity, upstr
   const registry = await loadRepoRegistry(app)
   const existingFork = registry.forks[upstream.key]
   const existingIdentity = existingFork ? registry.repos[existingFork.forkKey] : undefined
-  if (existingFork && existingIdentity?.cloneUrls.length) {
+  if (existingFork && existingIdentity?.cloneUrls.length && !isDeletedRepoIdentity(existingIdentity)) {
     const existingCloneUrls = uniq([
       ...(existingFork.forkCloneUrls ?? []),
       existingFork.forkCloneUrl,
@@ -1108,12 +1174,21 @@ const ensureOrchestratorFork = async (app: AppCfg, upstream: RepoIdentity, upstr
   }
 }
 
-const cachedByDirectRef = (registry: RepoRegistry, direct: DirectRepoRef) =>
-  registry.repos[repoKey(direct.ownerPubkey, direct.identifier)]
+export const ensureOrchestratorForkForRepo = async (
+  app: AppCfg,
+  upstream: RepoIdentity,
+  upstreamCloneUrl: string,
+) => withRepoRegistryLock(app, () => ensureOrchestratorFork(app, upstream, upstreamCloneUrl))
+
+const cachedByDirectRef = (registry: RepoRegistry, direct: DirectRepoRef) => {
+  const cached = registry.repos[repoKey(direct.ownerPubkey, direct.identifier)]
+  return cached && !isDeletedRepoIdentity(cached) ? cached : undefined
+}
 
 const cachedByHint = (registry: RepoRegistry, hint: string) => {
   const hints = localHintValues(hint).map(comparable)
   return Object.values(registry.repos).filter(identity => {
+    if (isDeletedRepoIdentity(identity)) return false
     const candidates = uniq([
       identity.key,
       `${identity.ownerNpub}/${identity.identifier}`,
@@ -1124,6 +1199,87 @@ const cachedByHint = (registry: RepoRegistry, hint: string) => {
     ]).map(comparable)
     return hints.some(hintValue => candidates.some(candidate => candidate === hintValue || candidate.endsWith(`/${hintValue}`)))
   })
+}
+
+const repoAnnouncementEventFromIdentity = (identity: RepoIdentity): RepoAnnouncementEvent => ({
+  id: identity.announcementEventId,
+  pubkey: identity.ownerPubkey,
+  created_at: identity.announcedAt,
+  tags: uniq(identity.cloneUrls).length > 0
+    ? [...identity.rawTags, ["clone", ...uniq(identity.cloneUrls)]]
+    : identity.rawTags,
+  content: "",
+})
+
+const repoIdentityMatchesCloneUrl = (identity: RepoIdentity, cloneUrl: string) => {
+  const expected = comparable(cloneUrl)
+  return identity.cloneUrls.some(url => comparable(url) === expected)
+}
+
+const byLatestIdentity = (a: RepoIdentity, b: RepoIdentity) =>
+  b.announcedAt - a.announcedAt || a.key.localeCompare(b.key)
+
+export const selectOwnerRepoAnnouncementByCloneUrl = (
+  events: RepoAnnouncementEvent[],
+  ownerPubkey: string,
+  cloneUrl: string,
+  sourceHint?: string,
+) => {
+  const latestEvents = latestRepoAnnouncementEvents(events.filter(event => event.pubkey === ownerPubkey))
+  const activeMatches = latestEvents
+    .filter(event => !isDeletedRepoAnnouncement(event))
+    .map(event => identityFromEvent(event, sourceHint))
+    .filter((identity): identity is RepoIdentity => Boolean(identity))
+    .filter(identity => repoIdentityMatchesCloneUrl(identity, cloneUrl))
+    .sort(byLatestIdentity)
+  const deletedMatches = latestEvents
+    .filter(event => isDeletedRepoAnnouncement(event))
+    .map(event => identityFromEvent(event, sourceHint))
+    .filter((identity): identity is RepoIdentity => Boolean(identity))
+    .filter(identity => repoIdentityMatchesCloneUrl(identity, cloneUrl))
+    .sort(byLatestIdentity)
+
+  return {
+    identity: activeMatches[0],
+    activeMatches,
+    deletedMatches,
+  }
+}
+
+export const resolveOwnerRepoAnnouncementByCloneUrl = async (
+  app: AppCfg,
+  owner: Pick<RepoIdentity, "ownerPubkey" | "ownerNpub" | "relays" | "sourceHint">,
+  cloneUrl: string,
+  sourceHint?: string,
+) => {
+  const registry = await loadRepoRegistry(app)
+  const cachedEvents = Object.values(registry.repos)
+    .filter(identity => identity.ownerPubkey === owner.ownerPubkey)
+    .map(repoAnnouncementEventFromIdentity)
+  const relays = uniq([
+    ...owner.relays,
+    ...await ownerOutboxRelays(app, owner.ownerPubkey, owner.relays),
+    ...ownerRelayDiscoveryRelays(app, owner.relays),
+  ])
+  const remoteEvents = relays.length > 0
+    ? await queryEvents(relays, {
+      kinds: [KIND_REPO_ANNOUNCEMENT],
+      authors: [owner.ownerPubkey],
+      limit: 500,
+    }).catch(() => []) as RepoAnnouncementEvent[]
+    : []
+  const selected = selectOwnerRepoAnnouncementByCloneUrl(
+    [...cachedEvents, ...remoteEvents],
+    owner.ownerPubkey,
+    cloneUrl,
+    sourceHint ?? owner.sourceHint,
+  )
+
+  if (selected.identity) return selected.identity
+  if (selected.deletedMatches.length > 0) {
+    throw new Error(`owner ${owner.ownerNpub} has only deleted repo announcements matching submodule clone URL ${cloneUrl}`)
+  }
+  throw new Error(`owner ${owner.ownerNpub} has no active repo announcement matching submodule clone URL ${cloneUrl}`)
 }
 
 const ownerRelayDiscoveryRelays = (app: AppCfg, hints: string[]) =>
@@ -1157,6 +1313,10 @@ const discoverByDirectRef = async (app: AppCfg, registry: RepoRegistry, direct: 
     ...ownerRelayDiscoveryRelays(app, direct.relays),
   ])
   if (relays.length === 0) {
+    const cachedRaw = registry.repos[repoKey(direct.ownerPubkey, direct.identifier)]
+    if (cachedRaw && isDeletedRepoIdentity(cachedRaw)) {
+      throw new Error(`repo announcement ${repoKey(direct.ownerPubkey, direct.identifier)} is deleted`)
+    }
     const cached = cachedByDirectRef(registry, direct)
     if (cached) return cached
     throw new Error("no Nostr repo announcement relays configured")
@@ -1171,9 +1331,16 @@ const discoverByDirectRef = async (app: AppCfg, registry: RepoRegistry, direct: 
 
   const event = latest(events)
   if (!event) {
+    const cachedRaw = registry.repos[repoKey(direct.ownerPubkey, direct.identifier)]
+    if (cachedRaw && isDeletedRepoIdentity(cachedRaw)) {
+      throw new Error(`repo announcement ${repoKey(direct.ownerPubkey, direct.identifier)} is deleted`)
+    }
     const cached = cachedByDirectRef(registry, direct)
     if (cached) return cached
     throw new Error(`repo announcement not found for ${repoKey(direct.ownerPubkey, direct.identifier)}`)
+  }
+  if (isDeletedRepoAnnouncement(event)) {
+    throw new Error(`repo announcement ${repoKey(direct.ownerPubkey, direct.identifier)} is deleted`)
   }
 
   return identityFromEvent(event)
@@ -1181,13 +1348,12 @@ const discoverByDirectRef = async (app: AppCfg, registry: RepoRegistry, direct: 
 
 const discoverByHint = async (app: AppCfg, registry: RepoRegistry, hint: string) => {
   const cached = cachedByHint(registry, hint)
-  if (cached.length === 1) return cached[0]
-  if (cached.length > 1) {
-    throw new Error(`target ${hint} matches multiple cached Nostr repo announcements; use ${KIND_REPO_ANNOUNCEMENT}:<owner>:<d>`)
-  }
-
   const relays = repoDiscoveryRelays(app)
   if (relays.length === 0) {
+    if (cached.length === 1) return cached[0]
+    if (cached.length > 1) {
+      throw new Error(`target ${hint} matches multiple cached Nostr repo announcements; use ${KIND_REPO_ANNOUNCEMENT}:<owner>:<d>`)
+    }
     throw new Error(`target ${hint} is only a hint; configure nostr_git.repoAnnouncementRelays to resolve kind ${KIND_REPO_ANNOUNCEMENT} repo announcements`)
   }
 
@@ -1196,8 +1362,16 @@ const discoverByHint = async (app: AppCfg, registry: RepoRegistry, hint: string)
     limit: 500,
   }).catch(() => []) as RepoAnnouncementEvent[]
 
-  const matches = events
-    .map(event => ({event, identity: identityFromEvent(event, hint)}))
+  const cachedEvents = Object.values(registry.repos).map(repoAnnouncementEventFromIdentity)
+  const latestEvents = latestRepoAnnouncementEvents([...cachedEvents, ...events])
+  const matches = latestEvents
+    .filter(event => !isDeletedRepoAnnouncement(event))
+    .map(event => ({event, identity: identityFromEvent(event)}))
+    .filter((item): item is {event: RepoAnnouncementEvent; identity: RepoIdentity} => Boolean(item.identity))
+    .filter(item => matchesHint(item.identity, item.event, hint))
+  const deletedMatches = latestEvents
+    .filter(event => isDeletedRepoAnnouncement(event))
+    .map(event => ({event, identity: identityFromEvent(event)}))
     .filter((item): item is {event: RepoAnnouncementEvent; identity: RepoIdentity} => Boolean(item.identity))
     .filter(item => matchesHint(item.identity, item.event, hint))
 
@@ -1211,6 +1385,13 @@ const discoverByHint = async (app: AppCfg, registry: RepoRegistry, hint: string)
 
   const unique = [...byKey.values()]
   if (unique.length === 0) {
+    if (deletedMatches.length > 0) {
+      throw new Error(`target ${hint} resolves only to deleted Nostr repo announcements`)
+    }
+    if (events.length === 0 && cached.length === 1) return cached[0]
+    if (events.length === 0 && cached.length > 1) {
+      throw new Error(`target ${hint} matches multiple cached Nostr repo announcements; use ${KIND_REPO_ANNOUNCEMENT}:<owner>:<d>`)
+    }
     throw new Error(`target ${hint} did not resolve to a Nostr repo announcement; announce the repository first with your Nostr-git client`)
   }
   if (unique.length > 1) {

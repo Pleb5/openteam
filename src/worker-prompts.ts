@@ -63,6 +63,7 @@ const verificationInstructionLines = (input: {mode: "code" | "web"; url?: string
 const publicationInstructionLines = () => [
   `For branch publication, use plain git against the configured origin and publish Nostr-git PR events through openteam repo publish pr; normal PR publication is blocked until evidence is strong, and you must not rely on gh auth or personal forge sessions.`,
   `When publishing a Nostr-git PR, do not pass the worker/source branch as --branch; use --target-branch only for the merge target branch when needed. The helper infers source fork clone URLs from the repo context.`,
+  `For submodule changes, publish PRs against the top-level owner-announced submodule repo whose clone URL matches .gitmodules; the PR source clone must be an openteam-controlled fork that advertises the tip, and deleted-only matches block PR publication.`,
 ]
 
 const taskManifestLines = () => [

@@ -11,7 +11,7 @@ import {
   buildRoleLabelEvent,
   buildStatusEvent,
   parseRawRepoEvent,
-  pullRequestCloneUrlsForTarget,
+  preparePullRequestSourceCloneUrls,
   publishPolicySummary,
   publishRepoEvent,
   repoMaintainerPubkeys,
@@ -21,6 +21,7 @@ import {
   type RepoPublishScope,
   upstreamPullRequestNeedsClone,
 } from "../repo-publish.js"
+import {getSelfPubkey} from "../nostr.js"
 import {readVerificationResults} from "../verification.js"
 import type {AppCfg, TaskRunRecord} from "../types.js"
 
@@ -117,6 +118,8 @@ const printRepoPublishResult = (value: unknown) => {
 
 const unique = (items: string[]) => Array.from(new Set(items.filter(Boolean)))
 
+const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error)
+
 const readRunRecordFromEnv = async () => {
   const file = process.env.OPENTEAM_RUN_FILE
   if (!file || !existsSync(file)) return undefined
@@ -134,6 +137,9 @@ const draftLabels = (args: string[]) => [
 ]
 
 const draftTagExtras = (args: string[]) => draftLabels(args).map(label => ["t", label])
+
+export const pullRequestInitialStatusState = (args: string[]): "open" | "draft" =>
+  draftRequested(args) ? "draft" : "open"
 
 export const pullRequestTargetBranch = (args: string[]) => {
   const legacy = value(args, "--branch")
@@ -155,11 +161,14 @@ const pullRequestRecipients = (
   ...repoMaintainerPubkeys(target.identity),
 ])
 
-const pullRequestCloneUrls = (
+const pullRequestCloneUrls = async (
+  app: AppCfg,
   target: Awaited<ReturnType<typeof resolveRepoPublishTarget>>,
   args: string[],
+  tipCommitOid: string,
+  dryRun: boolean,
 ) => {
-  const clone = pullRequestCloneUrlsForTarget(target, values(args, "--clone"))
+  const clone = await preparePullRequestSourceCloneUrls(app, target, values(args, "--clone"), tipCommitOid, {dryRun})
   if (upstreamPullRequestNeedsClone(target) && clone.length === 0) {
     throw new Error([
       "upstream PR publication needs source fork clone URLs.",
@@ -211,7 +220,7 @@ export const repoPolicyCommand = async (app: AppCfg, args: string[]) => {
 }
 
 export const repoPublishCommand = async (app: AppCfg, kind: string, args: string[]) => {
-  const opts = repoPublishOpts(app, args)
+  const opts = {...repoPublishOpts(app, args), preferSubmodule: kind === "pr" || kind === "pr-update"}
   const target = await resolveRepoPublishTarget(app, opts)
   assertAppConfigValid(app, {capability: "repo-publish", agentId: target.agent.configId})
   const repoAddr = repoAddrForPublishTarget(target)
@@ -303,7 +312,8 @@ export const repoPublishCommand = async (app: AppCfg, kind: string, args: string
   if (kind === "pr") {
     const publicationPolicy = await assertPullRequestPublicationAllowed(target, args, opts.dryRun)
     const recipients = pullRequestRecipients(target, args)
-    const clone = pullRequestCloneUrls(target, args)
+    const tipCommitOid = must(value(args, "--tip"), "--tip")
+    const clone = await pullRequestCloneUrls(app, target, args, tipCommitOid, opts.dryRun)
     const result = await publishRepoEvent(app, buildPullRequestEvent({
       repoAddr,
       subject: value(args, "--subject") || undefined,
@@ -313,14 +323,31 @@ export const repoPublishCommand = async (app: AppCfg, kind: string, args: string
         ...draftLabels(args),
       ]),
       recipients,
-      tipCommitOid: must(value(args, "--tip"), "--tip"),
+      tipCommitOid,
       clone,
       targetBranch: pullRequestTargetBranch(args),
       mergeBase: value(args, "--merge-base") || undefined,
       tags,
     }), opts)
+    const initialStatusState = pullRequestInitialStatusState(args)
+    let initialStatus: Awaited<ReturnType<typeof publishRepoEvent>> | undefined
+
+    if (result.publish?.eventId) {
+      try {
+        initialStatus = await publishRepoEvent(app, buildStatusEvent({
+          repoAddr,
+          state: initialStatusState,
+          rootId: result.publish.eventId,
+          recipients: unique([...recipients, getSelfPubkey(target.agent)]),
+        }), opts)
+      } catch (error) {
+        throw new Error(`PR event ${result.publish.eventId} published, but failed to publish initial ${initialStatusState} status: ${errorMessage(error)}`)
+      }
+    }
+
     printRepoPublishResult({
       ...result,
+      initialStatus,
       publicationPolicy,
     })
     return
@@ -329,13 +356,14 @@ export const repoPublishCommand = async (app: AppCfg, kind: string, args: string
   if (kind === "pr-update") {
     const publicationPolicy = await assertPullRequestPublicationAllowed(target, args, opts.dryRun)
     const recipients = pullRequestRecipients(target, args)
-    const clone = pullRequestCloneUrls(target, args)
+    const tipCommitOid = must(value(args, "--tip"), "--tip")
+    const clone = await pullRequestCloneUrls(app, target, args, tipCommitOid, opts.dryRun)
     const result = await publishRepoEvent(app, buildPullRequestUpdateEvent({
       repoAddr,
       pullRequestEventId: must(value(args, "--pr-id"), "--pr-id"),
       pullRequestAuthorPubkey: must(value(args, "--pr-author"), "--pr-author"),
       recipients,
-      tipCommitOid: must(value(args, "--tip"), "--tip"),
+      tipCommitOid,
       clone,
       mergeBase: value(args, "--merge-base") || undefined,
       tags: [...tags, ...draftTagExtras(args)],

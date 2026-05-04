@@ -31,7 +31,7 @@ import {
   readDmReportState,
   writeDmReportState,
 } from "./reporting-policy.js"
-import {releaseRepoContext, resolveRepoAnnouncementTarget, resolveRepoRelayPolicy, resolveRepoTarget} from "./repo.js"
+import {readGitSubmodules, releaseRepoContext, resolveRepoAnnouncementTarget, resolveRepoRelayPolicy, resolveRepoTarget} from "./repo.js"
 import {continuationEvidenceForCarry} from "./run-continuation.js"
 import {formatObservationEvent, observeRuns} from "./run-observer.js"
 import {prepareTaskSubject, resolveTaskSubject} from "./subject.js"
@@ -537,6 +537,12 @@ const writeOcfg = async (agent: PreparedAgent, checkout: string, runtime?: Agent
 const prepareSubmodules = async (agent: PreparedAgent, checkout: string) => {
   if (!existsSync(path.join(agent.repo.root, ".gitmodules"))) return
   await run("git", ["submodule", "update", "--init", "--recursive"], checkout)
+  for (const submodule of await readGitSubmodules(checkout)) {
+    const submoduleCheckout = path.join(checkout, submodule.path)
+    if (!existsSync(submoduleCheckout)) continue
+    await run("git", ["config", "--local", "--replace-all", "credential.helper", ""], submoduleCheckout)
+    await run("git", ["config", "--local", "--replace-all", "credential.useHttpPath", "true"], submoduleCheckout)
+  }
 }
 
 const prepareCheckout = async (agent: PreparedAgent, checkout: string, runtime?: AgentRuntime) => {

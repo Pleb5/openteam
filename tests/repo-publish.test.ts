@@ -1,8 +1,9 @@
 import {describe, expect, test} from "bun:test"
+import {spawnSync} from "node:child_process"
 import {mkdir, mkdtemp, writeFile} from "node:fs/promises"
 import {tmpdir} from "node:os"
 import path from "node:path"
-import {pullRequestTargetBranch} from "../src/commands/repo-publish.js"
+import {pullRequestInitialStatusState, pullRequestTargetBranch} from "../src/commands/repo-publish.js"
 import {
   buildCommentEvent,
   buildPullRequestEvent,
@@ -14,16 +15,55 @@ import {
   KIND_GIT_PULL_REQUEST,
   KIND_GIT_PULL_REQUEST_UPDATE,
   KIND_GIT_STATUS_APPLIED,
+  KIND_GIT_STATUS_DRAFT,
+  KIND_GIT_STATUS_OPEN,
   loadRepoPublishContext,
+  preparePullRequestSourceCloneUrls,
   pullRequestCloneUrlsForTarget,
   repoMaintainerPubkeys,
   upstreamPullRequestNeedsClone,
 } from "../src/repo-publish.js"
+import type {AppCfg} from "../src/types.js"
 
 const repoAddr = "30617:owner-pubkey:repo"
 
 const hasTag = (tags: string[][], expected: string[]) =>
   tags.some(tag => JSON.stringify(tag) === JSON.stringify(expected))
+
+const runGit = (cwd: string, args: string[]) => {
+  const result = spawnSync("git", args, {cwd, encoding: "utf8"})
+  if (result.status !== 0) throw new Error(result.stderr.trim() || `git ${args.join(" ")} failed`)
+  return result.stdout.trim()
+}
+
+const testApp = (runtimeRoot: string): AppCfg => ({
+  root: process.cwd(),
+  config: {
+    runtimeRoot,
+    opencode: {binary: "opencode", model: "", agent: "build"},
+    browser: {headless: true, mcp: {name: "playwright", command: [], environment: {}}},
+    providers: {},
+    repos: {},
+    reporting: {
+      dmRelays: [],
+      outboxRelays: [],
+      relayListBootstrapRelays: [],
+      appDataRelays: [],
+      signerRelays: [],
+      allowFrom: [],
+      reportTo: [],
+    },
+    nostr_git: {
+      graspServers: [],
+      gitDataRelays: [],
+      repoAnnouncementRelays: [],
+      forkGitOwner: "",
+      forkRepoPrefix: "",
+      forkCloneUrlTemplate: "",
+    },
+    agents: {},
+  },
+})
 
 const validIdentity = {
   key: repoAddr,
@@ -120,6 +160,28 @@ describe("repo publish event builders", () => {
     expect(hasTag(event.tags ?? [], ["r", "def456"])).toBe(true)
   })
 
+  test("builds initial PR status events as open unless draft or WIP is requested", () => {
+    const open = buildStatusEvent({
+      repoAddr,
+      state: pullRequestInitialStatusState(["--tip", "tip123"]),
+      rootId: "pr-id",
+      recipients: ["maintainer", "author"],
+    })
+    const draft = buildStatusEvent({
+      repoAddr,
+      state: pullRequestInitialStatusState(["--wip"]),
+      rootId: "pr-id",
+    })
+
+    expect(open.kind).toBe(KIND_GIT_STATUS_OPEN)
+    expect(hasTag(open.tags ?? [], ["e", "pr-id", "", "root"])).toBe(true)
+    expect(hasTag(open.tags ?? [], ["a", repoAddr])).toBe(true)
+    expect(hasTag(open.tags ?? [], ["p", "maintainer"])).toBe(true)
+    expect(hasTag(open.tags ?? [], ["p", "author"])).toBe(true)
+    expect(draft.kind).toBe(KIND_GIT_STATUS_DRAFT)
+    expect(pullRequestInitialStatusState(["--label", "draft"])).toBe("draft")
+  })
+
   test("builds PR and PR update events with clone and commit tags", () => {
     const pr = buildPullRequestEvent({
       repoAddr,
@@ -199,6 +261,50 @@ describe("repo publish event builders", () => {
 
     expect(hasTag(pr.tags ?? [], ["a", "30617:upstream-owner:repo"])).toBe(true)
     expect(hasTag(pr.tags ?? [], ["clone", "https://example.com/openteam/repo.git"])).toBe(true)
+  })
+
+  test("infers Nostr-git PR source clone URLs from resolved submodule context", () => {
+    const target = {
+      scope: "repo" as const,
+      identity: {
+        ...validIdentity,
+        key: "30617:upstream-owner:nostr-git",
+        ownerPubkey: "upstream-owner",
+        cloneUrls: ["https://github.com/Pleb5/nostr-git-fork.git"],
+      },
+      sourceCloneUrls: ["https://github.com/openteam/nostr-git.git"],
+    }
+
+    expect(pullRequestCloneUrlsForTarget(target)).toEqual(["https://github.com/openteam/nostr-git.git"])
+    expect(pullRequestCloneUrlsForTarget(target, ["https://github.com/openteam/nostr-git.git"])).toEqual(["https://github.com/openteam/nostr-git.git"])
+    expect(() => pullRequestCloneUrlsForTarget(target, ["https://override.example.com/nostr-git.git"])).toThrow("managed by openteam")
+  })
+
+  test("pushes managed submodule PR tips before returning source clone URLs", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "openteam-pr-source-"))
+    const checkout = path.join(root, "checkout")
+    const remote = path.join(root, "source.git")
+    await mkdir(checkout, {recursive: true})
+    runGit(root, ["init", "--bare", remote])
+    runGit(checkout, ["init"])
+    runGit(checkout, ["config", "user.email", "builder@example.com"])
+    runGit(checkout, ["config", "user.name", "Builder"])
+    await writeFile(path.join(checkout, "file.txt"), "change\n")
+    runGit(checkout, ["add", "file.txt"])
+    runGit(checkout, ["commit", "-m", "change"])
+    const tip = runGit(checkout, ["rev-parse", "HEAD"])
+
+    const urls = await preparePullRequestSourceCloneUrls(testApp(root), {
+      scope: "repo" as const,
+      identity: validIdentity,
+      managedSource: true,
+      sourceCheckout: checkout,
+      sourceBranch: "openteam/test-source",
+      sourceCloneUrls: [remote],
+    }, [], tip)
+
+    expect(urls).toEqual([remote])
+    expect(runGit(root, ["--git-dir", remote, "rev-parse", "refs/heads/openteam/test-source"])).toBe(tip)
   })
 
   test("infers repo owner and maintainers as PR recipients", () => {

@@ -28,6 +28,7 @@ export const consolePrompt = async (app: AppCfg) => {
     "Preferred operator request verbs: status, stop <worker>, start <role> on <target>, watch <target> as <role>, research <target> and <question>, plan <target> and <goal>, work on <target> [as <role>] [in <mode> mode] [with model <model>] and do <task>.",
     "For same-repo concurrent work, use the explicit form: work on <target> ... in parallel and do <task>.",
     "When reviewing a PR/event for a submodule or library inside a larger app, use the larger app as --target and pass the PR/library as --subject-event, --subject-target, and when known --subject-path so provisioning happens at the workspace root.",
+    "Submodule PR targets resolve from the top-level owner's active repo announcements matching .gitmodules clone URLs; PR source clones must be openteam-controlled forks that contain the tip commit.",
     "When a request is clear, dispatch it using the local CLI instead of inventing an ad hoc control path.",
     "If an operator asks you to finish or fix something, treat that as a request to choose and launch the right worker rather than doing the implementation yourself.",
     "For observability, use `openteam runs list`, `openteam runs show <run-id>`, and `openteam browser attach <agent|role|worker-name>` instead of ad hoc log hunting. These commands report effective stale state from live signals; `storedState` is only the raw run-file flag.",

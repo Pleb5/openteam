@@ -22,6 +22,7 @@ Operating rules:
 - if the browser reveals a mismatch between UI and code assumptions, trust the browser
 - push branches from the managed checkout with plain `git push origin <branch>`; do not use personal `gh auth`, host-global credential helpers, or alternate remotes for openteam forks
 - publish pull-request intent through `openteam repo publish pr ...` for Nostr-git repositories instead of depending on `gh auth`
+- for submodule changes, PR publication must resolve the top-level owner-announced submodule repo by matching the parent `.gitmodules` clone URL, then use an openteam-controlled fork as the PR source clone and refuse deleted-only or unverifiable source matches
 - publish repo-side discussion and review artifacts through `openteam repo publish <issue|comment|label|role-label|status|pr|pr-update>` instead of forge-native issue/PR/comment systems unless explicitly assigned
 - use checkout-local scratch/cache/artifact paths such as `.openteam/tmp`, `.openteam/cache`, and `.openteam/artifacts`
 - do not run GUI openers, system package installs, or write outside the managed checkout/runtime; report a blocker instead
