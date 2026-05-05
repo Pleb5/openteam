@@ -93,7 +93,7 @@ const help = () => {
   verify list [--checkout <path>] [--json]
   verify run <runner-id> [--checkout <path>] [--json]
   verify record <runner-id> [--state <succeeded|failed|blocked|skipped>] [--type <browser|repo-native|nostr|desktop|mobile|manual>] [--note <text>] [--artifact <path>] [--screenshot <path>] [--url <url>] [--flow <name>] [--event-id <id>] [--checkout <path>]
-  verify browser [--state <succeeded|failed|blocked>] [--flow <name>] [--url <url>] [--screenshot <path>] [--console <text>] [--network <text>] [--dev-health] [--checkout <path>]
+  verify browser [--state <succeeded|failed|blocked>] [--flow <name>] [--url <url>] [--screenshot <path>] [--console <text>|--console-file <path>] [--network <text>|--network-file <path>] [--dev-health] [--checkout <path>]
   verify artifact <path> [--type <browser|repo-native|nostr|desktop|mobile|manual>] [--runner <id>] [--note <text>] [--checkout <path>]
   repo policy [--context <file>] [--agent <agentId|role> --target <nostr-repo|hint|alias>] [--scope <repo|upstream>]
   repo publish raw --event <json-file|-> [--dry-run]

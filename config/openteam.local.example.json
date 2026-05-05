@@ -3,7 +3,7 @@
     "headless": false,
     "executablePath": "/usr/bin/chromium",
     "agentBrowserTools": {
-      "enabled": false,
+      "enabled": true,
       "allowedDomains": ["127.0.0.1", "localhost"]
     },
     "mcp": {
@@ -35,14 +35,14 @@
     "autoRunAfterWorker": false,
     "defaultRunners": {
       "code": ["repo-native"],
-      "web": ["repo-native", "browser"]
+      "web": ["repo-native", "agent-browser", "browser"]
     },
     "runners": {
       "desktop-command": {
         "enabled": true
       },
       "agent-browser": {
-        "enabled": false,
+        "enabled": true,
         "environment": {
           "AGENT_BROWSER_ALLOWED_DOMAINS": "127.0.0.1,localhost"
         }

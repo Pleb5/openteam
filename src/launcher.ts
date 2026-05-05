@@ -543,6 +543,9 @@ const dirs = (directory: string) => {
 const safeName = (value: string) =>
   value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "artifact"
 
+const sessionName = () =>
+  "openteam-" + safeName(process.env.OPENTEAM_RUN_ID || process.env.OPENTEAM_TASK_MANIFEST || process.cwd())
+
 const artifactPath = (directory: string, name: string, ext: string) =>
   path.join(dirs(directory).artifacts, safeName(name) + "-" + Date.now() + "." + ext)
 
@@ -557,6 +560,8 @@ const setupEnv = async (directory: string) => {
     OPENTEAM_AGENT_BROWSER_PROFILE_DIR: browserDirs.profile,
     OPENTEAM_BROWSER_CLI_ARTIFACTS_DIR: browserDirs.artifacts,
     OPENTEAM_BROWSER_CLI_PROFILE_DIR: browserDirs.profile,
+    OPENTEAM_AGENT_BROWSER_SESSION: sessionName(),
+    OPENTEAM_BROWSER_CLI_SESSION: sessionName(),
     ...(EXECUTABLE_PATH ? { AGENT_BROWSER_EXECUTABLE_PATH: EXECUTABLE_PATH } : {}),
     ...(ALLOWED_DOMAINS && !CONFIG_ENV.AGENT_BROWSER_ALLOWED_DOMAINS ? { AGENT_BROWSER_ALLOWED_DOMAINS: ALLOWED_DOMAINS } : {}),
   }
@@ -565,7 +570,7 @@ const setupEnv = async (directory: string) => {
 const run = async (args: string[], context: { directory: string; abort: AbortSignal }, options: { rawName?: string } = {}) => {
   const browserDirs = dirs(context.directory)
   const env = await setupEnv(context.directory)
-  const cmd = [BINARY, "--profile", browserDirs.profile, "--screenshot-dir", browserDirs.artifacts, ...args]
+  const cmd = [BINARY, "--session", sessionName(), "--profile", browserDirs.profile, "--screenshot-dir", browserDirs.artifacts, ...args]
   const proc = Bun.spawn(cmd, {
     cwd: context.directory,
     env,
@@ -597,7 +602,7 @@ export const open = tool({
   async execute(args, context) {
     const url = args.url || process.env.OPENTEAM_DEV_URL
     if (!url) throw new Error("missing url and OPENTEAM_DEV_URL is not set")
-    return run([...(args.headed ? ["--headed"] : []), "open", url], context)
+    return run([...(args.headed ? ["--headed"] : []), ...(ALLOWED_DOMAINS ? ["--allowed-domains", ALLOWED_DOMAINS] : []), "open", url], context)
   },
 })
 
@@ -614,6 +619,7 @@ export const snapshot = tool({
       ...(args.interactive === false ? [] : ["-i"]),
       ...(args.compact === false ? [] : ["-c"]),
       ...(args.depth ? ["-d", String(args.depth)] : []),
+      "--max-output", String(MAX_OUTPUT_CHARS),
       "--json",
     ], context, { rawName: "snapshot" })
   },
@@ -640,6 +646,91 @@ export const fill = tool({
   },
 })
 
+export const press = tool({
+  description: "Press a key on the page or within a selector/ref.",
+  args: {
+    key: tool.schema.string().describe("Key to press, such as Enter, Escape, or ArrowDown"),
+    selector: tool.schema.string().optional().describe("Optional selector or snapshot ref to target first"),
+  },
+  async execute(args, context) {
+    return run(["press", ...(args.selector ? [args.selector] : []), args.key], context)
+  },
+})
+
+export const type = tool({
+  description: "Type text into the focused element or selected input without replacing existing text.",
+  args: {
+    text: tool.schema.string().describe("Text to type"),
+    selector: tool.schema.string().optional().describe("Optional selector or snapshot ref to target first"),
+  },
+  async execute(args, context) {
+    return run(["type", ...(args.selector ? [args.selector] : []), args.text], context)
+  },
+})
+
+export const find = tool({
+  description: "Find elements matching visible text, label, role, selector, or snapshot-ref-friendly query.",
+  args: {
+    query: tool.schema.string().describe("Text, semantic query, selector, or other agent-browser find query"),
+  },
+  async execute(args, context) {
+    return run(["find", args.query, "--json", "--max-output", String(MAX_OUTPUT_CHARS)], context, { rawName: "find" })
+  },
+})
+
+export const scroll = tool({
+  description: "Scroll the page or an element in a direction.",
+  args: {
+    direction: tool.schema.enum(["up", "down", "left", "right"]).describe("Scroll direction"),
+    amount: tool.schema.string().optional().describe("Optional scroll amount accepted by agent-browser"),
+    selector: tool.schema.string().optional().describe("Optional selector or snapshot ref to scroll"),
+  },
+  async execute(args, context) {
+    return run(["scroll", args.direction, ...(args.amount ? [args.amount] : []), ...(args.selector ? [args.selector] : [])], context)
+  },
+})
+
+export const select = tool({
+  description: "Select an option in a select/listbox control selected by selector or snapshot ref.",
+  args: {
+    selector: tool.schema.string().describe("Selector or snapshot ref to select within"),
+    value: tool.schema.string().describe("Option value or label to select"),
+  },
+  async execute(args, context) {
+    return run(["select", args.selector, args.value], context)
+  },
+})
+
+export const check = tool({
+  description: "Check a checkbox or toggle selected by selector or snapshot ref.",
+  args: {
+    selector: tool.schema.string().describe("Selector or snapshot ref to check"),
+  },
+  async execute(args, context) {
+    return run(["check", args.selector], context)
+  },
+})
+
+export const uncheck = tool({
+  description: "Uncheck a checkbox or toggle selected by selector or snapshot ref.",
+  args: {
+    selector: tool.schema.string().describe("Selector or snapshot ref to uncheck"),
+  },
+  async execute(args, context) {
+    return run(["uncheck", args.selector], context)
+  },
+})
+
+export const hover = tool({
+  description: "Hover an element selected by selector or snapshot ref.",
+  args: {
+    selector: tool.schema.string().describe("Selector or snapshot ref to hover"),
+  },
+  async execute(args, context) {
+    return run(["hover", args.selector], context)
+  },
+})
+
 export const get = tool({
   description: "Read page state via agent-browser get commands.",
   args: {
@@ -650,7 +741,7 @@ export const get = tool({
     if ((args.kind === "text" || args.kind === "html" || args.kind === "value") && !args.selector) {
       throw new Error("selector is required for get " + args.kind)
     }
-    return run(["get", args.kind, ...(args.selector ? [args.selector] : []), "--json"], context)
+    return run(["get", args.kind, ...(args.selector ? [args.selector] : []), "--json", "--max-output", String(MAX_OUTPUT_CHARS)], context, { rawName: "get" })
   },
 })
 
@@ -689,7 +780,7 @@ export const console_messages = tool({
     clear: tool.schema.boolean().optional().describe("Clear console messages after reading"),
   },
   async execute(args, context) {
-    return run(["console", "--json", ...(args.clear ? ["--clear"] : [])], context, { rawName: "console" })
+    return run(["console", "--json", "--max-output", String(MAX_OUTPUT_CHARS), ...(args.clear ? ["--clear"] : [])], context, { rawName: "console" })
   },
 })
 
@@ -699,17 +790,15 @@ export const errors = tool({
     clear: tool.schema.boolean().optional().describe("Clear errors after reading"),
   },
   async execute(args, context) {
-    return run(["errors", "--json", ...(args.clear ? ["--clear"] : [])], context, { rawName: "errors" })
+    return run(["errors", "--json", "--max-output", String(MAX_OUTPUT_CHARS), ...(args.clear ? ["--clear"] : [])], context, { rawName: "errors" })
   },
 })
 
 export const close = tool({
   description: "Close the current agent-browser session.",
-  args: {
-    all: tool.schema.boolean().optional().describe("Close all active agent-browser sessions"),
-  },
-  async execute(args, context) {
-    return run(["close", ...(args.all ? ["--all"] : [])], context)
+  args: {},
+  async execute(_args, context) {
+    return run(["close"], context)
   },
 })
 
@@ -743,18 +832,18 @@ export const record_evidence = tool({
 export const writeAgentBrowserTools = async (agent: PreparedAgent, checkout: string) => {
   const cfg = agent.app.config.browser.agentBrowserTools
   const file = path.join(checkout, ".opencode", "tools", "agent_browser.ts")
-  if (!cfg?.enabled) {
+  if (cfg?.enabled === false || agent.meta.role !== "builder") {
     await rm(file, {force: true})
     return undefined
   }
 
   await ensureDir(path.dirname(file))
   const content = agentBrowserToolSource({
-    command: cfg.command || "agent-browser",
+    command: cfg?.command || "agent-browser",
     executablePath: agent.app.config.browser.executablePath,
-    environment: cfg.environment ?? {},
-    allowedDomains: cfg.allowedDomains?.length ? cfg.allowedDomains : ["127.0.0.1", "localhost"],
-    maxOutputChars: cfg.maxOutputChars ?? 60_000,
+    environment: cfg?.environment ?? {},
+    allowedDomains: cfg?.allowedDomains?.length ? cfg.allowedDomains : ["127.0.0.1", "localhost"],
+    maxOutputChars: cfg?.maxOutputChars ?? 60_000,
   })
   await writeFile(file, content)
   return file
@@ -1566,7 +1655,11 @@ const runAutomaticVerification = async (
       plan,
       profile: projectProfile,
       devEnv,
-      env: checkoutRuntimeEnv(checkout),
+      env: checkoutRuntimeEnv(checkout, {
+        OPENTEAM_RUN_ID: record.runId,
+        OPENTEAM_RUN_FILE: record.runFile,
+        ...(record.devServer?.url ? {OPENTEAM_DEV_URL: record.devServer.url} : {}),
+      }),
       source: "runtime",
     }),
     {runners: plan.runners.filter(runner => runner.kind !== "playwright-mcp").map(runner => runner.id)},

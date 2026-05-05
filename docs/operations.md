@@ -109,9 +109,10 @@ openteam also writes `.openteam/verification-plan.json` for each managed run.
 The plan records which local verification runners are selected and whether they are configured.
 Workers use `openteam verify list`, `openteam verify run <runner-id>`, `openteam verify browser ...`, `openteam verify artifact ...`, and `openteam verify record <runner-id> ...` during their own task loop.
 `openteam verify run` executes through the detected dev environment and writes logs under `.openteam/artifacts/verification/`.
-The disabled-by-default `agent-browser` runner is a `browser-cli` command path for the external `agent-browser` CLI; when local config enables it, `openteam verify run agent-browser` records browser evidence and gives the CLI isolated artifacts/profile directories under `.openteam/artifacts/verification/agent-browser`.
-The disabled-by-default `browser.agentBrowserTools.enabled` option generates checkout-local OpenCode `agent_browser_*` custom tools for step-by-step interaction through the external `agent-browser` CLI, using the same isolated profile/artifact directories.
-`openteam verify browser` records browser flow, URL, screenshot, console/network summary, and optional dev-health evidence after the worker uses Playwright MCP or another browser tool.
+The default `agent-browser` runner is a `browser-cli` command path for the external `agent-browser` CLI; `openteam verify run agent-browser` records browser evidence and gives the CLI isolated artifacts/profile directories plus a run-scoped session under `.openteam/artifacts/verification/agent-browser`.
+The default `browser.agentBrowserTools` path generates builder-only checkout-local OpenCode `agent_browser_*` custom tools for step-by-step interaction through the external `agent-browser` CLI, using the same isolated profile/artifact directories and run-scoped session unless local config disables it.
+Playwright MCP is the fallback browser path when agent-browser tooling or verification is unavailable or blocked.
+`openteam verify browser` records browser flow, URL, screenshot, console/network summary, and optional dev-health evidence after the worker uses agent-browser, Playwright MCP, or another browser tool.
 `openteam verify artifact` records a structured artifact such as a screenshot, Nostr event JSON, desktop log, or mobile output.
 `openteam verify record` records other agentic evidence from browser, desktop GUI, live Nostr, repo, or native-device checks.
 The launcher collects `.openteam/verification-results.json` after the worker phase; failed or blocked worker evidence fails the run.

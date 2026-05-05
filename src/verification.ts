@@ -22,18 +22,19 @@ type ProjectProfileLike = {
 
 const VERIFICATION_ARTIFACTS_DIR = path.join(".openteam", "artifacts", "verification")
 const AGENT_BROWSER_ARTIFACTS_DIR = path.join(VERIFICATION_ARTIFACTS_DIR, "agent-browser")
+const AGENT_BROWSER_ALLOWED_DOMAINS = "127.0.0.1,localhost"
 const AGENT_BROWSER_COMMAND = [
   "sh",
   "-c",
   [
     "test -n \"$OPENTEAM_DEV_URL\"",
-    "agent-browser --profile \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" --screenshot-dir \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR\" open \"$OPENTEAM_DEV_URL\"",
-    "agent-browser wait --load networkidle",
-    "agent-browser snapshot -i --json > \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/snapshot.json\"",
-    "agent-browser screenshot \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/page.png\"",
-    "agent-browser console --json > \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/console.json\"",
-    "agent-browser errors --json > \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/errors.json\"",
-    "agent-browser close",
+    "agent-browser --session \"$OPENTEAM_AGENT_BROWSER_SESSION\" --profile \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" --screenshot-dir \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR\" --allowed-domains \"$AGENT_BROWSER_ALLOWED_DOMAINS\" open \"$OPENTEAM_DEV_URL\"",
+    "agent-browser --session \"$OPENTEAM_AGENT_BROWSER_SESSION\" --profile \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" --screenshot-dir \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR\" wait --load networkidle",
+    "agent-browser --session \"$OPENTEAM_AGENT_BROWSER_SESSION\" --profile \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" --screenshot-dir \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR\" snapshot -i --json --max-output 60000 > \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/snapshot.json\"",
+    "agent-browser --session \"$OPENTEAM_AGENT_BROWSER_SESSION\" --profile \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" --screenshot-dir \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR\" screenshot \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/page.png\"",
+    "agent-browser --session \"$OPENTEAM_AGENT_BROWSER_SESSION\" --profile \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" --screenshot-dir \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR\" console --json --max-output 60000 > \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/console.json\"",
+    "agent-browser --session \"$OPENTEAM_AGENT_BROWSER_SESSION\" --profile \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" --screenshot-dir \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR\" errors --json --max-output 60000 > \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/errors.json\"",
+    "agent-browser --session \"$OPENTEAM_AGENT_BROWSER_SESSION\" --profile \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" --screenshot-dir \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR\" close",
   ].join(" && "),
 ]
 
@@ -41,7 +42,7 @@ export const DEFAULT_VERIFICATION_CONFIG: VerificationCfg = {
   autoRunAfterWorker: false,
   defaultRunners: {
     code: ["repo-native"],
-    web: ["repo-native", "browser"],
+    web: ["repo-native", "agent-browser", "browser"],
   },
   runners: {
     "repo-native": {
@@ -62,9 +63,9 @@ export const DEFAULT_VERIFICATION_CONFIG: VerificationCfg = {
     },
     "agent-browser": {
       kind: "browser-cli",
-      enabled: false,
+      enabled: true,
       local: true,
-      description: "Optional CLI-backed agent-browser verification; opt in locally to run the external agent-browser CLI as browser evidence.",
+      description: "Default CLI-backed agent-browser verification; Playwright MCP remains available as the browser fallback.",
       command: AGENT_BROWSER_COMMAND,
       modes: ["web"],
       stacks: ["web", "node"],
@@ -276,6 +277,9 @@ const safeName = (value: string) =>
     .replace(/^-+|-+$/g, "")
     .slice(0, 80) || "runner"
 
+const agentBrowserSessionName = (checkout: string, env: Record<string, string>) =>
+  `openteam-${safeName(env.OPENTEAM_RUN_ID || process.env.OPENTEAM_RUN_ID || checkout)}`
+
 const commandKey = (command: string[]) => command.join("\0")
 
 const firstProfileCommand = (profile?: ProjectProfile) => {
@@ -330,17 +334,21 @@ const verificationArtifactsDir = async (checkout: string, runner?: VerificationR
 const logFileForRunner = async (checkout: string, runner: VerificationRunnerPlan) =>
   path.join(await verificationArtifactsDir(checkout, runner), `${safeName(runner.id)}-${Date.now()}.log`)
 
-const runnerExecutionEnv = async (checkout: string, runner: VerificationRunnerPlan): Promise<Record<string, string>> => {
+const runnerExecutionEnv = async (checkout: string, runner: VerificationRunnerPlan, env: Record<string, string>): Promise<Record<string, string>> => {
   if (runner.kind !== "browser-cli") return {}
 
   const artifactsDir = await verificationArtifactsDir(checkout, runner)
   const profileDir = path.join(artifactsDir, "profile")
   await mkdir(profileDir, {recursive: true})
+  const session = agentBrowserSessionName(checkout, env)
   return {
     OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR: artifactsDir,
     OPENTEAM_AGENT_BROWSER_PROFILE_DIR: profileDir,
+    OPENTEAM_AGENT_BROWSER_SESSION: session,
     OPENTEAM_BROWSER_CLI_ARTIFACTS_DIR: artifactsDir,
     OPENTEAM_BROWSER_CLI_PROFILE_DIR: profileDir,
+    OPENTEAM_BROWSER_CLI_SESSION: session,
+    AGENT_BROWSER_ALLOWED_DOMAINS: env.AGENT_BROWSER_ALLOWED_DOMAINS || runner.environment?.AGENT_BROWSER_ALLOWED_DOMAINS || process.env.AGENT_BROWSER_ALLOWED_DOMAINS || AGENT_BROWSER_ALLOWED_DOMAINS,
   }
 }
 
@@ -395,7 +403,7 @@ const runCommand = async (
   const startedAt = now()
   const started = Date.now()
   const logFile = await logFileForRunner(checkout, runner)
-  const executionEnv = await runnerExecutionEnv(checkout, runner)
+  const executionEnv = await runnerExecutionEnv(checkout, runner, env)
   const artifacts = commandArtifactsForRunner(checkout, runner, executionEnv)
   const stream = createWriteStream(logFile, {flags: "a"})
   const [cmd, ...args] = command
