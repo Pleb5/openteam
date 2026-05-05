@@ -3,10 +3,12 @@ import {readFile, readdir, stat, writeFile} from "node:fs/promises"
 import path from "node:path"
 import {prepareAgent} from "../config.js"
 import {evaluateEvidencePolicy, evidenceLevel, groupEvidenceResults, verificationFailuresBlockTask} from "../evidence-policy.js"
+import {detectDevServerRuntimeFailure, type DevServerFailureCategory} from "../dev-server.js"
 import {detectOpenCodeBlockedState, detectOpenCodeHardFailure, detectOpenCodeToolBoundaries, detectWorkerVerificationBlockers, lastMeaningfulLogLine} from "../opencode-log.js"
 import {loadRepoRegistry, releaseRepoContext} from "../repo.js"
 import {evaluateRunRecord, type RunEvalResult} from "../run-evals.js"
 import {runImplementationProgressSignals} from "../run-progress.js"
+import {scanCheckoutRuntimeBloat} from "../runtime-bloat.js"
 import type {AgentRuntimeState, AppCfg, TaskRunRecord} from "../types.js"
 
 const value = (args: string[], key: string) => {
@@ -151,6 +153,7 @@ export type StaleFailureCategory =
   | "provision-stale-no-process"
   | "stale-dev-url-unhealthy"
   | "run-stale"
+  | DevServerFailureCategory
 
 const pidAlive = (pid?: number) => {
   if (!pid || pid <= 0) return false
@@ -216,9 +219,42 @@ const opencodeHardFailure = async (file?: string) => {
   return detectOpenCodeHardFailure(await readFile(file, "utf8"))
 }
 
+const opencodeAttemptDiagnostics = async (record: TaskRunRecord) => {
+  const structured = record.opencodeAttemptRecords ?? []
+  const paths = Array.from(new Set([
+    ...structured.map(item => item.logFile),
+    ...(record.logs?.opencodeAttempts ?? []),
+  ].filter(Boolean)))
+  const byPath = new Map(structured.map(item => [item.logFile, item]))
+  return Promise.all(paths.map(async (file, index) => {
+    const attempt = byPath.get(file)
+    return {
+      attempt: attempt?.attempt ?? index + 1,
+      modelAttempt: attempt?.modelAttempt,
+      sameModelAttempt: attempt?.sameModelAttempt,
+      state: attempt?.state,
+      model: attempt?.model,
+      modelProfile: attempt?.modelProfile,
+      modelVariant: attempt?.modelVariant,
+      provider: attempt?.provider,
+      modelId: attempt?.modelId,
+      fallbackKind: attempt?.fallbackKind,
+      failureCategory: attempt?.failureCategory,
+      nextAction: attempt?.nextAction,
+      logFile: file,
+      hardFailure: await opencodeHardFailure(file),
+    }
+  }))
+}
+
 const workerVerificationBlockers = async (file?: string) => {
   if (!file || !existsSync(file)) return []
   return detectWorkerVerificationBlockers(await readFile(file, "utf8"))
+}
+
+const devServerRuntimeFailure = async (file?: string) => {
+  if (!file || !existsSync(file)) return undefined
+  return detectDevServerRuntimeFailure(await readFile(file, "utf8"))
 }
 
 export const checkUrl = async (url?: string) => {
@@ -268,7 +304,9 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
   }
   const opencodeProgress = await opencodeProgressInfo(record.logs?.opencode, runningPhase?.startedAt ?? record.startedAt)
   const hardFailure = await opencodeHardFailure(record.logs?.opencode)
+  const opencodeAttempts = await opencodeAttemptDiagnostics(record)
   const verificationBlockers = await workerVerificationBlockers(record.logs?.opencode)
+  const devFailure = await devServerRuntimeFailure(record.logs?.dev)
   const newestLogAgeMs = Math.min(...Object.values(logs).map(item => item?.ageMs).filter((age): age is number => typeof age === "number"))
   const activePhaseDurationMs = phaseDurationMs(runningPhase)
   const opencodeIdleMs = opencodeProgress.ageMs
@@ -311,6 +349,10 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
       reasons.push("run advertises a browser/dev URL but the URL is not healthy")
     }
 
+    if (devFailure) {
+      reasons.push(`${devFailure.reason}${devFailure.path ? `: ${devFailure.path}` : ""}`)
+    }
+
     if (runningPhase?.name === "opencode-worker" && opencodeProgress.blocked) {
       reasons.push(`${opencodeProgress.blocked.reason}: ${opencodeProgress.blocked.evidence}`)
     } else if (runningPhase?.name === "opencode-worker" && opencodeProgress.toolBoundaries.some(item => item.inFlight)) {
@@ -322,6 +364,10 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
 
   if (record.state !== "running" && record.state !== "stale" && hardFailure) {
     reasons.push(`OpenCode log contains hard failure: ${hardFailure.reason}`)
+  }
+
+  if (record.state !== "running" && devFailure) {
+    reasons.push(`${devFailure.reason}${devFailure.path ? `: ${devFailure.path}` : ""}`)
   }
 
   const verificationFailureBlocksRun = verificationFailuresBlockTask(record.doneContract)
@@ -356,7 +402,7 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
   )
   const stale = record.state === "stale" || staleCandidate
   const staleFailureCategory = stale
-    ? categorizeStaleRun(record, {
+    ? devFailure?.category ?? categorizeStaleRun(record, {
       activePhaseName: runningPhase?.name,
       knownPids,
       anyPidAlive,
@@ -367,6 +413,9 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
     })
     : undefined
   const implementationProgress = await runImplementationProgressSignals(record, {includeCheckoutEvidence: record.state !== "running"}).catch(() => undefined)
+  const runtimeBloat = record.context?.checkout && (stale || devFailure)
+    ? await scanCheckoutRuntimeBloat(record.context.checkout).catch(() => undefined)
+    : undefined
   const recommendedAction = recommendedActionForDiagnosis(record, {hardFailure, stale, implementationProgress})
 
   return {
@@ -400,6 +449,7 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
       ...record.devServer,
       status: devStatus,
       health,
+      failure: devFailure,
     },
     provision: {
       state: record.provisionState,
@@ -409,7 +459,9 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
       logFile: record.logs?.provision,
     },
     hardFailure,
+    opencodeAttempts,
     implementationProgress,
+    runtimeBloat,
     recommendedAction,
     verificationBlockers,
     verification: record.verification,
@@ -517,7 +569,22 @@ export const compactDiagnosis = (diagnosis?: RunDiagnosis) => diagnosis ? {
   stale: diagnosis.stale,
   reasons: diagnosis.reasons,
   hardFailure: diagnosis.hardFailure,
+  opencodeAttempts: diagnosis.opencodeAttempts.map(item => ({
+    attempt: item.attempt,
+    modelAttempt: item.modelAttempt,
+    sameModelAttempt: item.sameModelAttempt,
+    state: item.state,
+    model: item.model,
+    modelProfile: item.modelProfile,
+    provider: item.provider,
+    modelId: item.modelId,
+    fallbackKind: item.fallbackKind,
+    failureCategory: item.failureCategory ?? item.hardFailure?.category,
+    nextAction: item.nextAction,
+    logFile: item.logFile,
+  })),
   implementationProgress: diagnosis.implementationProgress,
+  runtimeBloat: diagnosis.runtimeBloat?.entries,
   recommendedAction: diagnosis.recommendedAction,
   staleFailureCategory: diagnosis.staleFailureCategory,
   verificationBlockers: diagnosis.verificationBlockers,
@@ -533,6 +600,8 @@ export const compactDiagnosis = (diagnosis?: RunDiagnosis) => diagnosis ? {
   devStatus: diagnosis.devServer.status,
   devUrlHealthy: diagnosis.devServer.health.ok,
   devUrlError: diagnosis.devServer.health.error,
+  devFailureCategory: diagnosis.devServer.failure?.category,
+  devFailureReason: diagnosis.devServer.failure?.reason,
   contextState: diagnosis.context?.state,
   contextLeaseMatchesRun: diagnosis.context?.leaseMatchesRun,
   verificationRunners: diagnosis.verification?.plan.runners.map(runner => ({
@@ -620,6 +689,7 @@ const runListView = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
     evidenceLevel: evidenceLevel(record.doneContract, record.verification?.results ?? []),
     doneContract: record.doneContract?.taskClass,
     logFile: record.logs?.opencode ?? record.result?.logFile,
+    opencodeAttempts: record.opencodeAttemptRecords?.map(item => `${item.attempt}:${item.model ?? "(unset)"}:${item.state}`),
     runFile: record.runFile,
   }
 }
@@ -648,8 +718,15 @@ const printDiagnosis = (diagnosis: Awaited<ReturnType<typeof diagnoseRun>>) => {
   if (diagnosis.opencodeProgress.logAgeMs !== undefined) console.log(`opencode log age ms: ${diagnosis.opencodeProgress.logAgeMs}`)
   if (diagnosis.opencodeProgress.stallSeverity) console.log(`opencode stall: ${diagnosis.opencodeProgress.stallSeverity}`)
   if (diagnosis.opencodeProgress.blocked) console.log(`opencode blocked: ${diagnosis.opencodeProgress.blocked.kind} (${diagnosis.opencodeProgress.blocked.reason})`)
+  for (const attempt of diagnosis.opencodeAttempts) {
+    console.log(`opencode attempt: ${attempt.attempt} ${attempt.model ?? "(unset)"} ${attempt.state ?? "unknown"}${attempt.failureCategory || attempt.hardFailure?.category ? ` (${attempt.failureCategory ?? attempt.hardFailure?.category})` : ""}`)
+  }
   console.log(`dev url: ${diagnosis.devServer.health.url ?? "(none)"}`)
   console.log(`dev status: ${diagnosis.devServer.status}`)
+  if (diagnosis.devServer.failure) {
+    console.log(`dev failure: ${diagnosis.devServer.failure.category} (${diagnosis.devServer.failure.reason})`)
+    if (diagnosis.devServer.failure.path) console.log(`dev failure path: ${diagnosis.devServer.failure.path}`)
+  }
   if (!diagnosis.devServer.status.startsWith("stopped after")) {
     console.log(`dev health: ${diagnosis.devServer.health.ok ? "ok" : "down"}${diagnosis.devServer.health.error ? ` (${diagnosis.devServer.health.error})` : ""}`)
   }
@@ -667,6 +744,10 @@ const printDiagnosis = (diagnosis: Awaited<ReturnType<typeof diagnoseRun>>) => {
   if (diagnosis.implementationProgress) {
     console.log(`implementation progress: ${diagnosis.implementationProgress.hasImplementationProgress ? "yes" : "no"}`)
     for (const reason of diagnosis.implementationProgress.reasons) console.log(`progress reason: ${reason}`)
+  }
+  for (const entry of diagnosis.runtimeBloat?.entries ?? []) {
+    const mb = (entry.sizeBytes / 1024 / 1024).toFixed(1)
+    console.log(`runtime bloat: ${entry.relativePath} ${mb} MiB ${entry.files} files${entry.truncated ? " (scan truncated)" : ""}`)
   }
   console.log(`context: ${diagnosis.context ? `${diagnosis.context.id} ${diagnosis.context.state}` : "(none)"}`)
   if (diagnosis.manualTakeover) {
@@ -867,10 +948,10 @@ export const cleanupStaleRuns = async (app: AppCfg, options: {dryRun?: boolean} 
     const diagnosis = await diagnoseRun(app, record)
     if (!diagnosis.stale) continue
     if (options.dryRun) {
-      cleaned.push({runId: record.runId, dryRun: true, reasons: diagnosis.reasons})
+      cleaned.push({runId: record.runId, dryRun: true, reasons: diagnosis.reasons, runtimeBloat: diagnosis.runtimeBloat?.entries ?? []})
       continue
     }
-    cleaned.push({...await stopRunRecord(app, record.runId, "stale"), reasons: diagnosis.reasons})
+    cleaned.push({...await stopRunRecord(app, record.runId, "stale"), reasons: diagnosis.reasons, runtimeBloat: diagnosis.runtimeBloat?.entries ?? []})
   }
   return cleaned
 }
@@ -892,7 +973,7 @@ export const cleanupStaleRunsForContext = async (app: AppCfg, contextId: string)
     if (!record || (record.state !== "running" && record.state !== "stale") || record.context?.id !== contextId) continue
     const diagnosis = await diagnoseRun(app, record)
     if (!diagnosis.stale) continue
-    cleaned.push({...await stopRunRecord(app, record.runId, "stale"), reasons: diagnosis.reasons})
+    cleaned.push({...await stopRunRecord(app, record.runId, "stale"), reasons: diagnosis.reasons, runtimeBloat: diagnosis.runtimeBloat?.entries ?? []})
   }
   return cleaned
 }

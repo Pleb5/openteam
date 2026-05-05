@@ -215,11 +215,13 @@ export type ModelProfileCfg = {
   model: string
   variant?: string
   description?: string
+  fallbackModelProfiles?: string[]
 }
 
 export type WorkerProfileCfg = {
   description?: string
   modelProfile?: string
+  fallbackModelProfiles?: string[]
   opencodeAgent?: string
   canEdit?: boolean
   canPublishPr?: boolean
@@ -255,6 +257,13 @@ export type OpenCodeCfg = {
   model: string
   agent: string
   modelProfile?: string
+  fallbackModelProfiles?: string[]
+  retry?: {
+    maxSameModelAttempts?: number
+    maxTotalAttempts?: number
+    initialBackoffMs?: number
+    maxBackoffMs?: number
+  }
   roleAgents?: boolean
   requireExplicitModel?: boolean
 }
@@ -344,6 +353,7 @@ export type ResolvedModelSelectionSource =
   | "worker-profile"
   | "role-default-worker-profile"
   | "opencode-model-profile"
+  | "fallback-model-profile"
   | "opencode-model"
   | "unset"
 
@@ -353,6 +363,22 @@ export type ResolvedModelSelection = {
   modelProfile?: string
   workerProfile?: string
   source: ResolvedModelSelectionSource
+}
+
+export type ModelFallbackKind =
+  | "primary"
+  | "same-model-different-provider"
+  | "same-provider-different-model"
+  | "different-provider-different-model"
+  | "fallback"
+
+export type ResolvedModelAttempt = ResolvedModelSelection & {
+  planIndex: number
+  fallbackKind: ModelFallbackKind
+  provider?: string
+  modelId?: string
+  previousProvider?: string
+  previousModelId?: string
 }
 
 export type OpenCodeRuntimeHandoff = {
@@ -372,6 +398,16 @@ export type OpenCodeRuntimeHandoff = {
     variant?: string
     source: string
     profile?: string
+  }>
+  attemptPlan?: Array<{
+    planIndex: number
+    model?: string
+    variant?: string
+    modelProfile?: string
+    source: ResolvedModelSelectionSource
+    provider?: string
+    modelId?: string
+    fallbackKind: ModelFallbackKind
   }>
   auth: {
     sourceDataDir: string
@@ -430,6 +466,35 @@ export type TaskRunPhase = {
   details?: Record<string, unknown>
   error?: string
 }
+export type OpenCodeAttemptState = "running" | "succeeded" | "failed" | "skipped"
+
+export type OpenCodeAttemptRecord = {
+  attempt: number
+  modelAttempt: number
+  sameModelAttempt: number
+  state: OpenCodeAttemptState
+  startedAt: string
+  finishedAt?: string
+  durationMs?: number
+  logFile: string
+  exitCode?: number
+  model?: string
+  modelProfile?: string
+  modelVariant?: string
+  modelSource?: ResolvedModelSelectionSource
+  provider?: string
+  modelId?: string
+  fallbackKind?: ModelFallbackKind
+  previousProvider?: string
+  previousModelId?: string
+  failureCategory?: string
+  failureReason?: string
+  failureEvidence?: string
+  retryable?: boolean
+  fallbackEligible?: boolean
+  nextAction?: "retry-same-model" | "fallback-model" | "fail"
+}
+
 
 export type RepoIdentity = {
   key: string
@@ -662,6 +727,7 @@ export type TaskRunRecord = {
     opencodeAttempts?: string[]
     provision?: string
     dev?: string
+  opencodeAttemptRecords?: OpenCodeAttemptRecord[]
   }
   process?: {
     runnerPid?: number

@@ -1,5 +1,5 @@
 import {describe, expect, test} from "bun:test"
-import {resolveModelSelection, resolveWorkerProfile, workerProfilePromptLines} from "../src/model-profiles.js"
+import {resolveModelAttemptPlan, resolveModelSelection, resolveWorkerProfile, workerProfilePromptLines} from "../src/model-profiles.js"
 import type {AppCfg, PreparedAgent} from "../src/types.js"
 
 const app = (patch: Partial<AppCfg["config"]> = {}): AppCfg => ({
@@ -193,5 +193,30 @@ describe("model profile resolution", () => {
 
     expect(lines).toContain("Worker profile: noSubagents")
     expect(lines).toContain("do not spawn opencode helper subagents")
+  })
+
+  test("builds ordered fallback plan with same-model different-provider attempts", () => {
+    const testApp = app({
+      modelProfiles: {
+        primary: {model: "opencode/gpt-5.5", variant: "high", fallbackModelProfiles: ["sameModelOtherProvider"]},
+        sameModelOtherProvider: {model: "openrouter/gpt-5.5", variant: "high"},
+        workerFallback: {model: "anthropic/claude-sonnet-4.5", variant: "medium"},
+      },
+      workerProfiles: {
+        builder: {modelProfile: "primary", fallbackModelProfiles: ["workerFallback"]},
+      },
+    })
+
+    const plan = resolveModelAttemptPlan(prepared(testApp))
+
+    expect(plan.map(item => item.model)).toEqual([
+      "opencode/gpt-5.5",
+      "openrouter/gpt-5.5",
+      "anthropic/claude-sonnet-4.5",
+    ])
+    expect(plan[0].fallbackKind).toBe("primary")
+    expect(plan[1].fallbackKind).toBe("same-model-different-provider")
+    expect(plan[1].previousProvider).toBe("opencode")
+    expect(plan[2].fallbackKind).toBe("different-provider-different-model")
   })
 })

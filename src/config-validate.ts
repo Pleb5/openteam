@@ -134,6 +134,22 @@ const profileIssues = (app: AppCfg) => {
       issues.push(issue("error", "model-variant-invalid", `${owner} variant '${variant}' must be a simple opencode variant id`))
     }
   }
+  const fallbackProfileIssues = (owner: string, values?: string[]) => {
+    if (values === undefined) return
+    if (!Array.isArray(values)) {
+      issues.push(issue("error", "fallback-model-profiles-invalid", `${owner} fallbackModelProfiles must be an array`))
+      return
+    }
+    for (const value of values) {
+      if (typeof value !== "string" || !value.trim()) {
+        issues.push(issue("error", "fallback-model-profile-empty", `${owner} fallbackModelProfiles contains an empty profile id`))
+        continue
+      }
+      if (!knownModelProfile(value)) {
+        issues.push(issue("error", "unknown-model-profile", `${owner} fallbackModelProfiles references unknown model profile '${value}'`))
+      }
+    }
+  }
 
   for (const [id, profile] of Object.entries(modelProfiles)) {
     if (typeof profile.model !== "string" || !profile.model.trim()) {
@@ -142,6 +158,7 @@ const profileIssues = (app: AppCfg) => {
       modelFormatIssue(`model profile '${id}'`, profile.model)
     }
     variantFormatIssue(`model profile '${id}'`, profile.variant)
+    fallbackProfileIssues(`model profile '${id}'`, profile.fallbackModelProfiles)
   }
 
   modelFormatIssue("opencode", app.config.opencode.model)
@@ -151,6 +168,21 @@ const profileIssues = (app: AppCfg) => {
 
   if (app.config.opencode.modelProfile && !knownModelProfile(app.config.opencode.modelProfile)) {
     issues.push(issue("error", "unknown-model-profile", `opencode.modelProfile references unknown model profile '${app.config.opencode.modelProfile}'`))
+  }
+  fallbackProfileIssues("opencode", app.config.opencode.fallbackModelProfiles)
+
+  const retry = app.config.opencode.retry
+  if (retry !== undefined) {
+    if (typeof retry !== "object" || Array.isArray(retry)) {
+      issues.push(issue("error", "opencode-retry-invalid", "opencode.retry must be an object"))
+    } else {
+      for (const key of ["maxSameModelAttempts", "maxTotalAttempts", "initialBackoffMs", "maxBackoffMs"] as const) {
+        const value = retry[key]
+        if (value !== undefined && (!Number.isInteger(value) || value <= 0)) {
+          issues.push(issue("error", "opencode-retry-value-invalid", `opencode.retry.${key} must be a positive integer`))
+        }
+      }
+    }
   }
 
   if (requireExplicitModel(app) && !app.config.opencode.model?.trim() && !app.config.opencode.modelProfile && Object.keys(modelProfiles).length === 0) {
@@ -165,6 +197,7 @@ const profileIssues = (app: AppCfg) => {
     if (profile.modelProfile && !knownModelProfile(profile.modelProfile)) {
       issues.push(issue("error", "unknown-model-profile", `worker profile '${id}' references unknown model profile '${profile.modelProfile}'`))
     }
+    fallbackProfileIssues(`worker profile '${id}'`, profile.fallbackModelProfiles)
     if (profile.opencodeAgent !== undefined && (typeof profile.opencodeAgent !== "string" || !profile.opencodeAgent.trim())) {
       issues.push(issue("error", "worker-profile-opencode-agent-empty", `worker profile '${id}' has an empty opencodeAgent`))
     }

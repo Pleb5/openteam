@@ -7,7 +7,13 @@ export type OpenCodeHardFailureCategory =
   | "model-unavailable"
   | "model-provider-unavailable"
   | "model-provider-auth-failed"
+  | "model-provider-overloaded"
+  | "model-provider-rate-limited"
   | "model-provider-server-error"
+  | "model-provider-timeout"
+  | "model-provider-network-error"
+  | "model-provider-quota-exceeded"
+  | "model-context-length-exceeded"
   | "opencode-auth-unavailable"
   | "tool-permission-rejected"
   | "opencode-policy-blocked"
@@ -19,6 +25,7 @@ export type OpenCodeHardFailure = {
   reason: string
   evidence: string
   retryable: boolean
+  fallbackEligible?: boolean
 }
 
 const cleanEvidence = (value: string) =>
@@ -29,27 +36,96 @@ const failure = (
   category: OpenCodeHardFailureCategory,
   reason: string,
   retryable = false,
+  fallbackEligible = false,
 ): OpenCodeHardFailure => ({
   category,
   reason,
   evidence: cleanEvidence(match),
   retryable,
+  fallbackEligible,
 })
+
+const stringValue = (value: unknown) => typeof value === "string" ? value : ""
+
+const classifyProviderErrorText = (text: string, evidence = text) => {
+  const clean = text.replace(/\s+/g, " ")
+  if (/context[_ -]?length[_ -]?exceeded|context window|maximum context|token limit|prompt is too long|input is too long|request entity too large|\b413\b/i.test(clean)) {
+    return failure(evidence, "model-context-length-exceeded", "model input exceeded the context window")
+  }
+  if (/insufficient_quota|quota exceeded|billing|credits exhausted|free usage exceeded|usage_not_included/i.test(clean)) {
+    return failure(evidence, "model-provider-quota-exceeded", "model provider quota or billing limit was reached", false, true)
+  }
+  if (/server_is_overloaded|service_unavailable_error|servers? (?:are )?(?:currently )?overloaded|provider is overloaded|\boverloaded\b/i.test(clean)) {
+    return failure(evidence, "model-provider-overloaded", "model provider is overloaded", true, true)
+  }
+  if (/too_many_requests|rate[_ -]?limit|\brate limited\b|\b429\b/i.test(clean)) {
+    return failure(evidence, "model-provider-rate-limited", "model provider rate limit was reached", true, true)
+  }
+  if (/request timed out|timed out|timeout|deadline exceeded|gateway timeout|\b504\b/i.test(clean)) {
+    return failure(evidence, "model-provider-timeout", "model provider request timed out", true, true)
+  }
+  if (/ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|socket hang up|network error|fetch failed|connection reset/i.test(clean)) {
+    return failure(evidence, "model-provider-network-error", "model provider network request failed", true, true)
+  }
+  if (/\b(?:500|502|503)\b|server_error|internal server error|bad gateway|service unavailable/i.test(clean)) {
+    return failure(evidence, "model-provider-server-error", "model provider returned a transient server error", true, true)
+  }
+  return undefined
+}
+
+const classifyProviderErrorJson = (value: unknown, evidence: string) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const body = value as Record<string, unknown>
+  const error = body.error && typeof body.error === "object" && !Array.isArray(body.error)
+    ? body.error as Record<string, unknown>
+    : undefined
+  const text = [
+    stringValue(body.type),
+    stringValue(body.code),
+    stringValue(body.message),
+    stringValue(error?.type),
+    stringValue(error?.code),
+    stringValue(error?.message),
+  ].filter(Boolean).join(" ")
+  return text ? classifyProviderErrorText(text, evidence) : undefined
+}
+
+const structuredProviderFailure = (text: string) => {
+  for (const line of text.split(/\r?\n/)) {
+    if (!/[{}]/.test(line) || !/\b(?:error|code|type|message)\b/i.test(line)) continue
+    const start = line.indexOf("{")
+    const end = line.lastIndexOf("}")
+    if (start === -1 || end <= start) continue
+    const snippet = line.slice(start, end + 1)
+    try {
+      const parsed = JSON.parse(snippet)
+      const classified = classifyProviderErrorJson(parsed, snippet)
+      if (classified) return classified
+    } catch {}
+  }
+  return undefined
+}
 
 export const detectOpenCodeHardFailure = (text: string) => {
   const clean = stripAnsi(text)
-  const checks: Array<[RegExp, OpenCodeHardFailureCategory, string, boolean?]> = [
+  const structured = structuredProviderFailure(clean)
+  if (structured) return structured
+
+  const checks: Array<[RegExp, OpenCodeHardFailureCategory, string, boolean?, boolean?]> = [
     [/Error:\s*database is locked/i, "opencode-database-locked", "OpenCode runtime database was locked", true],
     [/\bdatabase is locked\b/i, "opencode-database-locked", "OpenCode runtime database was locked", true],
-    [/ProviderModelNotFoundError/i, "model-unavailable", "configured opencode model was not found by provider"],
-    [/Model not found:\s*[^\n.]+/i, "model-config-invalid", "configured opencode model was not found by provider"],
-    [/No provider found for model|Provider not found|Unknown provider/i, "model-provider-unavailable", "configured opencode provider was not found"],
-    [/invalid (?:model )?variant|unknown variant/i, "model-config-invalid", "configured opencode model variant was not accepted"],
+    [/ProviderModelNotFoundError/i, "model-unavailable", "configured opencode model was not found by provider", false, true],
+    [/Model not found:\s*[^\n.]+/i, "model-config-invalid", "configured opencode model was not found by provider", false, true],
+    [/No provider found for model|Provider not found|Unknown provider/i, "model-provider-unavailable", "configured opencode provider was not found", false, true],
+    [/invalid (?:model )?variant|unknown variant/i, "model-config-invalid", "configured opencode model variant was not accepted", false, true],
     [/missing (?:opencode )?auth|auth\.json.*(?:missing|not found)|no auth state/i, "opencode-auth-unavailable", "OpenCode auth state was unavailable"],
-    [/AuthenticationError|Unauthorized|invalid api key|missing api key/i, "model-provider-auth-failed", "model provider authentication failed"],
+    [/AuthenticationError|Unauthorized|invalid api key|missing api key/i, "model-provider-auth-failed", "model provider authentication failed", false, true],
     [/models\.dev.*(?:timed out|timeout|failed to fetch)/i, "model-provider-unavailable", "OpenCode model registry lookup failed", true],
-    [/"code"\s*:\s*"server_error"/i, "model-provider-server-error", "model provider returned server_error", true],
-    [/"type"\s*:\s*"server_error"/i, "model-provider-server-error", "model provider returned server_error", true],
+    [/server_is_overloaded|service_unavailable_error|servers? (?:are )?(?:currently )?overloaded|\boverloaded\b/i, "model-provider-overloaded", "model provider is overloaded", true, true],
+    [/too_many_requests|rate[_ -]?limit|\brate limited\b|\b429\b/i, "model-provider-rate-limited", "model provider rate limit was reached", true, true],
+    [/request timed out|timed out|timeout|deadline exceeded|gateway timeout|\b504\b/i, "model-provider-timeout", "model provider request timed out", true, true],
+    [/ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|socket hang up|network error|fetch failed|connection reset/i, "model-provider-network-error", "model provider network request failed", true, true],
+    [/"code"\s*:\s*"server_error"|"type"\s*:\s*"server_error"|\b(?:500|502|503)\b|internal server error|bad gateway|service unavailable/i, "model-provider-server-error", "model provider returned a transient server error", true, true],
     [/permission requested:[\s\S]{0,300}auto-rejecting/i, "tool-permission-rejected", "tool permission request was auto-rejected"],
     [/The user rejected permission to use this specific tool call\./i, "tool-permission-rejected", "tool permission request was rejected"],
     [/sandbox (?:denied|blocked|rejected) the requested (?:tool|command|operation)/i, "opencode-policy-blocked", "sandbox policy blocked the requested operation"],
@@ -57,10 +133,10 @@ export const detectOpenCodeHardFailure = (text: string) => {
     [/Publication is still blocked|No branch push occurred|No PR URL was recorded|No upstream PR was created/i, "publication-blocked", "worker reported publication was blocked"],
     [/\b(?:panic|fatal panic|unhandled exception|uncaught exception)\b/i, "opencode-runtime-error", "OpenCode runtime crashed or threw an unhandled exception"],
   ]
-  for (const [pattern, category, reason, retryable] of checks) {
+  for (const [pattern, category, reason, retryable, fallbackEligible] of checks) {
     const match = clean.match(pattern)
     if (match) {
-      return failure(match[0], category, reason, Boolean(retryable))
+      return failure(match[0], category, reason, Boolean(retryable), Boolean(fallbackEligible))
     }
   }
 

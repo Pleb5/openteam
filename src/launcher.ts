@@ -18,7 +18,7 @@ import {evaluateEvidencePolicy, verificationFailuresBlockTask, type EvidencePoli
 import {KIND_GIT_ISSUE} from "./events.js"
 import {buildFinalResponseRecord, createOutputTailCapture, type OutputTailSnapshot} from "./final-response.js"
 import {redactSensitiveText} from "./log-redaction.js"
-import {assertModelSelectionValid, resolveModelSelection} from "./model-profiles.js"
+import {assertModelSelectionValid, resolveModelAttemptPlan, resolveModelSelection} from "./model-profiles.js"
 import {selectOpencodePrimaryAgent, writeOpencodeManagedAgents} from "./opencode-agents.js"
 import {detectOpenCodeBlockedState, detectOpenCodeHardFailure, detectOpenCodeToolBoundaries, type OpenCodeHardFailure} from "./opencode-log.js"
 import {writeOpenCodeRuntimeHandoff} from "./opencode-runtime.js"
@@ -64,7 +64,7 @@ import {
   syncOwnOutboxRelays,
   syncProfileTokens,
 } from "./nostr.js"
-import type {AppCfg, LaunchResult, PreparedAgent, TaskItem, AgentRuntimeState, ProvisionFailureCategory, RepoCfg, ResolvedModelSelection, ResolvedRepoTarget, ResolvedTaskSubject, TaskMode, TaskRunPhase, TaskRunRecord} from "./types.js"
+import type {AppCfg, LaunchResult, PreparedAgent, TaskItem, AgentRuntimeState, OpenCodeAttemptRecord, ProvisionFailureCategory, RepoCfg, ResolvedModelAttempt, ResolvedModelSelection, ResolvedRepoTarget, ResolvedTaskSubject, TaskMode, TaskRunPhase, TaskRunRecord} from "./types.js"
 
 type AgentRuntime = {
   bunker?: RunningBunker
@@ -1075,6 +1075,67 @@ const opencodeAttemptLogFile = (logFile: string, attempt: number) => {
   return `${base}-retry-${attempt}${ext || ".log"}`
 }
 
+const opencodeRetryPolicy = (app: AppCfg, modelAttemptCount: number) => {
+  const cfg = app.config.opencode.retry ?? {}
+  const maxSameModelAttempts = Math.max(1, cfg.maxSameModelAttempts ?? 2)
+  const maxTotalAttempts = Math.max(
+    1,
+    cfg.maxTotalAttempts ?? (modelAttemptCount > 1 ? Math.min(5, modelAttemptCount * maxSameModelAttempts) : maxSameModelAttempts),
+  )
+  return {
+    maxSameModelAttempts,
+    maxTotalAttempts,
+    initialBackoffMs: Math.max(1, cfg.initialBackoffMs ?? 2000),
+    maxBackoffMs: Math.max(1, cfg.maxBackoffMs ?? 30_000),
+  }
+}
+
+const opencodeBackoffMs = (attempt: number, policy: ReturnType<typeof opencodeRetryPolicy>) =>
+  Math.min(policy.maxBackoffMs, policy.initialBackoffMs * Math.pow(2, Math.max(0, attempt - 1)))
+
+const attemptRecordFor = (input: {
+  attempt: number
+  modelAttempt: number
+  sameModelAttempt: number
+  logFile: string
+  modelSelection: ResolvedModelAttempt
+}): OpenCodeAttemptRecord => ({
+  attempt: input.attempt,
+  modelAttempt: input.modelAttempt,
+  sameModelAttempt: input.sameModelAttempt,
+  state: "running",
+  startedAt: now(),
+  logFile: input.logFile,
+  model: input.modelSelection.model,
+  modelProfile: input.modelSelection.modelProfile,
+  modelVariant: input.modelSelection.variant,
+  modelSource: input.modelSelection.source,
+  provider: input.modelSelection.provider,
+  modelId: input.modelSelection.modelId,
+  fallbackKind: input.modelSelection.fallbackKind,
+  previousProvider: input.modelSelection.previousProvider,
+  previousModelId: input.modelSelection.previousModelId,
+})
+
+const writeOpenCodeAttemptRecord = async (record: TaskRunRecord, attempt: OpenCodeAttemptRecord) => {
+  const attempts = [...(record.opencodeAttemptRecords ?? [])]
+  const index = attempts.findIndex(item => item.attempt === attempt.attempt)
+  if (index === -1) attempts.push(attempt)
+  else attempts[index] = attempt
+  attempts.sort((a, b) => a.attempt - b.attempt)
+  await updateRunRecord(record, {opencodeAttemptRecords: attempts})
+}
+
+const updateRunRecordModelSelection = async (record: TaskRunRecord, selection: ResolvedModelAttempt) => {
+  await updateRunRecord(record, {
+    resolvedModel: selection.model,
+    modelProfile: selection.modelProfile,
+    modelVariant: selection.variant,
+    modelSource: selection.source,
+    workerProfile: selection.workerProfile,
+  })
+}
+
 const startOpenCodeWorkerWatchdog = (record: TaskRunRecord, logFile: string, intervalMs = 15_000) => {
   let lastFingerprint = ""
   let stopped = false
@@ -1133,62 +1194,113 @@ const runWorkerOpencodeSessionWithRetry = async (input: {
   idTask: string
   prompt: string
   logFile: string
-  modelSelection: ResolvedModelSelection
+  modelAttemptPlan: ResolvedModelAttempt[]
   runRecord: TaskRunRecord
   env: Record<string, string>
   devEnv?: DevEnv
 }) => {
-  const maxAttempts = 2
+  const modelAttemptPlan = input.modelAttemptPlan.length > 0 ? input.modelAttemptPlan : resolveModelAttemptPlan(input.agent)
+  if (modelAttemptPlan.length === 0) throw new Error("OpenCode worker retry plan did not include any model attempts")
+  const policy = opencodeRetryPolicy(input.agent.app, modelAttemptPlan.length)
   let lastError: unknown
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const attemptLogFile = opencodeAttemptLogFile(input.logFile, attempt)
-    const attempts = Array.from(new Set([...(input.runRecord.logs?.opencodeAttempts ?? []), attemptLogFile]))
-    await updateRunRecord(input.runRecord, {logs: {opencode: attemptLogFile, opencodeAttempts: attempts}})
+  let globalAttempt = 0
 
-    try {
-      const watchdog = startOpenCodeWorkerWatchdog(input.runRecord, attemptLogFile)
-      try {
-        return await runOpencodeSession(
-          input.agent,
-          input.checkout,
-          input.idTask,
-          input.prompt,
-          attemptLogFile,
-          input.modelSelection,
-          pid => updateRunRecord(input.runRecord, {process: {opencodePid: pid}}),
-          input.env,
-          input.devEnv,
-          undefined,
-          {stateId: input.runRecord.runId, attempt},
-        )
-      } finally {
-        await watchdog.stop()
-      }
-    } catch (error) {
-      lastError = error
-      const hardFailure = error instanceof OpenCodeHardFailureError ? error.hardFailure : undefined
-      const progress = await runImplementationProgressSignals(input.runRecord, {
-        checkout: input.checkout,
-        includeCheckoutEvidence: true,
-      })
-      const canRetry =
-        attempt < maxAttempts &&
-        hardFailure?.category === "opencode-database-locked" &&
-        hardFailure.retryable &&
-        !progress.hasImplementationProgress
-
-      if (!canRetry) throw error
-
-      await skipRunPhase(input.runRecord, "opencode-worker-retry-backoff", {
+  for (let modelIndex = 0; modelIndex < modelAttemptPlan.length && globalAttempt < policy.maxTotalAttempts; modelIndex += 1) {
+    const modelSelection = modelAttemptPlan[modelIndex]
+    for (let sameModelAttempt = 1; sameModelAttempt <= policy.maxSameModelAttempts && globalAttempt < policy.maxTotalAttempts; sameModelAttempt += 1) {
+      globalAttempt += 1
+      const attempt = globalAttempt
+      const attemptLogFile = opencodeAttemptLogFile(input.logFile, attempt)
+      const attempts = Array.from(new Set([...(input.runRecord.logs?.opencodeAttempts ?? []), attemptLogFile]))
+      const attemptRecord = attemptRecordFor({
         attempt,
-        nextAttempt: attempt + 1,
-        failureCategory: hardFailure.category,
-        reason: hardFailure.reason,
-        evidence: hardFailure.evidence,
-        progressReasons: progress.reasons,
+        modelAttempt: modelIndex + 1,
+        sameModelAttempt,
+        logFile: attemptLogFile,
+        modelSelection,
       })
-      await sleep(1500)
+      await updateRunRecord(input.runRecord, {logs: {opencode: attemptLogFile, opencodeAttempts: attempts}})
+      await updateRunRecordModelSelection(input.runRecord, modelSelection)
+      await writeOpenCodeAttemptRecord(input.runRecord, attemptRecord)
+      try {
+        const watchdog = startOpenCodeWorkerWatchdog(input.runRecord, attemptLogFile)
+        try {
+          const session = await runOpencodeSession(
+            input.agent,
+            input.checkout,
+            input.idTask,
+            input.prompt,
+            attemptLogFile,
+            modelSelection,
+            pid => updateRunRecord(input.runRecord, {process: {opencodePid: pid}}),
+            input.env,
+            input.devEnv,
+            undefined,
+            {stateId: input.runRecord.runId, attempt},
+          )
+          attemptRecord.state = "succeeded"
+          attemptRecord.finishedAt = now()
+          attemptRecord.durationMs = Math.max(0, Date.parse(attemptRecord.finishedAt) - Date.parse(attemptRecord.startedAt))
+          attemptRecord.exitCode = session.code
+          await writeOpenCodeAttemptRecord(input.runRecord, attemptRecord)
+          return {...session, modelSelection}
+        } finally {
+          await watchdog.stop()
+        }
+      } catch (error) {
+        lastError = error
+        const hardFailure = error instanceof OpenCodeHardFailureError ? error.hardFailure : undefined
+        const progress = await runImplementationProgressSignals(input.runRecord, {
+          checkout: input.checkout,
+          includeCheckoutEvidence: true,
+        })
+        const canRetrySameModel =
+          sameModelAttempt < policy.maxSameModelAttempts &&
+          globalAttempt < policy.maxTotalAttempts &&
+          Boolean(hardFailure?.retryable) &&
+          !progress.hasImplementationProgress
+        const canFallbackModel =
+          modelIndex + 1 < modelAttemptPlan.length &&
+          globalAttempt < policy.maxTotalAttempts &&
+          Boolean(hardFailure?.fallbackEligible || hardFailure?.retryable) &&
+          !progress.hasImplementationProgress
+        const nextAction = canRetrySameModel
+          ? "retry-same-model"
+          : canFallbackModel
+            ? "fallback-model"
+            : "fail"
+
+        attemptRecord.state = "failed"
+        attemptRecord.finishedAt = now()
+        attemptRecord.durationMs = Math.max(0, Date.parse(attemptRecord.finishedAt) - Date.parse(attemptRecord.startedAt))
+        attemptRecord.failureCategory = hardFailure?.category
+        attemptRecord.failureReason = hardFailure?.reason
+        attemptRecord.failureEvidence = hardFailure?.evidence
+        attemptRecord.retryable = hardFailure?.retryable
+        attemptRecord.fallbackEligible = hardFailure?.fallbackEligible
+        attemptRecord.nextAction = nextAction
+        await writeOpenCodeAttemptRecord(input.runRecord, attemptRecord)
+
+        if (nextAction === "fail") throw error
+
+        const backoffMs = opencodeBackoffMs(attempt, policy)
+        await skipRunPhase(input.runRecord, nextAction === "retry-same-model" ? "opencode-worker-retry-backoff" : "opencode-worker-fallback-backoff", {
+          attempt,
+          nextAttempt: attempt + 1,
+          currentModel: modelSelection.model,
+          currentModelProfile: modelSelection.modelProfile,
+          nextModel: nextAction === "fallback-model" ? modelAttemptPlan[modelIndex + 1]?.model : modelSelection.model,
+          nextModelProfile: nextAction === "fallback-model" ? modelAttemptPlan[modelIndex + 1]?.modelProfile : modelSelection.modelProfile,
+          failureCategory: hardFailure?.category,
+          reason: hardFailure?.reason,
+          evidence: hardFailure?.evidence,
+          progressReasons: progress.reasons,
+          backoffMs,
+        })
+        await sleep(backoffMs)
+        if (nextAction === "fallback-model") break
+      }
     }
   }
 
@@ -1596,11 +1708,17 @@ const updateRunRecord = async (record: TaskRunRecord, patch: Partial<TaskRunReco
   if (patch.subject) record.subject = patch.subject
   if (patch.opencode) record.opencode = patch.opencode
   if (patch.devEnv) record.devEnv = patch.devEnv
+  if (patch.opencodeAttemptRecords) record.opencodeAttemptRecords = patch.opencodeAttemptRecords
   if (patch.projectProfile) record.projectProfile = patch.projectProfile
   if (patch.target !== undefined) record.target = patch.target
   if (patch.mode !== undefined) record.mode = patch.mode
   if (patch.model !== undefined) record.model = patch.model
   if (patch.doneContract !== undefined) record.doneContract = patch.doneContract
+  if (patch.resolvedModel !== undefined) record.resolvedModel = patch.resolvedModel
+  if (patch.modelProfile !== undefined) record.modelProfile = patch.modelProfile
+  if (patch.modelVariant !== undefined) record.modelVariant = patch.modelVariant
+  if (patch.modelSource !== undefined) record.modelSource = patch.modelSource
+  if (patch.workerProfile !== undefined) record.workerProfile = patch.workerProfile
   if (patch.workerState !== undefined) record.workerState = patch.workerState
   if (patch.verificationState !== undefined) record.verificationState = patch.verificationState
   if (patch.failureCategory !== undefined) record.failureCategory = patch.failureCategory
@@ -1989,7 +2107,8 @@ export const runTask = async (
   }
 
   const idTask = item.id
-  const modelSelection = resolveModelSelection(base, item)
+  const modelAttemptPlan = resolveModelAttemptPlan(base, item)
+  const modelSelection = modelAttemptPlan[0]
   const opencodeAgent = selectOpencodePrimaryAgent(base)
   const runRecord = await createRunRecord(base, item, modelSelection, opencodeAgent)
   const ownedRuntime = runtime
@@ -2007,16 +2126,20 @@ export const runTask = async (
 
   try {
     await runPhase(runRecord, "validate-model-config", async () => {
-      assertModelSelectionValid(app, modelSelection, {context: `${base.id} ${base.agent.role} worker`})
+      for (const [index, candidate] of modelAttemptPlan.entries()) {
+        assertModelSelectionValid(app, candidate, {context: `${base.id} ${base.agent.role} worker model attempt ${index + 1}`})
+      }
       return {
         model: modelSelection.model,
         modelProfile: modelSelection.modelProfile,
+        modelAttempts: modelAttemptPlan.length,
         modelVariant: modelSelection.variant,
         modelSource: modelSelection.source,
       }
     }, {
       model: modelSelection.model ?? "",
       modelProfile: modelSelection.modelProfile ?? "",
+      modelAttempts: modelAttemptPlan.length,
       modelVariant: modelSelection.variant ?? "",
       modelSource: modelSelection.source,
     })
@@ -2088,6 +2211,7 @@ export const runTask = async (
       app,
       checkout,
       binary: agent.app.config.opencode.binary,
+      modelAttemptPlan,
       opencodeAgent,
       modelSelection,
     }), {
@@ -2226,11 +2350,11 @@ export const runTask = async (
       baseAgentId: agent.configId,
       runtimeId: agent.id,
       parallel: item.parallel,
-      model: modelSelection.model,
-      modelProfile: modelSelection.modelProfile,
-      modelVariant: modelSelection.variant,
-      workerProfile: modelSelection.workerProfile,
-      modelSource: modelSelection.source,
+      model: runRecord.resolvedModel ?? modelSelection.model,
+      modelProfile: runRecord.modelProfile ?? modelSelection.modelProfile,
+      modelVariant: runRecord.modelVariant ?? modelSelection.variant,
+      workerProfile: runRecord.workerProfile ?? modelSelection.workerProfile,
+      modelSource: runRecord.modelSource ?? modelSelection.source,
       opencodeAgent,
       devEnv: devEnv.kind,
       devEnvSource: devEnv.source,
@@ -2422,7 +2546,7 @@ export const runTask = async (
             idTask,
             prompt,
             logFile,
-            modelSelection,
+            modelAttemptPlan,
             runRecord,
             env: {
               OPENTEAM_RUN_ID: runRecord.runId,
@@ -2541,7 +2665,7 @@ export const runTask = async (
           idTask,
           prompt,
           logFile,
-          modelSelection,
+          modelAttemptPlan,
           runRecord,
           env: {
             OPENTEAM_RUN_ID: runRecord.runId,

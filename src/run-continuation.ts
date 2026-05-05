@@ -109,7 +109,7 @@ export const createContinuationTaskItem = (
     target: record.target,
     mode: record.mode,
     model: options.model || (priorModelFailed ? undefined : record.model),
-    modelProfile: options.modelProfile || record.requestedModelProfile,
+    modelProfile: options.modelProfile || (priorModelFailed ? undefined : record.requestedModelProfile),
     modelVariant: options.modelVariant || record.requestedModelVariant,
     continuation,
     subject: record.subject ? {

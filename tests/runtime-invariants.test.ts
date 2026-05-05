@@ -1034,7 +1034,7 @@ describe("runtime invariants", () => {
     expect(prompt.join(" ")).toContain("repo-native:failed")
   })
 
-  test("continuation drops raw model override after model infrastructure failure", async () => {
+  test("continuation drops raw model/profile overrides after model infrastructure failure", async () => {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
     const app = makeApp(runtimeRoot)
     const record = runRecord(app, {
@@ -1051,7 +1051,7 @@ describe("runtime invariants", () => {
     const item = createContinuationTaskItem(record, {kind: "retry"})
 
     expect(item.model).toBeUndefined()
-    expect(item.modelProfile).toBe("builder-default")
+    expect(item.modelProfile).toBeUndefined()
   })
 
   test("continuation resolution leases the prior idle context without rediscovery", async () => {
@@ -1500,7 +1500,13 @@ describe("runtime invariants", () => {
   })
 
   test("OpenCode logs detect infrastructure hard failures", () => {
-    expect(detectOpenCodeHardFailure('Error: {"type":"server_error","code":"server_error"}')?.reason).toContain("server_error")
+    expect(detectOpenCodeHardFailure('Error: {"type":"server_error","code":"server_error"}')?.category).toBe("model-provider-server-error")
+    expect(detectOpenCodeHardFailure('Error: {"type":"error","sequence_number":2,"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}')?.category).toBe("model-provider-overloaded")
+    expect(detectOpenCodeHardFailure('Error: {"type":"error","error":{"type":"too_many_requests","code":"rate_limit_exceeded"}}')?.category).toBe("model-provider-rate-limited")
+    expect(detectOpenCodeHardFailure("Provider request failed: ECONNRESET")?.category).toBe("model-provider-network-error")
+    expect(detectOpenCodeHardFailure("Provider request timed out after 30 seconds")?.category).toBe("model-provider-timeout")
+    expect(detectOpenCodeHardFailure('Error: {"type":"error","error":{"code":"insufficient_quota"}}')?.category).toBe("model-provider-quota-exceeded")
+    expect(detectOpenCodeHardFailure('Error: {"type":"error","error":{"code":"context_length_exceeded"}}')?.category).toBe("model-context-length-exceeded")
     expect(detectOpenCodeHardFailure("Error: database is locked")?.category).toBe("opencode-database-locked")
     expect(detectOpenCodeHardFailure("Error: database is locked")?.retryable).toBe(true)
     expect(detectOpenCodeHardFailure("ProviderModelNotFoundError")?.category).toBe("model-unavailable")

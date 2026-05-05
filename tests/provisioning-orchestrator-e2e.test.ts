@@ -1052,6 +1052,54 @@ describe("Round 4 - run diagnosis and stale cleanup", () => {
     expect(summary.recommendedAction).toBe("openteam runs retry builder-01-task-a")
   })
 
+  test("diagnose reports structured OpenCode attempt history", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    const app = makeApp(runtimeRoot)
+    const firstLog = path.join(runtimeRoot, "worker.log")
+    const secondLog = path.join(runtimeRoot, "worker-retry-2.log")
+    await writeFile(firstLog, 'Error: {"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded"}}\n')
+    await writeFile(secondLog, "worker recovered\n")
+
+    const diagnosis = await diagnoseRun(app, runRecord(app, {
+      state: "succeeded",
+      process: {},
+      context: {id: "ctx1", checkout, branch: "openteam/test"},
+      logs: {opencode: secondLog, opencodeAttempts: [firstLog, secondLog]},
+      opencodeAttemptRecords: [{
+        attempt: 1,
+        modelAttempt: 1,
+        sameModelAttempt: 1,
+        state: "failed",
+        startedAt: new Date().toISOString(),
+        logFile: firstLog,
+        model: "opencode/gpt-5.5",
+        provider: "opencode",
+        modelId: "gpt-5.5",
+        failureCategory: "model-provider-overloaded",
+        nextAction: "fallback-model",
+      }, {
+        attempt: 2,
+        modelAttempt: 2,
+        sameModelAttempt: 1,
+        state: "succeeded",
+        startedAt: new Date().toISOString(),
+        logFile: secondLog,
+        model: "openrouter/gpt-5.5",
+        provider: "openrouter",
+        modelId: "gpt-5.5",
+        fallbackKind: "same-model-different-provider",
+      }],
+      phases: [{name: "opencode-worker", state: "succeeded"}],
+    }))
+
+    expect(diagnosis.hardFailure).toBeUndefined()
+    expect(diagnosis.opencodeAttempts).toHaveLength(2)
+    expect(diagnosis.opencodeAttempts[0].hardFailure?.category).toBe("model-provider-overloaded")
+    expect(diagnosis.opencodeAttempts[1].fallbackKind).toBe("same-model-different-provider")
+  })
+
   test("diagnose reports stopped dev servers as stopped after healthy run", async () => {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
     const app = makeApp(runtimeRoot)
@@ -1865,6 +1913,22 @@ describe("Round 7 - continuation and repair flows", () => {
 
     expect(gate.allowed).toBe(true)
     expect(gate.blockers).toHaveLength(0)
+  })
+
+  test("retry continuation drops failed requested model profiles by default", async () => {
+    const app = makeApp(await mkdtemp(path.join(tmpdir(), "openteam-runtime-")))
+    const record = runRecord(app, {
+      state: "failed",
+      failureCategory: "model-provider-overloaded",
+      requestedModelProfile: "builder-primary",
+      model: "opencode/gpt-5.5",
+      context: {id: "ctx1", checkout: "/tmp/checkout", branch: "openteam/test"},
+    })
+
+    const item = createContinuationTaskItem(record, {kind: "retry"})
+
+    expect(item.model).toBeUndefined()
+    expect(item.modelProfile).toBeUndefined()
   })
 
   test("run-family gate blocks retry when the prior run has implementation progress", async () => {

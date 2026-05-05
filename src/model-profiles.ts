@@ -2,6 +2,7 @@ import type {
   AppCfg,
   ModelProfileCfg,
   PreparedAgent,
+  ResolvedModelAttempt,
   ResolvedModelSelection,
   ResolvedModelSelectionSource,
   TaskItem,
@@ -37,6 +38,19 @@ type ResolvedWorkerProfile = {
 
 const modelProfiles = (app: AppCfg) => app.config.modelProfiles ?? {}
 const workerProfiles = (app: AppCfg) => app.config.workerProfiles ?? {}
+
+const splitModel = (model?: string) => {
+  const value = clean(model)
+  if (!value) return {}
+  const index = value.indexOf("/")
+  if (index <= 0 || index === value.length - 1) return {modelId: value}
+  return {
+    provider: value.slice(0, index),
+    modelId: value.slice(index + 1),
+  }
+}
+
+const unique = (values: Array<string | undefined>) => Array.from(new Set(values.map(clean).filter(Boolean) as string[]))
 
 const requireModelProfile = (app: AppCfg, id: string, owner: string): ModelProfileCfg => {
   const profile = modelProfiles(app)[id]
@@ -171,6 +185,69 @@ export const resolveModelSelection = (
     workerProfile: worker.id,
     source: "unset",
   }
+}
+
+const fallbackKind = (
+  primary: Pick<ResolvedModelAttempt, "provider" | "modelId">,
+  current: Pick<ResolvedModelAttempt, "provider" | "modelId">,
+): ResolvedModelAttempt["fallbackKind"] => {
+  if (primary.provider === current.provider && primary.modelId === current.modelId) return "primary"
+  if (primary.modelId && primary.modelId === current.modelId && primary.provider !== current.provider) return "same-model-different-provider"
+  if (primary.provider && primary.provider === current.provider && primary.modelId !== current.modelId) return "same-provider-different-model"
+  if (primary.provider || current.provider) return "different-provider-different-model"
+  return "fallback"
+}
+
+const withAttemptMetadata = (
+  selection: ResolvedModelSelection,
+  planIndex: number,
+  primary?: Pick<ResolvedModelAttempt, "provider" | "modelId">,
+): ResolvedModelAttempt => {
+  const split = splitModel(selection.model)
+  const current = {...selection, ...split}
+  const base = primary ?? current
+  return {
+    ...current,
+    planIndex,
+    fallbackKind: planIndex === 0 ? "primary" : fallbackKind(base, current),
+    previousProvider: planIndex === 0 ? undefined : base.provider,
+    previousModelId: planIndex === 0 ? undefined : base.modelId,
+  }
+}
+
+export const resolveModelAttemptPlan = (
+  agent: PreparedAgent,
+  item: Pick<TaskItem, "model" | "modelProfile" | "modelVariant"> = {},
+): ResolvedModelAttempt[] => {
+  const app = agent.app
+  const worker = resolveWorkerProfile(agent)
+  const primarySelection = resolveModelSelection(agent, item)
+  const primary = withAttemptMetadata(primarySelection, 0)
+  const primaryProfileFallbacks = primary.modelProfile
+    ? modelProfiles(app)[primary.modelProfile]?.fallbackModelProfiles
+    : undefined
+  const fallbackIds = unique([
+    ...(primaryProfileFallbacks ?? []),
+    ...(worker.profile?.fallbackModelProfiles ?? []),
+    ...(app.config.opencode.fallbackModelProfiles ?? []),
+  ])
+
+  const seen = new Set<string>()
+  const attempts: ResolvedModelAttempt[] = []
+  const add = (selection: ResolvedModelSelection) => {
+    const candidate = withAttemptMetadata(selection, attempts.length, primary)
+    const key = `${candidate.model ?? ""}:${candidate.variant ?? ""}`
+    if (seen.has(key)) return
+    seen.add(key)
+    attempts.push(candidate)
+  }
+
+  add(primary)
+  for (const id of fallbackIds) {
+    add(fromProfile(app, id, "fallback model profile", "fallback-model-profile", worker.id))
+  }
+
+  return attempts
 }
 
 export const validateModelSelection = (

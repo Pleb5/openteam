@@ -59,7 +59,13 @@
     "builder-default": {
       "model": "opencode/gpt-5.5",
       "variant": "high",
-      "description": "Default model for implementation workers."
+      "description": "Default model for implementation workers.",
+      "fallbackModelProfiles": ["builder-same-model-openrouter", "research-default"]
+    },
+    "builder-same-model-openrouter": {
+      "model": "openrouter/gpt-5.5",
+      "variant": "high",
+      "description": "Provider fallback for the same logical model when the primary provider is overloaded or unavailable."
     },
     "research-default": {
       "model": "opencode/gpt-5.5",

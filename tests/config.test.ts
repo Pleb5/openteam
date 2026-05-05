@@ -140,10 +140,10 @@ describe("config helpers", () => {
     const result = validateAppConfig(app({
       opencode: {binary: "opencode", model: "", agent: "build", modelProfile: "missing-global", roleAgents: "yes" as unknown as boolean},
       modelProfiles: {
-        "builder-strong": {model: "provider/model", variant: "high"},
+        "builder-strong": {model: "provider/model", variant: "high", fallbackModelProfiles: ["missing-fallback"]},
       },
       workerProfiles: {
-        builder: {modelProfile: "missing-worker", opencodeAgent: ""},
+        builder: {modelProfile: "missing-worker", fallbackModelProfiles: ["missing-worker-fallback"], opencodeAgent: ""},
       },
       agents: {
         ...app().config.agents,
@@ -159,6 +159,8 @@ describe("config helpers", () => {
     expect(result.errors.some(item => item.message.includes("opencode.modelProfile"))).toBe(true)
     expect(result.errors.some(item => item.code === "opencode-role-agents-invalid")).toBe(true)
     expect(result.errors.some(item => item.message.includes("worker profile 'builder'"))).toBe(true)
+    expect(result.errors.some(item => item.message.includes("missing-fallback"))).toBe(true)
+    expect(result.errors.some(item => item.message.includes("missing-worker-fallback"))).toBe(true)
     expect(result.errors.some(item => item.code === "worker-profile-opencode-agent-empty")).toBe(true)
     expect(result.errors.some(item => item.message.includes("unknown worker profile 'missing-worker-profile'"))).toBe(true)
     expect(result.errors.some(item => item.message.includes("unknown model profile 'missing-agent-profile'"))).toBe(true)

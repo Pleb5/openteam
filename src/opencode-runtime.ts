@@ -1,7 +1,7 @@
 import {existsSync} from "node:fs"
 import {mkdir, writeFile} from "node:fs/promises"
 import path from "node:path"
-import type {AppCfg, OpenCodeRuntimeHandoff, ResolvedModelSelection} from "./types.js"
+import type {AppCfg, OpenCodeRuntimeHandoff, ResolvedModelAttempt, ResolvedModelSelection} from "./types.js"
 
 const clean = (value?: string) => value?.trim() || undefined
 
@@ -51,6 +51,7 @@ export const buildOpenCodeRuntimeHandoff = (input: {
   binary: string
   opencodeAgent: string
   modelSelection: ResolvedModelSelection
+  modelAttemptPlan?: ResolvedModelAttempt[]
 }): OpenCodeRuntimeHandoff => {
   const dataDir = sourceDataDir()
   const stateDir = sourceStateDir()
@@ -82,6 +83,16 @@ export const buildOpenCodeRuntimeHandoff = (input: {
     modelId,
     selectedModelAvailable,
     availableModels,
+    attemptPlan: input.modelAttemptPlan?.map(item => ({
+      planIndex: item.planIndex,
+      model: item.model,
+      variant: item.variant,
+      modelProfile: item.modelProfile,
+      source: item.source,
+      provider: item.provider,
+      modelId: item.modelId,
+      fallbackKind: item.fallbackKind,
+    })),
     auth: {
       sourceDataDir: dataDir ? "(host OpenCode data dir; path withheld)" : "(unset)",
       sourceStateDir: stateDir ? "(host OpenCode state dir; path withheld)" : "(unset)",
@@ -112,11 +123,15 @@ const summaryMarkdown = (handoff: OpenCodeRuntimeHandoff) => [
   `- provider: ${handoff.provider ?? "(unknown)"}`,
   `- provider model id: ${handoff.modelId ?? "(unknown)"}`,
   `- selected model configured in openteam: ${yesNo(handoff.selectedModelAvailable)}`,
+  `- model fallback attempts configured: ${handoff.attemptPlan?.length ?? 1}`,
   `- auth status: ${handoff.auth.status}`,
   `- auth.json source present: ${yesNo(handoff.auth.authJsonPresent)}`,
   `- model.json source present: ${yesNo(handoff.auth.modelJsonPresent)}`,
   `- kv.json source present: ${yesNo(handoff.auth.kvJsonPresent)}`,
   `- available configured models: ${handoff.availableModels.map(item => `${item.model}${item.variant ? `:${item.variant}` : ""}`).join(", ") || "none"}`,
+  ...(handoff.attemptPlan && handoff.attemptPlan.length > 1
+    ? handoff.attemptPlan.map(item => `- attempt ${item.planIndex + 1}: ${item.model ?? "(unset)"}${item.variant ? `:${item.variant}` : ""} (${item.fallbackKind})`)
+    : []),
   "",
   "This file is sanitized. Do not inspect raw host OpenCode auth files or runtime auth state from worker tasks.",
   "",
@@ -128,6 +143,7 @@ export const writeOpenCodeRuntimeHandoff = async (input: {
   binary: string
   opencodeAgent: string
   modelSelection: ResolvedModelSelection
+  modelAttemptPlan?: ResolvedModelAttempt[]
 }) => {
   const handoff = buildOpenCodeRuntimeHandoff(input)
   await mkdir(path.dirname(handoff.files.json), {recursive: true})

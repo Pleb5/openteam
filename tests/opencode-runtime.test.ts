@@ -68,11 +68,22 @@ describe("opencode runtime handoff", () => {
           modelProfile: "builder",
           source: "worker-profile",
         },
+        modelAttemptPlan: [{
+          model: "openai/gpt-5.5",
+          variant: "xhigh",
+          modelProfile: "builder",
+          source: "worker-profile",
+          planIndex: 0,
+          fallbackKind: "primary",
+          provider: "openai",
+          modelId: "gpt-5.5",
+        }],
       })
 
       expect(handoff.provider).toBe("openai")
       expect(handoff.modelId).toBe("gpt-5.5")
       expect(handoff.selectedModelAvailable).toBe(true)
+      expect(handoff.attemptPlan?.at(0)?.model).toBe("openai/gpt-5.5")
       expect(handoff.auth.status).toBe("ready")
       expect(JSON.stringify(handoff)).not.toContain(data)
       expect(JSON.stringify(handoff)).not.toContain(state)
