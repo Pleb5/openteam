@@ -377,7 +377,7 @@ const tailLines = (text: string, count: number) =>
   text.split(/\r?\n/).slice(-count).join("\n").trim()
 
 export const continuationHandoffPath = (checkout: string) =>
-  path.join(checkout, ".openteam", "continuation-summary.md")
+  path.join(checkout, ".openteam", "context", "continuation-summary.md")
 
 export const writeContinuationHandoff = async (
   app: AppCfg,

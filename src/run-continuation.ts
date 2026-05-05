@@ -137,8 +137,9 @@ export const continuationPromptLines = (continuation?: TaskContinuation) => {
   return [
     `Continuation mode: ${continuation.kind}`,
     `Prior run: ${continuation.fromRunId}`,
-    `Prior checkout/context: ${continuation.checkout ?? "(unknown)"} / ${continuation.contextId}`,
-    continuation.checkout ? `Sanitized continuation handoff: ${continuation.checkout}/.openteam/continuation-summary.md` : "",
+    `Prior context: ${continuation.contextId}`,
+    `Prior checkout: withheld; sanitized context has been copied into the current checkout when available.`,
+    `Sanitized continuation handoff: .openteam/context/continuation-summary.md`,
     `Prior branch: ${continuation.branch ?? "(unknown)"}`,
     `Prior state: ${continuation.priorState}`,
     continuation.workerState ? `Prior worker state: ${continuation.workerState}` : "",

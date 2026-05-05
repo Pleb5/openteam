@@ -1032,6 +1032,8 @@ describe("runtime invariants", () => {
     expect(continuationEvidenceForCarry(noCarry.continuation)).toHaveLength(0)
     expect(item.task).toContain("repair the missing or weak verification evidence")
     expect(prompt.join(" ")).toContain("Prior missing evidence")
+    expect(prompt.join("\n")).toContain("Sanitized continuation handoff: .openteam/context/continuation-summary.md")
+    expect(prompt.join("\n")).not.toContain("/tmp/checkout")
     expect(prompt.join(" ")).toContain("Prior review subject")
     expect(prompt.join(" ")).toContain("browser:succeeded")
     expect(prompt.join(" ")).toContain("repo-native:failed")

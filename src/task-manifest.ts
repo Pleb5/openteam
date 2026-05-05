@@ -85,9 +85,9 @@ type ManifestContinuation = {
       : never
     : never
   fromRunId: string
-  fromRunFile?: string
   contextId: string
   checkout?: string
+  sanitizedHandoff: string
   branch?: string
   priorState: string
   workerState?: string
@@ -168,6 +168,13 @@ export type TaskManifest = {
     scratchPath: string
     cachePath: string
     artifactsPath: string
+    workspace: {
+      checkout: string
+      scratch: {env: "OPENTEAM_TMP_DIR"; access: "read-write"}
+      cache: {env: "OPENTEAM_CACHE_DIR"; access: "read-write"}
+      artifacts: {env: "OPENTEAM_ARTIFACTS_DIR"; access: "read-write"}
+      orchestratorRuntime: {access: "forbidden"}
+    }
   }
   files: {
     taskManifest: string
@@ -221,16 +228,6 @@ export type BuildTaskManifestInput = {
   }
 }
 
-const defaultEnvironmentPaths = (checkout: string) => {
-  const runtime = path.join(path.dirname(checkout), ".openteam-runtime")
-  return {
-    runtime,
-    scratch: path.join(runtime, "tmp"),
-    cache: path.join(runtime, "cache"),
-    artifacts: path.join(runtime, "artifacts"),
-  }
-}
-
 const repoIdentitySummary = (identity: RepoIdentity): ManifestRepoIdentity => ({
   key: identity.key,
   ownerNpub: identity.ownerNpub,
@@ -262,15 +259,29 @@ const subjectSummary = (subject?: ResolvedTaskSubject): ManifestSubject | undefi
   }
 }
 
+const runtimeSummary = (runtime?: TaskManifestRuntime): TaskManifestRuntime | undefined => {
+  if (!runtime) return undefined
+  return {
+    opencodeLogFile: runtime.opencodeLogFile ? "orchestrator-only; use openteam runs diagnose/show from the operator session" : undefined,
+    web: runtime.web
+      ? {
+        ...runtime.web,
+        browserProfile: "orchestrator-only browser profile",
+        browserArtifacts: "OPENTEAM_ARTIFACTS_DIR",
+      }
+      : undefined,
+  }
+}
+
 const continuationSummary = (continuation?: TaskItem["continuation"]): ManifestContinuation | undefined => {
   if (!continuation) return undefined
   return {
     version: continuation.version,
     kind: continuation.kind,
     fromRunId: continuation.fromRunId,
-    fromRunFile: continuation.fromRunFile,
     contextId: continuation.contextId,
-    checkout: continuation.checkout,
+    checkout: "withheld; use sanitizedHandoff in the current checkout",
+    sanitizedHandoff: ".openteam/context/continuation-summary.md",
     branch: continuation.branch,
     priorState: continuation.priorState,
     workerState: continuation.workerState,
@@ -290,13 +301,12 @@ const continuationSummary = (continuation?: TaskItem["continuation"]): ManifestC
 export const buildTaskManifest = (input: BuildTaskManifestInput): TaskManifest => {
   const checkout = input.resolved.context.checkout
   const manifestFile = taskManifestPath(checkout)
-  const environmentPaths = input.environmentPaths ?? defaultEnvironmentPaths(checkout)
   return {
     version: 1,
     generatedAt: new Date().toISOString(),
     run: {
       runId: input.runRecord.runId,
-      runFile: input.runRecord.runFile,
+      runFile: "orchestrator-only; use openteam helpers for run state",
       taskId: input.runRecord.taskId,
       agentId: input.agent.id,
       baseAgentId: input.agent.configId,
@@ -356,14 +366,21 @@ export const buildTaskManifest = (input: BuildTaskManifestInput): TaskManifest =
       projectStacks: input.projectProfile.stacks,
       projectDocs: input.projectProfile.docs,
       projectBlockers: input.projectProfile.blockers,
-      runtimePath: environmentPaths.runtime,
-      scratchPath: environmentPaths.scratch,
-      cachePath: environmentPaths.cache,
-      artifactsPath: environmentPaths.artifacts,
+      runtimePath: "orchestrator-only; use OPENTEAM_TMP_DIR, OPENTEAM_CACHE_DIR, and OPENTEAM_ARTIFACTS_DIR",
+      scratchPath: "OPENTEAM_TMP_DIR",
+      cachePath: "OPENTEAM_CACHE_DIR",
+      artifactsPath: "OPENTEAM_ARTIFACTS_DIR",
+      workspace: {
+        checkout,
+        scratch: {env: "OPENTEAM_TMP_DIR", access: "read-write"},
+        cache: {env: "OPENTEAM_CACHE_DIR", access: "read-write"},
+        artifacts: {env: "OPENTEAM_ARTIFACTS_DIR", access: "read-write"},
+        orchestratorRuntime: {access: "forbidden"},
+      },
     },
     files: {
       taskManifest: manifestFile,
-      runRecord: input.runRecord.runFile,
+      runRecord: "orchestrator-only; use openteam helpers for run state",
       repoPublishContext: repoPublishContextPath(checkout),
       projectProfile: input.projectProfileFile,
       verificationPlan: input.verificationPlanFile,
@@ -384,7 +401,7 @@ export const buildTaskManifest = (input: BuildTaskManifestInput): TaskManifest =
         publish: "openteam repo publish <issue|comment|label|role-label|status|pr|pr-update|raw>",
       },
     },
-    runtime: input.runtime,
+    runtime: runtimeSummary(input.runtime),
   }
 }
 

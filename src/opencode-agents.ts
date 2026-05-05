@@ -133,7 +133,19 @@ const renderPermission = (rules: Record<string, string | Record<string, string>>
   return lines.join("\n")
 }
 
-const primaryPermission = (role: OpencodePrimaryRole, capabilities: WorkerCapabilities) => {
+const runtimeExternalDirectoryRules = (checkout: string) => {
+  const runtimeRoot = process.env.OPENTEAM_CHECKOUT_RUNTIME_ROOT?.trim()
+    || path.join(path.dirname(checkout), ".openteam-runtime")
+  return {
+    [path.join(runtimeRoot, "opencode", "**")]: "deny",
+    [path.join(runtimeRoot, "tmp", "**")]: "allow",
+    [path.join(runtimeRoot, "cache", "**")]: "allow",
+    [path.join(runtimeRoot, "artifacts", "**")]: "allow",
+    "*": "deny",
+  }
+}
+
+const primaryPermission = (role: OpencodePrimaryRole, capabilities: WorkerCapabilities, checkout: string) => {
   const rules: Record<string, string | Record<string, string>> = {
     read: "allow",
     glob: "allow",
@@ -143,7 +155,7 @@ const primaryPermission = (role: OpencodePrimaryRole, capabilities: WorkerCapabi
     websearch: "allow",
     question: role === "orchestrator" ? "allow" : "deny",
     plan_enter: "allow",
-    external_directory: {"*": "deny"},
+    external_directory: runtimeExternalDirectoryRules(checkout),
   }
 
   rules.edit = capabilities.canEdit ? "allow" : "deny"
@@ -212,7 +224,7 @@ const primaryBody = (role: OpencodePrimaryRole, capabilities: WorkerCapabilities
   `This is durable system policy. The runtime prompt and .openteam/task.json provide task-specific facts and must stay within this policy.`,
   `Act as a pragmatic coding agent inside the managed checkout: inspect before acting, prefer repo-local conventions, keep scope tight, run or record appropriate verification, and surface concrete blockers.`,
   `Read attached bootstrap files and .openteam/task.json before starting product work.`,
-  `Use OPENTEAM_RUN_ID, OPENTEAM_RUN_FILE, OPENTEAM_TASK_MANIFEST, OPENTEAM_TMP_DIR, OPENTEAM_CACHE_DIR, and OPENTEAM_ARTIFACTS_DIR when relevant.`,
+  `Use OPENTEAM_RUN_ID, OPENTEAM_TASK_MANIFEST, OPENTEAM_TMP_DIR, OPENTEAM_CACHE_DIR, and OPENTEAM_ARTIFACTS_DIR when relevant. Do not inspect OPENTEAM_RUN_FILE directly; openteam helper commands use it internally.`,
   `Do not launch, enqueue, start, stop, or watch other openteam workers unless this is an orchestrator worker explicitly handling lifecycle control.`,
   role === "orchestrator"
     ? `You may ask concise operator questions when lifecycle policy or operator intent is ambiguous.`
@@ -350,13 +362,14 @@ const renderHelperAgent = (agent: OpencodeHelperAgent) => [
 const renderPrimaryAgent = (
   agent: PreparedAgent,
   role: OpencodePrimaryRole,
+  checkout: string,
 ) => {
   const capabilities = capabilitiesForRole(agent, role)
   return [
     `---`,
     `description: ${JSON.stringify(`Primary openteam ${role} worker agent with role policy and permissions.`)}`,
     `mode: primary`,
-    primaryPermission(role, capabilities),
+    primaryPermission(role, capabilities, checkout),
     `---`,
     ``,
     primaryBody(role, capabilities),
@@ -379,7 +392,7 @@ export const writeOpenteamPrimaryAgents = async (agent: PreparedAgent, checkout:
   await mkdir(dir, {recursive: true})
   const files = await Promise.all(openteamPrimaryRoles.map(async role => {
     const file = opencodePrimaryAgentPath(checkout, role)
-    await writeFile(file, renderPrimaryAgent(agent, role))
+    await writeFile(file, renderPrimaryAgent(agent, role, checkout))
     return file
   }))
   return files

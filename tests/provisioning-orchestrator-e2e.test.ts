@@ -1599,6 +1599,8 @@ describe("Round 7 - continuation and repair flows", () => {
     expect(prompt).toContain("Prior failure category: verification-evidence-weak")
     expect(prompt).toContain("Prior PR blockers")
     expect(prompt).toContain("Prior evidence: browser:failed")
+    expect(prompt).toContain("Sanitized continuation handoff: .openteam/context/continuation-summary.md")
+    expect(prompt).not.toContain("/tmp/checkout")
   })
 
   test("family resolution traces continuation ancestry to the root run", async () => {
@@ -2025,6 +2027,7 @@ describe("Round 7 - continuation and repair flows", () => {
     const file = await writeContinuationHandoff(app, record, item)
     const text = await readFile(file!, "utf8")
 
+    expect(file).toBe(path.join(checkout, ".openteam", "context", "continuation-summary.md"))
     expect(text).toContain("[REDACTED]")
     expect(text).toContain("normal finding")
     expect(text).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz123456")

@@ -1140,6 +1140,28 @@ const opencodeAttemptLogFile = (logFile: string, attempt: number) => {
   return `${base}-retry-${attempt}${ext || ".log"}`
 }
 
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+
+const validateWorkerHandoffScope = async (input: {
+  checkout: string
+  prompt: string
+  taskManifestFile?: string
+}) => {
+  const manifestText = input.taskManifestFile && existsSync(input.taskManifestFile)
+    ? await readFile(input.taskManifestFile, "utf8").catch(() => "")
+    : ""
+  const text = [input.prompt, manifestText].join("\n")
+  const runtimeRoot = checkoutRuntimeDirs(input.checkout).bulkRoot
+  const checks = [
+    {pattern: new RegExp(`${escapeRegExp(runtimeRoot)}[/\\\\]opencode(?:[/\\\\]|$)`), reason: "raw OpenCode runtime state leaked into worker handoff"},
+    {pattern: /(?:^|\s)\/[^\s"']*\/runtime\/(?:agents|runs)(?:\/|\s|$)/, reason: "orchestrator runtime path leaked into worker handoff"},
+  ]
+  for (const check of checks) {
+    const match = text.match(check.pattern)
+    if (match) throw new Error(`worker handoff scope violation: ${check.reason}: ${match[0].trim()}`)
+  }
+}
+
 const opencodeRetryPolicy = (app: AppCfg, modelAttemptCount: number) => {
   const cfg = app.config.opencode.retry ?? {}
   const maxSameModelAttempts = Math.max(1, cfg.maxSameModelAttempts ?? 2)
@@ -1264,6 +1286,11 @@ const runWorkerOpencodeSessionWithRetry = async (input: {
   env: Record<string, string>
   devEnv?: DevEnv
 }) => {
+  await validateWorkerHandoffScope({
+    checkout: input.checkout,
+    prompt: input.prompt,
+    taskManifestFile: input.env.OPENTEAM_TASK_MANIFEST,
+  })
   const modelAttemptPlan = input.modelAttemptPlan.length > 0 ? input.modelAttemptPlan : resolveModelAttemptPlan(input.agent)
   if (modelAttemptPlan.length === 0) throw new Error("OpenCode worker retry plan did not include any model attempts")
   const policy = opencodeRetryPolicy(input.agent.app, modelAttemptPlan.length)
