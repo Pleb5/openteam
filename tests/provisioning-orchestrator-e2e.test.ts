@@ -23,6 +23,8 @@ import {
   assertVerificationToolingReady,
   categorizeProvisioningFailure,
   checkoutRuntimeEnv,
+  buildModelFallbackHandoffPrompt,
+  canHandoffAfterProgress,
   provisionCheckoutLocalRuntimeCommand,
   defaultRepoPublishScope,
   provisionWorkerControlCommand,
@@ -1107,6 +1109,58 @@ describe("Round 4 - run diagnosis and stale cleanup", () => {
     expect(diagnosis.opencodeAttempts).toHaveLength(2)
     expect(diagnosis.opencodeAttempts[0].hardFailure?.category).toBe("model-provider-overloaded")
     expect(diagnosis.opencodeAttempts[1].fallbackKind).toBe("same-model-different-provider")
+  })
+
+  test("model provider failures can hand off after implementation progress", () => {
+    expect(canHandoffAfterProgress({
+      category: "model-provider-rate-limited",
+      reason: "model provider rate limit was reached",
+      evidence: "429",
+      retryable: true,
+      fallbackEligible: true,
+    })).toBe(true)
+
+    expect(canHandoffAfterProgress({
+      category: "tool-permission-rejected",
+      reason: "tool permission request was rejected",
+      evidence: "permission rejected",
+      retryable: false,
+      fallbackEligible: false,
+    })).toBe(false)
+
+    const prompt = buildModelFallbackHandoffPrompt({
+      originalPrompt: "Original task prompt.",
+      failure: {
+        category: "model-provider-rate-limited",
+        reason: "model provider rate limit was reached",
+        evidence: "429",
+        retryable: true,
+        fallbackEligible: true,
+      },
+      failedAttempt: {
+        attempt: 1,
+        modelAttempt: 1,
+        sameModelAttempt: 1,
+        state: "failed",
+        startedAt: new Date().toISOString(),
+        logFile: "/tmp/opencode.log",
+        model: "openai/gpt-5.5",
+        modelVariant: "xhigh",
+      },
+      nextModel: {
+        planIndex: 1,
+        model: "opencode/claude-sonnet-4-6",
+        variant: "max",
+        source: "fallback-model-profile",
+        fallbackKind: "different-provider-different-model",
+      },
+      progressReasons: ["checkout has 1 commit(s) after base"],
+    })
+
+    expect(prompt).toContain("Model fallback handoff")
+    expect(prompt).toContain("Do not restart the task from scratch")
+    expect(prompt).toContain("checkout has 1 commit(s) after base")
+    expect(prompt).toContain("opencode/claude-sonnet-4-6")
   })
 
   test("diagnose reports stopped dev servers as stopped after healthy run", async () => {
