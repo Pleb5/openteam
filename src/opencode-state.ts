@@ -175,6 +175,22 @@ const finishReason = (row: DbRow, data?: Record<string, unknown>) =>
 
 const messageId = (row: DbRow) => stringValue(rowValue(row, ["id", "message_id", "messageID"]))
 
+const messageData = (row: DbRow) => parseJson(rowValue(row, ["data", "json", "payload"]))
+
+const messageRole = (row: DbRow, data?: Record<string, unknown>) =>
+  stringValue(rowValue(row, ["role"]))
+  ?? stringValue(data?.role)
+
+const messageProvider = (row: DbRow, data?: Record<string, unknown>) =>
+  stringValue(rowValue(row, ["provider", "provider_id", "providerID"]))
+  ?? stringValue(data?.providerID)
+  ?? stringValue(data?.provider)
+
+const messageModel = (row: DbRow, data?: Record<string, unknown>) =>
+  stringValue(rowValue(row, ["model", "model_id", "modelID"]))
+  ?? stringValue(data?.modelID)
+  ?? stringValue(data?.model)
+
 const rowTime = (row: DbRow) => timeMs(rowValue(row, ["time_updated", "timeUpdated", "updated_at", "updatedAt", "time_created", "timeCreated", "created_at", "createdAt"]))
 
 const rowCreatedTime = (row: DbRow) => timeMs(rowValue(row, ["time_created", "timeCreated", "created_at", "createdAt", "time_updated", "timeUpdated", "updated_at", "updatedAt"]))
@@ -194,11 +210,12 @@ export const inspectOpenCodeDbState = async (
     const messages = db.query<DbRow>("select * from message").all()
       .sort((a, b) => (rowTime(b) ?? 0) - (rowTime(a) ?? 0))
       .slice(0, 20)
-    const assistantMessages = messages.filter(row => stringValue(rowValue(row, ["role"])) === "assistant")
+    const parsedMessages = messages.map(row => ({row, data: messageData(row)}))
+    const assistantMessages = parsedMessages.filter(item => messageRole(item.row, item.data) === "assistant")
     const latest = assistantMessages[0]
     if (!latest) return {kind: "unknown-idle", dbPath, evidence: "OpenCode database has no assistant message"}
 
-    const latestId = messageId(latest)
+    const latestId = messageId(latest.row)
     const allParts = db.query<DbRow>("select * from part").all()
       .sort((a, b) => (rowTime(a) ?? 0) - (rowTime(b) ?? 0))
       .slice(-500)
@@ -211,10 +228,10 @@ export const inspectOpenCodeDbState = async (
       const data = parseJson(rowValue(row, ["data", "json", "payload"]))
       return {row, data, type: payloadType(row, data)}
     })
-    const provider = stringValue(rowValue(latest, ["provider", "provider_id", "providerID"])) ?? stringValue(latestParsed.map(part => part.data?.provider).find(Boolean))
-    const model = stringValue(rowValue(latest, ["model", "model_id", "modelID"])) ?? stringValue(latestParsed.map(part => part.data?.model).find(Boolean))
+    const provider = messageProvider(latest.row, latest.data) ?? stringValue(latestParsed.map(part => part.data?.provider).find(Boolean))
+    const model = messageModel(latest.row, latest.data) ?? stringValue(latestParsed.map(part => part.data?.model).find(Boolean))
     const nowMs = options.nowMs ?? Date.now()
-    const created = rowCreatedTime(latest)
+    const created = rowCreatedTime(latest.row) ?? timeMs(getNested(latest.data, ["time", "created"]))
     const messageAgeMs = created !== undefined ? Math.max(0, nowMs - created) : undefined
     const base = {dbPath, messageId: latestId, messageAgeMs, provider, model}
 
@@ -232,13 +249,13 @@ export const inspectOpenCodeDbState = async (
       .sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
     const lastCompletedToolPart = completedToolParts.at(-1)
     const lastCompletedTool = lastCompletedToolPart ? toolFromPart(lastCompletedToolPart.row, lastCompletedToolPart.data) : undefined
-    const previous = assistantMessages.find(row => messageId(row) !== latestId)
-    const previousParts = partsFor(previous ? messageId(previous) : undefined)
+    const previous = assistantMessages.find(item => messageId(item.row) !== latestId)
+    const previousParts = partsFor(previous ? messageId(previous.row) : undefined)
     const previousFinish = previousParts
       .map(row => ({row, data: parseJson(rowValue(row, ["data", "json", "payload"]))}))
       .map(part => finishReason(part.row, part.data))
       .find(Boolean)
-      ?? stringValue(previous ? rowValue(previous, ["finish", "finish_reason", "finishReason"]) : undefined)
+      ?? (previous ? finishReason(previous.row, previous.data) : undefined)
 
     if (hasStepStart && !hasStepFinish && messageAgeMs !== undefined && messageAgeMs >= (options.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS)) {
       const kind = previousFinish === "tool-calls" && lastCompletedTool ? "model-stream-stalled-after-tool" as const : "model-stream-stalled" as const

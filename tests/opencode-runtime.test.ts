@@ -119,17 +119,23 @@ const createStateDb = async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "openteam-opencode-state-db-"))
   const file = path.join(dir, "opencode.db")
   const db = new Database(file)
-  db.query("create table message (id text primary key, role text, time_created integer, provider text, model text, finish text)").all()
-  db.query("create table part (id text primary key, message_id text, type text, data text, time_created integer)").all()
+  db.query("create table message (id text primary key, session_id text not null, time_created integer not null, time_updated integer not null, data text not null)").all()
+  db.query("create table part (id text primary key, message_id text not null, session_id text not null, time_created integer not null, time_updated integer not null, data text not null)").all()
   return {file, db}
 }
 
 const insertMessage = (db: Database, row: {id: string; role: string; time: number; provider?: string; model?: string; finish?: string}) => {
-  db.query("insert into message (id, role, time_created, provider, model, finish) values (?, ?, ?, ?, ?, ?)").all(row.id, row.role, row.time, row.provider, row.model, row.finish)
+  db.query("insert into message (id, session_id, time_created, time_updated, data) values (?, ?, ?, ?, ?)").all(row.id, "ses_1", row.time, row.time, JSON.stringify({
+    role: row.role,
+    providerID: row.provider,
+    modelID: row.model,
+    finish: row.finish,
+    time: {created: row.time},
+  }))
 }
 
 const insertPart = (db: Database, row: {id: string; messageId: string; type: string; data?: Record<string, unknown>; time: number}) => {
-  db.query("insert into part (id, message_id, type, data, time_created) values (?, ?, ?, ?, ?)").all(row.id, row.messageId, row.type, JSON.stringify(row.data ?? {type: row.type}), row.time)
+  db.query("insert into part (id, message_id, session_id, time_created, time_updated, data) values (?, ?, ?, ?, ?, ?)").all(row.id, row.messageId, "ses_1", row.time, row.time, JSON.stringify(row.data ?? {type: row.type}))
 }
 
 describe("opencode runtime state inspection", () => {
@@ -138,9 +144,10 @@ describe("opencode runtime state inspection", () => {
     const {file, db} = await createStateDb()
     try {
       insertMessage(db, {id: "m1", role: "assistant", time: nowMs - 87 * 60_000, finish: "tool-calls"})
-      insertPart(db, {id: "p1", messageId: "m1", type: "tool", time: nowMs - 86 * 60_000 - 30_000, data: {type: "tool", tool: "read", input: {path: ".openteam/task.json"}, state: {status: "completed"}}})
+      insertPart(db, {id: "p1", messageId: "m1", type: "tool", time: nowMs - 86 * 60_000 - 30_000, data: {type: "tool", tool: "read", state: {status: "completed", input: {path: ".openteam/task.json"}, title: "Read .openteam/task.json"}}})
       insertMessage(db, {id: "m2", role: "assistant", time: nowMs - 86 * 60_000, provider: "openai", model: "gpt-5.5"})
       insertPart(db, {id: "p2", messageId: "m2", type: "step-start", time: nowMs - 86 * 60_000, data: {type: "step-start"}})
+      insertPart(db, {id: "p3", messageId: "m2", type: "reasoning", time: nowMs - 86 * 60_000 + 100, data: {type: "reasoning", text: "thinking", time: {start: nowMs - 86 * 60_000 + 100}}})
 
       const state = await inspectOpenCodeDbState(file, {nowMs, stallThresholdMs: 10_000})
       expect(state.kind).toBe("model-stream-stalled-after-tool")
@@ -157,7 +164,7 @@ describe("opencode runtime state inspection", () => {
     const {file, db} = await createStateDb()
     try {
       insertMessage(db, {id: "m1", role: "assistant", time: nowMs - 60_000})
-      insertPart(db, {id: "p1", messageId: "m1", type: "tool", time: nowMs - 50_000, data: {type: "tool", tool: "bash", input: {path: "tests"}, state: {status: "running"}}})
+      insertPart(db, {id: "p1", messageId: "m1", type: "tool", time: nowMs - 50_000, data: {type: "tool", tool: "bash", state: {status: "running", input: {path: "tests"}}}})
 
       const state = await inspectOpenCodeDbState(file, {nowMs, stallThresholdMs: 10_000})
       expect(state.kind).toBe("tool-in-flight")
