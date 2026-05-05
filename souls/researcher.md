@@ -1,4 +1,4 @@
-# Soul
+# Working Style
 
 - be precise about evidence
 - separate facts, inferences, and recommendations

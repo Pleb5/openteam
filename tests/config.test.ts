@@ -165,7 +165,7 @@ describe("config helpers", () => {
     expect(result.errors.some(item => item.code === "agent-opencode-agent-empty")).toBe(true)
   })
 
-  test("materializes NIP-34/Nostr-git collaboration vocabulary for agents", async () => {
+  test("materializes shared agent policy and role contract for agents", async () => {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
     const testApp = app({runtimeRoot})
     testApp.root = process.cwd()
@@ -175,24 +175,25 @@ describe("config helpers", () => {
     const roleMd = await readFile(path.join(agent.paths.workspace, "ROLE.md"), "utf8")
 
     expect(agentsMd).toContain("NIP-34/Nostr-git")
-    expect(agentsMd).toContain("GitHub/GitLab issues, PRs, or comments")
-    expect(roleMd).toContain("NIP-34/Nostr-git")
-    expect(roleMd).toContain("openteam repo publish")
-    expect(roleMd).toContain("Final response contract")
+    expect(agentsMd).toContain("unless the task explicitly names another forge")
+    expect(agentsMd).toContain("The orchestrator is the only operator-control DM agent")
+    expect(roleMd).toContain("Mission:")
+    expect(roleMd).toContain("agent-browser as the default browser interaction")
+    expect(roleMd).toContain("Final Response Contract")
     expect(roleMd).toContain("`Changed Files`")
   })
 
-  test("console prompt keeps git collaboration vocabulary Nostr-git-first", async () => {
+  test("console prompt keeps Nostr-git event map and publish helper", async () => {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
     const testApp = app({runtimeRoot})
     testApp.root = process.cwd()
 
     const prompt = await consolePrompt(testApp)
 
-    expect(prompt).toContain("Git collaboration vocabulary")
-    expect(prompt).toContain("NIP-34/Nostr-git")
-    expect(prompt).toContain("Issues are kind 1621")
-    expect(prompt).toContain("Use GitHub/GitLab issue, PR, or comment systems only when the task explicitly names that forge")
+    expect(prompt).toContain("Nostr-git event map for this run")
+    expect(prompt).toContain("issues are kind 1621")
+    expect(prompt).toContain("openteam repo policy")
+    expect(prompt).toContain("openteam repo publish ...")
   })
 
   test("validates required agent secret for launch", () => {
@@ -258,7 +259,7 @@ describe("config helpers", () => {
   test("accepts configured browser-cli verification runners", () => {
     const result = validateAppConfig(app({
       verification: {
-        defaultRunners: {web: ["repo-native", "browser"]},
+        defaultRunners: {web: ["repo-native", "agent-browser", "browser"]},
         runners: {
           "agent-browser": {
             kind: "browser-cli",
@@ -280,7 +281,7 @@ describe("config helpers", () => {
   test("warns when enabled browser-cli verification has no command", () => {
     const result = validateAppConfig(app({
       verification: {
-        defaultRunners: {web: ["repo-native", "browser"]},
+        defaultRunners: {web: ["repo-native", "agent-browser", "browser"]},
         runners: {
           "agent-browser": {
             kind: "browser-cli",

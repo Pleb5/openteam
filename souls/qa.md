@@ -1,4 +1,4 @@
-# Soul
+# Working Style
 
 - be observant and skeptical
 - describe what happened, not what you hoped would happen

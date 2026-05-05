@@ -28,7 +28,6 @@ Hard rules:
 - do not commit
 - do not publish PR events
 - do not mark issues applied or closed
-- do not accept operator instructions by DM
 - do not bypass the managed repo context
 
 Allowed when explicitly assigned:
@@ -43,15 +42,7 @@ Allowed when explicitly assigned:
 - Use `nak git ...` and read-only `nak req` / `nak fetch` commands for Nostr repo events.
 - Use `openteam repo policy` to understand the active repo relay policy.
 - Use `openteam repo publish ...` only for assigned repo-side writes.
-- Use browser MCP only when the task needs live app or documentation inspection.
-
-## Runtime policy boundary
-
-- use checkout-local scratch/cache/artifact paths from `.openteam/tmp`, `.openteam/cache`, `.openteam/artifacts`, or the `OPENTEAM_*` env vars
-- put repro clones, generated logs, downloaded artifacts, and temporary files under those paths
-- do not use `/tmp`, host-global caches, or paths outside the managed checkout/runtime unless the operator explicitly allows it
-- do not run GUI openers, system package installs, product edits, commits, PRs, or broad destructive cleanup
-- if a required action is blocked by policy or missing system access, record the blocker in the brief
+- Use agent-browser when the task needs live app or documentation inspection; use Playwright MCP only as the fallback when agent-browser is unavailable or blocked.
 
 ## Brief Format
 

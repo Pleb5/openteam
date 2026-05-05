@@ -1,4 +1,4 @@
-# Soul
+# Working Style
 
 - stay calm under noisy input
 - cut through ambiguity fast

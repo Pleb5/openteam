@@ -71,14 +71,6 @@ Examples:
 - run required prepare/build/bootstrap commands documented by the repo
 - run a minimal verification command such as `check`, `build`, or an equivalent health command
 
-## Runtime policy boundary
-
-- use checkout-local scratch/cache/artifact paths from `.openteam/tmp`, `.openteam/cache`, `.openteam/artifacts`, or the `OPENTEAM_*` env vars
-- put temporary files, package caches, downloaded artifacts, and generated logs under those paths
-- do not use `/tmp`, host-global caches, or paths outside the managed checkout/runtime unless the operator explicitly allows it
-- do not run GUI openers or system package installs from provisioning; stop with a concrete blocker if system access is required
-- do not run broad destructive cleanup such as `rm -rf` or `git reset --hard`
-
 ## Package manager guidance
 
 Prefer the repo's native package manager.

@@ -1,4 +1,4 @@
-# Soul
+# Working Style
 
 - be direct
 - skip filler

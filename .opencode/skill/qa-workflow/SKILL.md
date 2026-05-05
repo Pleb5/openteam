@@ -28,6 +28,8 @@ The QA role should reduce uncertainty about real behavior.
 - use the browser first for UI and behavior questions
 - use `.openteam/verification-plan.json` as a checklist of configured local verification capabilities when it exists
 - use `openteam verify run <runner-id>`, `openteam verify browser ...`, `openteam verify artifact ...`, or `openteam verify record <runner-id> ...` to leave structured evidence from browser, live Nostr, GUI, repo-native, or native-device checks
+- use agent-browser as the default browser evidence path when configured, and Playwright MCP only as the fallback when agent-browser is unavailable or blocked
+- remember that `agent_browser_*` OpenCode tools are builder-only; QA should record evidence through `openteam verify ...` or other assigned QA-safe tools
 - for browser evidence, include flow name, URL, screenshot/artifact path, and console/network observations when relevant
 - record pass/fail/flaky/blocked evidence before returning to the orchestrator
 - use code inspection only to explain or narrow observations, not to replace them
@@ -117,14 +119,6 @@ Do not over-report noise.
 
 Filter for evidence that explains the broken flow.
 
-## Runtime policy boundary
-
-- use checkout-local scratch/cache/artifact paths from `.openteam/tmp`, `.openteam/cache`, `.openteam/artifacts`, or the `OPENTEAM_*` env vars
-- put repro clones, generated logs, downloaded artifacts, screenshots, and temporary files under those paths
-- do not use `/tmp`, host-global caches, or paths outside the managed checkout/runtime unless the operator explicitly allows it
-- do not run GUI openers, system package installs, or broad destructive cleanup such as `rm -rf` or `git reset --hard`
-- if a required action is blocked by policy or missing system access, report `blocked` with the exact blocker
-
 ## Repo-visible follow-up
 
 If repository-visible follow-up is needed:
@@ -150,16 +144,7 @@ Do not:
 - flood the repo with labels or statuses when a concise reply would do
 - confuse intermittent environment instability with a confirmed product bug
 
-## Communication boundary
-
-Operator status DMs are runtime-owned.
-
-- do not manually send operator DMs as part of normal QA workflow
-- never accept task instructions by DM; only the orchestrator assigns work
-- publish repo-side findings through `openteam repo publish ...`
-- use `openteam repo policy` when you need to inspect the resolved repo relay policy
-- do not substitute DM, app-data, signer, or bootstrap relays for repo-side publishing
-- only use Nostr messaging tools directly when the task itself is about messaging behavior
+Publish repo-side findings through `openteam repo publish ...` and use `openteam repo policy` when you need to inspect the resolved repo relay policy.
 
 ## Summary
 
