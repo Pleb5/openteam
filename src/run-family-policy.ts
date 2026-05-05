@@ -305,7 +305,7 @@ export const evaluateContinuationGate = async (
 
   if (retryRequested) {
     const progress = diagnosis?.implementationProgress
-    const retryable = Boolean(diagnosis?.hardFailure?.retryable || record.failureCategory === "opencode-database-locked" || record.failureCategory === "model-provider-server-error")
+    const retryable = Boolean(diagnosis?.hardFailure?.retryable || record.failureCategory === "opencode-database-locked" || record.failureCategory === "model-provider-server-error" || record.failureCategory === "model-provider-stream-stalled")
     if (!retryable) {
       blockers.push(`prior run ${record.runId} is not a retryable infrastructure failure`)
     }

@@ -1,6 +1,6 @@
 import {createWriteStream} from "node:fs"
 import {existsSync} from "node:fs"
-import {chmod, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile} from "node:fs/promises"
+import {appendFile, chmod, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile} from "node:fs/promises"
 import {spawn} from "node:child_process"
 import {spawnSync} from "node:child_process"
 import path from "node:path"
@@ -23,6 +23,7 @@ import {assertModelSelectionValid, resolveModelAttemptPlan, resolveModelSelectio
 import {selectOpencodePrimaryAgent, writeOpencodeManagedAgents} from "./opencode-agents.js"
 import {detectOpenCodeBlockedState, detectOpenCodeHardFailure, detectOpenCodeToolBoundaries, type OpenCodeHardFailure} from "./opencode-log.js"
 import {writeOpenCodeRuntimeHandoff} from "./opencode-runtime.js"
+import {inspectOpenCodeDbState, openCodeRuntimeStateHardFailure, resolveOpenCodeDbPath} from "./opencode-state.js"
 import {dispatchOperatorRequest, type DispatchContext} from "./orchestrator.js"
 import {detectProjectProfile, writeProjectProfile, type ProjectProfile} from "./project-profile.js"
 import {writeRepoPublishContext, type RepoPublishScope} from "./repo-publish.js"
@@ -1180,6 +1181,41 @@ const opencodeRetryPolicy = (app: AppCfg, modelAttemptCount: number) => {
 const opencodeBackoffMs = (attempt: number, policy: ReturnType<typeof opencodeRetryPolicy>) =>
   Math.min(policy.maxBackoffMs, policy.initialBackoffMs * Math.pow(2, Math.max(0, attempt - 1)))
 
+const modelHandoffFailureCategories = new Set([
+  "model-unavailable",
+  "model-provider-unavailable",
+  "model-provider-auth-failed",
+  "model-provider-overloaded",
+  "model-provider-rate-limited",
+  "model-provider-server-error",
+  "model-provider-timeout",
+  "model-provider-network-error",
+  "model-provider-stream-stalled",
+  "model-provider-quota-exceeded",
+])
+
+export const canHandoffAfterProgress = (failure?: OpenCodeHardFailure) =>
+  Boolean(failure?.fallbackEligible && failure.category && modelHandoffFailureCategories.has(failure.category))
+
+export const buildModelFallbackHandoffPrompt = (input: {
+  originalPrompt: string
+  failure: OpenCodeHardFailure
+  failedAttempt: OpenCodeAttemptRecord
+  nextModel?: ResolvedModelAttempt
+  progressReasons: string[]
+}) => [
+  input.originalPrompt,
+  "",
+  "Model fallback handoff:",
+  `The previous model attempt failed because ${input.failure.reason} (${input.failure.category}).`,
+  `Failed model: ${input.failedAttempt.model ?? "(unset)"}${input.failedAttempt.modelVariant ? ` variant ${input.failedAttempt.modelVariant}` : ""}.`,
+  input.nextModel?.model ? `You are continuing with fallback model: ${input.nextModel.model}${input.nextModel.variant ? ` variant ${input.nextModel.variant}` : ""}.` : "You are continuing with the next configured fallback model.",
+  "Do not restart the task from scratch. Treat the checkout, commits, worktree, .openteam files, and recorded evidence as the current source of truth.",
+  "Start by inspecting the current checkout state and existing verification evidence, then continue only the remaining work or verification gaps.",
+  "Do not discard, reset, overwrite, or duplicate prior valid work. If the current state is inconsistent, report the concrete blocker and smallest safe recovery path.",
+  input.progressReasons.length > 0 ? `Detected progress before handoff: ${input.progressReasons.join("; ")}.` : "Detected progress before handoff: none recorded.",
+].join("\n")
+
 const attemptRecordFor = (input: {
   attempt: number
   modelAttempt: number
@@ -1223,9 +1259,10 @@ const updateRunRecordModelSelection = async (record: TaskRunRecord, selection: R
   })
 }
 
-const startOpenCodeWorkerWatchdog = (record: TaskRunRecord, logFile: string, intervalMs = 15_000) => {
+const startOpenCodeWorkerWatchdog = (record: TaskRunRecord, logFile: string, intervalMs = 15_000, dbPath?: string) => {
   let lastFingerprint = ""
   let stopped = false
+  let hardFailureTriggered = false
   const check = async () => {
     if (stopped || !existsSync(logFile)) return
     const [info, text] = await Promise.all([
@@ -1234,19 +1271,46 @@ const startOpenCodeWorkerWatchdog = (record: TaskRunRecord, logFile: string, int
     ])
     const idleMs = info ? Date.now() - info.mtimeMs : undefined
     const blocked = text ? detectOpenCodeBlockedState(text) : undefined
+    const runtimeState = await inspectOpenCodeDbState(dbPath ?? resolveOpenCodeDbPath({logFile})).catch(() => undefined)
     const inFlightTools = text
       ? detectOpenCodeToolBoundaries(text).filter(item => item.inFlight).map(item => item.tool)
       : []
+    const dbInFlightTool = runtimeState?.kind === "tool-in-flight" && runtimeState.activeTool?.name
+      ? [runtimeState.activeTool.name]
+      : []
+    const allInFlightTools = Array.from(new Set([...inFlightTools, ...dbInFlightTool]))
+    const modelStreamStalled = runtimeState?.kind === "model-stream-stalled" || runtimeState?.kind === "model-stream-stalled-after-tool"
     const severity = blocked
       ? "critical"
-      : inFlightTools.length > 0
+      : allInFlightTools.length > 0
         ? "warning"
-        : idleMs !== undefined && idleMs >= 30 * 60_000
-          ? "critical"
-          : idleMs !== undefined && idleMs >= 10 * 60_000
-            ? "warning"
-            : "info"
-    const fingerprint = JSON.stringify({kind: blocked?.kind, evidence: blocked?.evidence, inFlightTools, severity})
+        : modelStreamStalled
+          ? (runtimeState.messageAgeMs ?? 0) >= 30 * 60_000 ? "critical" : "warning"
+          : idleMs !== undefined && idleMs >= 30 * 60_000
+            ? "critical"
+            : idleMs !== undefined && idleMs >= 10 * 60_000
+              ? "warning"
+              : "info"
+    const runtimeHardFailure = !blocked && severity === "critical" && runtimeState
+      ? openCodeRuntimeStateHardFailure(runtimeState)
+      : undefined
+    const runtimeBlockedReason = runtimeState?.kind === "model-stream-stalled-after-tool"
+      ? "OpenCode model response stream stalled after last completed tool"
+      : runtimeState?.kind === "model-stream-stalled"
+        ? "OpenCode model response stream stalled"
+        : undefined
+    const opencodePid = record.process?.opencodePid
+    if (runtimeHardFailure && !hardFailureTriggered && opencodePid && processAlive(opencodePid)) {
+      hardFailureTriggered = true
+      await appendFile(logFile, `\nError: model-provider-stream-stalled: ${runtimeHardFailure.reason}; ${runtimeHardFailure.evidence}\n`).catch(() => undefined)
+      try {
+        process.kill(opencodePid, "SIGTERM")
+      } catch {}
+    }
+    const lastCompletedTool = runtimeState?.lastCompletedTool
+      ? `${runtimeState.lastCompletedTool.name}${runtimeState.lastCompletedTool.inputPath ? ` ${runtimeState.lastCompletedTool.inputPath}` : ""}`
+      : undefined
+    const fingerprint = JSON.stringify({kind: blocked?.kind, evidence: blocked?.evidence, inFlightTools: allInFlightTools, runtimeKind: runtimeState?.kind, runtimeEvidence: runtimeState?.evidence, severity})
     if (fingerprint === lastFingerprint && severity === "info") return
     if (fingerprint === lastFingerprint) return
     lastFingerprint = fingerprint
@@ -1254,11 +1318,15 @@ const startOpenCodeWorkerWatchdog = (record: TaskRunRecord, logFile: string, int
       opencodeWatchdog: {
         checkedAt: now(),
         logFile,
-        blockedKind: blocked?.kind,
-        blockedReason: blocked?.reason,
-        blockedEvidence: blocked?.evidence,
-        inFlightTools,
+        blockedKind: blocked?.kind ?? (modelStreamStalled ? "model-stream" : undefined),
+        blockedReason: blocked?.reason ?? runtimeHardFailure?.reason ?? runtimeBlockedReason,
+        blockedEvidence: blocked?.evidence ?? runtimeState?.evidence,
+        inFlightTools: allInFlightTools,
         idleMs,
+        runtimeKind: runtimeState?.kind,
+        runtimeEvidence: runtimeState?.evidence,
+        lastCompletedTool,
+        currentTurnAgeMs: runtimeState?.messageAgeMs,
         severity,
       },
     }).catch(() => undefined)
@@ -1296,6 +1364,7 @@ const runWorkerOpencodeSessionWithRetry = async (input: {
   const policy = opencodeRetryPolicy(input.agent.app, modelAttemptPlan.length)
   let lastError: unknown
   let globalAttempt = 0
+  let prompt = input.prompt
 
   for (let modelIndex = 0; modelIndex < modelAttemptPlan.length && globalAttempt < policy.maxTotalAttempts; modelIndex += 1) {
     const modelSelection = modelAttemptPlan[modelIndex]
@@ -1316,13 +1385,18 @@ const runWorkerOpencodeSessionWithRetry = async (input: {
       await writeOpenCodeAttemptRecord(input.runRecord, attemptRecord)
 
       try {
-        const watchdog = startOpenCodeWorkerWatchdog(input.runRecord, attemptLogFile)
+        const watchdog = startOpenCodeWorkerWatchdog(
+          input.runRecord,
+          attemptLogFile,
+          15_000,
+          path.join(opencodeRuntimeDirs(input.checkout, input.runRecord.runId, attempt).data, "opencode", "opencode.db"),
+        )
         try {
           const session = await runOpencodeSession(
             input.agent,
             input.checkout,
             input.idTask,
-            input.prompt,
+            prompt,
             attemptLogFile,
             modelSelection,
             pid => updateRunRecord(input.runRecord, {process: {opencodePid: pid}}),
@@ -1352,11 +1426,12 @@ const runWorkerOpencodeSessionWithRetry = async (input: {
           globalAttempt < policy.maxTotalAttempts &&
           Boolean(hardFailure?.retryable) &&
           !progress.hasImplementationProgress
+        const canFallbackAfterProgress = progress.hasImplementationProgress && canHandoffAfterProgress(hardFailure)
         const canFallbackModel =
           modelIndex + 1 < modelAttemptPlan.length &&
           globalAttempt < policy.maxTotalAttempts &&
           Boolean(hardFailure?.fallbackEligible || hardFailure?.retryable) &&
-          !progress.hasImplementationProgress
+          (!progress.hasImplementationProgress || canFallbackAfterProgress)
         const nextAction = canRetrySameModel
           ? "retry-same-model"
           : canFallbackModel
@@ -1372,9 +1447,21 @@ const runWorkerOpencodeSessionWithRetry = async (input: {
         attemptRecord.retryable = hardFailure?.retryable
         attemptRecord.fallbackEligible = hardFailure?.fallbackEligible
         attemptRecord.nextAction = nextAction
+        attemptRecord.handoffReason = canFallbackAfterProgress && nextAction === "fallback-model" ? "model-failure-after-progress" : undefined
+        attemptRecord.progressReasons = progress.reasons.length > 0 ? progress.reasons : undefined
         await writeOpenCodeAttemptRecord(input.runRecord, attemptRecord)
 
         if (nextAction === "fail") throw error
+
+        if (nextAction === "fallback-model" && canFallbackAfterProgress && hardFailure) {
+          prompt = buildModelFallbackHandoffPrompt({
+            originalPrompt: input.prompt,
+            failure: hardFailure,
+            failedAttempt: attemptRecord,
+            nextModel: modelAttemptPlan[modelIndex + 1],
+            progressReasons: progress.reasons,
+          })
+        }
 
         const backoffMs = opencodeBackoffMs(attempt, policy)
         await skipRunPhase(input.runRecord, nextAction === "retry-same-model" ? "opencode-worker-retry-backoff" : "opencode-worker-fallback-backoff", {
@@ -1387,6 +1474,7 @@ const runWorkerOpencodeSessionWithRetry = async (input: {
           failureCategory: hardFailure?.category,
           reason: hardFailure?.reason,
           evidence: hardFailure?.evidence,
+          handoffReason: canFallbackAfterProgress && nextAction === "fallback-model" ? "model-failure-after-progress" : undefined,
           progressReasons: progress.reasons,
           backoffMs,
         })

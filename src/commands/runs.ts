@@ -5,6 +5,7 @@ import {prepareAgent} from "../config.js"
 import {evaluateEvidencePolicy, evidenceLevel, groupEvidenceResults, verificationFailuresBlockTask} from "../evidence-policy.js"
 import {detectDevServerRuntimeFailure, type DevServerFailureCategory} from "../dev-server.js"
 import {detectOpenCodeBlockedState, detectOpenCodeHardFailure, detectOpenCodeToolBoundaries, detectWorkerVerificationBlockers, lastMeaningfulLogLine} from "../opencode-log.js"
+import {inspectOpenCodeDbState, resolveOpenCodeDbPath, type OpenCodeRuntimeState} from "../opencode-state.js"
 import {loadRepoRegistry, releaseRepoContext} from "../repo.js"
 import {evaluateRunRecord, type RunEvalResult} from "../run-evals.js"
 import {runImplementationProgressSignals} from "../run-progress.js"
@@ -247,6 +248,21 @@ const opencodeAttemptDiagnostics = async (record: TaskRunRecord) => {
   }))
 }
 
+const currentOpenCodeAttempt = (record: TaskRunRecord) =>
+  [...(record.opencodeAttemptRecords ?? [])].reverse().find(item => item.state === "running")
+  ?? [...(record.opencodeAttemptRecords ?? [])].reverse()[0]
+
+const opencodeRuntimeProgress = async (record: TaskRunRecord, checkout?: string): Promise<OpenCodeRuntimeState | undefined> => {
+  const attempt = currentOpenCodeAttempt(record)
+  const dbPath = resolveOpenCodeDbPath({
+    checkout,
+    runId: record.runId,
+    attempt: attempt?.attempt ?? 1,
+    logFile: record.logs?.opencode,
+  })
+  return inspectOpenCodeDbState(dbPath, {stallThresholdMs: OPENCODE_IDLE_WARNING_MS}).catch(() => undefined)
+}
+
 const workerVerificationBlockers = async (file?: string) => {
   if (!file || !existsSync(file)) return []
   return detectWorkerVerificationBlockers(await readFile(file, "utf8"))
@@ -303,6 +319,7 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
     dev: await logInfo(record.logs?.dev),
   }
   const opencodeProgress = await opencodeProgressInfo(record.logs?.opencode, runningPhase?.startedAt ?? record.startedAt)
+  const opencodeRuntime = await opencodeRuntimeProgress(record, context?.checkout ?? record.context?.checkout)
   const hardFailure = await opencodeHardFailure(record.logs?.opencode)
   const opencodeAttempts = await opencodeAttemptDiagnostics(record)
   const verificationBlockers = await workerVerificationBlockers(record.logs?.opencode)
@@ -310,11 +327,16 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
   const newestLogAgeMs = Math.min(...Object.values(logs).map(item => item?.ageMs).filter((age): age is number => typeof age === "number"))
   const activePhaseDurationMs = phaseDurationMs(runningPhase)
   const opencodeIdleMs = opencodeProgress.ageMs
-  const opencodeStallSeverity: "warning" | "critical" | undefined = record.state === "running" && runningPhase?.name === "opencode-worker" && !opencodeProgress.blocked && typeof opencodeIdleMs === "number"
-    ? opencodeIdleMs >= OPENCODE_IDLE_CRITICAL_MS
-      ? "critical"
-      : opencodeIdleMs >= OPENCODE_IDLE_WARNING_MS
-        ? "warning"
+  const opencodeRuntimeStalled = opencodeRuntime?.kind === "model-stream-stalled" || opencodeRuntime?.kind === "model-stream-stalled-after-tool"
+  const opencodeStallSeverity: "warning" | "critical" | undefined = record.state === "running" && runningPhase?.name === "opencode-worker" && !opencodeProgress.blocked
+    ? opencodeRuntimeStalled
+      ? (opencodeRuntime.messageAgeMs ?? 0) >= OPENCODE_IDLE_CRITICAL_MS ? "critical" : "warning"
+      : typeof opencodeIdleMs === "number"
+        ? opencodeIdleMs >= OPENCODE_IDLE_CRITICAL_MS
+          ? "critical"
+          : opencodeIdleMs >= OPENCODE_IDLE_WARNING_MS
+            ? "warning"
+            : undefined
         : undefined
     : undefined
   const runAgeMs = Math.max(0, Date.now() - Date.parse(record.startedAt))
@@ -355,8 +377,13 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
 
     if (runningPhase?.name === "opencode-worker" && opencodeProgress.blocked) {
       reasons.push(`${opencodeProgress.blocked.reason}: ${opencodeProgress.blocked.evidence}`)
+    } else if (runningPhase?.name === "opencode-worker" && opencodeRuntime?.kind === "tool-in-flight" && opencodeRuntime.activeTool) {
+      reasons.push(`OpenCode tool still in flight: ${opencodeRuntime.activeTool.name}${opencodeRuntime.activeTool.inputPath ? ` ${opencodeRuntime.activeTool.inputPath}` : ""}`)
     } else if (runningPhase?.name === "opencode-worker" && opencodeProgress.toolBoundaries.some(item => item.inFlight)) {
       reasons.push(`OpenCode tool boundary still in flight: ${opencodeProgress.toolBoundaries.filter(item => item.inFlight).map(item => item.tool).join(", ")}`)
+    } else if (runningPhase?.name === "opencode-worker" && opencodeRuntimeStalled) {
+      const tool = opencodeRuntime.lastCompletedTool
+      reasons.push(`OpenCode model stream stalled for ${Math.round((opencodeRuntime.messageAgeMs ?? 0) / 60_000)} minutes${tool ? ` after completed ${tool.name}${tool.inputPath ? ` ${tool.inputPath}` : ""}` : ""}`)
     } else if (runningPhase?.name === "opencode-worker" && opencodeStallSeverity) {
       reasons.push(`OpenCode worker has no output for ${Math.round((opencodeIdleMs ?? 0) / 60_000)} minutes while the run is still active`)
     }
@@ -442,6 +469,7 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
       toolBoundaries: opencodeProgress.toolBoundaries,
       inFlightTools: opencodeProgress.toolBoundaries.filter(item => item.inFlight).map(item => item.tool),
       stallSeverity: opencodeStallSeverity,
+      runtime: opencodeRuntime,
       idleWarningMs: OPENCODE_IDLE_WARNING_MS,
       idleCriticalMs: OPENCODE_IDLE_CRITICAL_MS,
     },
@@ -655,6 +683,8 @@ const runListView = (record: TaskRunRecord, diagnosis?: RunDiagnosis) => {
       opencodeLogAgeMs: compact.opencodeProgress.logAgeMs,
       opencodeStallSeverity: compact.opencodeProgress.stallSeverity,
       opencodeBlockedKind: compact.opencodeProgress.blocked?.kind,
+      opencodeRuntimeKind: compact.opencodeProgress.runtime?.kind,
+      opencodeRuntimeEvidence: compact.opencodeProgress.runtime?.evidence,
     } : undefined,
     agentId: record.agentId,
     baseAgentId: record.baseAgentId,
@@ -717,6 +747,7 @@ const printDiagnosis = (diagnosis: Awaited<ReturnType<typeof diagnoseRun>>) => {
   console.log(`any task pid alive: ${diagnosis.anyTaskPidAlive ? "yes" : "no"}`)
   if (diagnosis.opencodeProgress.logAgeMs !== undefined) console.log(`opencode log age ms: ${diagnosis.opencodeProgress.logAgeMs}`)
   if (diagnosis.opencodeProgress.stallSeverity) console.log(`opencode stall: ${diagnosis.opencodeProgress.stallSeverity}`)
+  if (diagnosis.opencodeProgress.runtime) console.log(`opencode runtime: ${diagnosis.opencodeProgress.runtime.kind} (${diagnosis.opencodeProgress.runtime.evidence})`)
   if (diagnosis.opencodeProgress.blocked) console.log(`opencode blocked: ${diagnosis.opencodeProgress.blocked.kind} (${diagnosis.opencodeProgress.blocked.reason})`)
   for (const attempt of diagnosis.opencodeAttempts) {
     console.log(`opencode attempt: ${attempt.attempt} ${attempt.model ?? "(unset)"} ${attempt.state ?? "unknown"}${attempt.failureCategory || attempt.hardFailure?.category ? ` (${attempt.failureCategory ?? attempt.hardFailure?.category})` : ""}`)

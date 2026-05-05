@@ -496,6 +496,8 @@ export type OpenCodeAttemptRecord = {
   retryable?: boolean
   fallbackEligible?: boolean
   nextAction?: "retry-same-model" | "fallback-model" | "fail"
+  handoffReason?: string
+  progressReasons?: string[]
 }
 
 export type RepoIdentity = {
@@ -746,6 +748,10 @@ export type TaskRunRecord = {
     blockedEvidence?: string
     inFlightTools?: string[]
     idleMs?: number
+    runtimeKind?: string
+    runtimeEvidence?: string
+    lastCompletedTool?: string
+    currentTurnAgeMs?: number
     severity?: "info" | "warning" | "critical"
   }
   devServer?: {

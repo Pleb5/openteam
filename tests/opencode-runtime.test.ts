@@ -1,8 +1,11 @@
 import {describe, expect, test} from "bun:test"
+import {Database} from "bun:sqlite"
 import {mkdir, mkdtemp, readFile, writeFile} from "node:fs/promises"
 import {tmpdir} from "node:os"
 import path from "node:path"
+import {detectOpenCodeBlockedState, detectOpenCodeHardFailure} from "../src/opencode-log.js"
 import {buildOpenCodeRuntimeHandoff, splitOpencodeModel, writeOpenCodeRuntimeHandoff} from "../src/opencode-runtime.js"
+import {inspectOpenCodeDbState, openCodeRuntimeStateHardFailure} from "../src/opencode-state.js"
 import type {AppCfg} from "../src/types.js"
 
 const app = (): AppCfg => ({
@@ -109,5 +112,82 @@ describe("opencode runtime handoff", () => {
     expect(handoff.files.json).toBe(path.join(checkout, ".openteam", "opencode-runtime.json"))
     expect(await readFile(handoff.files.json, "utf8")).toContain("openteam-researcher")
     expect(await readFile(handoff.files.summary, "utf8")).toContain("Do not inspect raw host OpenCode auth files")
+  })
+})
+
+const createStateDb = async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "openteam-opencode-state-db-"))
+  const file = path.join(dir, "opencode.db")
+  const db = new Database(file)
+  db.query("create table message (id text primary key, role text, time_created integer, provider text, model text, finish text)").all()
+  db.query("create table part (id text primary key, message_id text, type text, data text, time_created integer)").all()
+  return {file, db}
+}
+
+const insertMessage = (db: Database, row: {id: string; role: string; time: number; provider?: string; model?: string; finish?: string}) => {
+  db.query("insert into message (id, role, time_created, provider, model, finish) values (?, ?, ?, ?, ?, ?)").all(row.id, row.role, row.time, row.provider, row.model, row.finish)
+}
+
+const insertPart = (db: Database, row: {id: string; messageId: string; type: string; data?: Record<string, unknown>; time: number}) => {
+  db.query("insert into part (id, message_id, type, data, time_created) values (?, ?, ?, ?, ?)").all(row.id, row.messageId, row.type, JSON.stringify(row.data ?? {type: row.type}), row.time)
+}
+
+describe("opencode runtime state inspection", () => {
+  test("classifies completed tool followed by incomplete assistant step as model-stream-stalled-after-tool", async () => {
+    const nowMs = Date.now()
+    const {file, db} = await createStateDb()
+    try {
+      insertMessage(db, {id: "m1", role: "assistant", time: nowMs - 87 * 60_000, finish: "tool-calls"})
+      insertPart(db, {id: "p1", messageId: "m1", type: "tool", time: nowMs - 86 * 60_000 - 30_000, data: {type: "tool", tool: "read", input: {path: ".openteam/task.json"}, state: {status: "completed"}}})
+      insertMessage(db, {id: "m2", role: "assistant", time: nowMs - 86 * 60_000, provider: "openai", model: "gpt-5.5"})
+      insertPart(db, {id: "p2", messageId: "m2", type: "step-start", time: nowMs - 86 * 60_000, data: {type: "step-start"}})
+
+      const state = await inspectOpenCodeDbState(file, {nowMs, stallThresholdMs: 10_000})
+      expect(state.kind).toBe("model-stream-stalled-after-tool")
+      expect(state.lastCompletedTool).toEqual({name: "read", inputPath: ".openteam/task.json", status: "completed"})
+      expect(state.evidence).toContain("lastCompletedTool=read .openteam/task.json")
+      expect(state.evidence).toContain("provider=openai")
+    } finally {
+      db.close()
+    }
+  })
+
+  test("classifies unfinished tool part as tool-in-flight", async () => {
+    const nowMs = Date.now()
+    const {file, db} = await createStateDb()
+    try {
+      insertMessage(db, {id: "m1", role: "assistant", time: nowMs - 60_000})
+      insertPart(db, {id: "p1", messageId: "m1", type: "tool", time: nowMs - 50_000, data: {type: "tool", tool: "bash", input: {path: "tests"}, state: {status: "running"}}})
+
+      const state = await inspectOpenCodeDbState(file, {nowMs, stallThresholdMs: 10_000})
+      expect(state.kind).toBe("tool-in-flight")
+      expect(state.activeTool?.name).toBe("bash")
+    } finally {
+      db.close()
+    }
+  })
+
+  test("returns unknown-idle when database is missing", async () => {
+    const state = await inspectOpenCodeDbState(path.join(tmpdir(), "missing-opencode.db"))
+    expect(state.kind).toBe("unknown-idle")
+  })
+
+  test("permission text detection still wins at log classification layer", () => {
+    const blocked = detectOpenCodeBlockedState("permission requested: bash rm -rf /tmp/nope")
+    expect(blocked?.kind).toBe("permission")
+  })
+
+  test("model-provider-stream-stalled is retryable and fallback eligible", () => {
+    const hardFailure = detectOpenCodeHardFailure("Error: model-provider-stream-stalled: OpenCode model response stream stalled after last completed tool; provider=openai")
+    expect(hardFailure?.category).toBe("model-provider-stream-stalled")
+    expect(hardFailure?.retryable).toBe(true)
+    expect(hardFailure?.fallbackEligible).toBe(true)
+  })
+
+  test("runtime state synthesizes retryable stream-stalled hard failure", async () => {
+    const failure = openCodeRuntimeStateHardFailure({kind: "model-stream-stalled", messageAgeMs: 60_000, evidence: "provider=openai"})
+    expect(failure?.category).toBe("model-provider-stream-stalled")
+    expect(failure?.retryable).toBe(true)
+    expect(failure?.fallbackEligible).toBe(true)
   })
 })

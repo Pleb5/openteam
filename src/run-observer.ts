@@ -39,6 +39,10 @@ export type RunObservationSnapshot = {
   opencodeStallSeverity?: "warning" | "critical"
   opencodeWatchdogSeverity?: string
   opencodeInFlightTools?: string[]
+  opencodeRuntimeKind?: string
+  opencodeRuntimeEvidence?: string
+  opencodeLastCompletedTool?: string
+  opencodeCurrentTurnAgeMs?: number
   devUrl?: string
   devStatus?: string
   devHealthy: boolean
@@ -165,6 +169,10 @@ export const snapshotRunObservation = async (
     opencodeStallSeverity: diagnosis.opencodeProgress.stallSeverity,
     opencodeWatchdogSeverity: record.opencodeWatchdog?.severity,
     opencodeInFlightTools: record.opencodeWatchdog?.inFlightTools,
+    opencodeRuntimeKind: diagnosis.opencodeProgress.runtime?.kind ?? record.opencodeWatchdog?.runtimeKind,
+    opencodeRuntimeEvidence: diagnosis.opencodeProgress.runtime?.evidence ?? record.opencodeWatchdog?.runtimeEvidence,
+    opencodeLastCompletedTool: record.opencodeWatchdog?.lastCompletedTool ?? (diagnosis.opencodeProgress.runtime?.lastCompletedTool ? `${diagnosis.opencodeProgress.runtime.lastCompletedTool.name}${diagnosis.opencodeProgress.runtime.lastCompletedTool.inputPath ? ` ${diagnosis.opencodeProgress.runtime.lastCompletedTool.inputPath}` : ""}` : undefined),
+    opencodeCurrentTurnAgeMs: diagnosis.opencodeProgress.runtime?.messageAgeMs ?? record.opencodeWatchdog?.currentTurnAgeMs,
     devUrl: devHealth.url,
     devStatus: diagnosis.devServer.status,
     devHealthy: devHealth.ok,
@@ -193,6 +201,7 @@ const fieldSeverity = (field: string, to: unknown): ObservationSeverity => {
   if (field === "opencodeBlockedKind" && to) return "critical"
   if (field === "opencodeStallSeverity" && to === "critical") return "critical"
   if (field === "opencodeStallSeverity" && to === "warning") return "warning"
+  if (field === "opencodeRuntimeKind" && (to === "model-stream-stalled" || to === "model-stream-stalled-after-tool")) return "warning"
   if (field === "opencodeWatchdogSeverity" && to === "critical") return "critical"
   if (field === "opencodeWatchdogSeverity" && to === "warning") return "warning"
   if (field === "evidenceLevel" && (to === "failed" || to === "blocked")) return "critical"
@@ -231,6 +240,7 @@ const diffSnapshots = (
     "activePhase",
     "opencodeBlockedKind",
     "opencodeStallSeverity",
+    "opencodeRuntimeKind",
     "opencodeWatchdogSeverity",
     "devHealthy",
     "evidenceLevel",
@@ -321,6 +331,8 @@ const printSnapshot = (snapshot: RunObservationSnapshot) => {
   console.log(`pids: any=${snapshot.anyPidAlive ? "yes" : "no"} task=${snapshot.anyTaskPidAlive ? "yes" : "no"}`)
   if (snapshot.opencodeLogAgeMs !== undefined) console.log(`opencode log age ms: ${snapshot.opencodeLogAgeMs}`)
   if (snapshot.opencodeStallSeverity) console.log(`opencode stall: ${snapshot.opencodeStallSeverity}`)
+  if (snapshot.opencodeRuntimeKind) console.log(`opencode runtime: ${snapshot.opencodeRuntimeKind}${snapshot.opencodeRuntimeEvidence ? ` (${snapshot.opencodeRuntimeEvidence})` : ""}`)
+  if (snapshot.opencodeRuntimeKind === "model-stream-stalled-after-tool") console.log(`opencode model stream stalled${snapshot.opencodeCurrentTurnAgeMs !== undefined ? ` for ${Math.round(snapshot.opencodeCurrentTurnAgeMs / 60_000)}m` : ""}${snapshot.opencodeLastCompletedTool ? ` after completed ${snapshot.opencodeLastCompletedTool}` : ""}`)
   if (snapshot.opencodeBlockedKind) console.log(`opencode blocked: ${snapshot.opencodeBlockedKind}${snapshot.opencodeBlockedReason ? ` (${snapshot.opencodeBlockedReason})` : ""}`)
   console.log(`dev: ${snapshot.devUrl ?? "(none)"} ${snapshot.devStatus ?? (snapshot.devHealthy ? "healthy" : "down")}${snapshot.devError && !snapshot.devStatus?.startsWith("stopped after") ? ` (${snapshot.devError})` : ""}`)
   console.log(`evidence: ${snapshot.evidenceLevel}`)
@@ -341,6 +353,8 @@ export const formatObservationEvent = (event: RunObservationEvent) => {
   lines.push(`state: ${event.snapshot.state}`)
   if (event.snapshot.opencodeBlockedKind) lines.push(`opencode blocked: ${event.snapshot.opencodeBlockedKind}`)
   if (event.snapshot.opencodeStallSeverity) lines.push(`opencode stall: ${event.snapshot.opencodeStallSeverity}`)
+  if (event.snapshot.opencodeRuntimeKind === "model-stream-stalled-after-tool") lines.push(`OpenCode model stream stalled${event.snapshot.opencodeCurrentTurnAgeMs !== undefined ? ` for ${Math.round(event.snapshot.opencodeCurrentTurnAgeMs / 60_000)}m` : ""}${event.snapshot.opencodeLastCompletedTool ? ` after completed ${event.snapshot.opencodeLastCompletedTool}` : ""}`)
+  else if (event.snapshot.opencodeRuntimeKind === "model-stream-stalled") lines.push(`OpenCode model stream stalled${event.snapshot.opencodeCurrentTurnAgeMs !== undefined ? ` for ${Math.round(event.snapshot.opencodeCurrentTurnAgeMs / 60_000)}m` : ""}`)
   lines.push(`evidence: ${event.snapshot.evidenceLevel}`)
   lines.push(`PR eligible: ${event.snapshot.prEligible ? "yes" : "no"}`)
   if (event.snapshot.recommendedAction) {

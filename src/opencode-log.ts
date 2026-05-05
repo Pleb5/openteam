@@ -12,6 +12,7 @@ export type OpenCodeHardFailureCategory =
   | "model-provider-server-error"
   | "model-provider-timeout"
   | "model-provider-network-error"
+  | "model-provider-stream-stalled"
   | "model-provider-quota-exceeded"
   | "model-context-length-exceeded"
   | "opencode-auth-unavailable"
@@ -125,6 +126,7 @@ export const detectOpenCodeHardFailure = (text: string) => {
     [/too_many_requests|rate[_ -]?limit|\brate limited\b|\b429\b/i, "model-provider-rate-limited", "model provider rate limit was reached", true, true],
     [/request timed out|timed out|timeout|deadline exceeded|gateway timeout|\b504\b/i, "model-provider-timeout", "model provider request timed out", true, true],
     [/ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|socket hang up|network error|fetch failed|connection reset/i, "model-provider-network-error", "model provider network request failed", true, true],
+    [/model (?:provider )?(?:response )?stream stalled|model-provider-stream-stalled/i, "model-provider-stream-stalled", "OpenCode model response stream stalled", true, true],
     [/"code"\s*:\s*"server_error"|"type"\s*:\s*"server_error"|\b(?:500|502|503)\b|internal server error|bad gateway|service unavailable/i, "model-provider-server-error", "model provider returned a transient server error", true, true],
     [/permission requested:[\s\S]{0,300}auto-rejecting/i, "tool-permission-rejected", "tool permission request was auto-rejected"],
     [/The user rejected permission to use this specific tool call\./i, "tool-permission-rejected", "tool permission request was rejected"],
