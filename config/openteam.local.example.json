@@ -17,6 +17,14 @@
       }
     }
   },
+  "opencode": {
+    "retry": {
+      "maxSameModelAttempts": 2,
+      "maxTotalAttempts": 5,
+      "initialBackoffMs": 2000,
+      "maxBackoffMs": 30000
+    }
+  },
   "providers": {
     "github.com": {
       "type": "github",
@@ -57,20 +65,78 @@
   },
   "modelProfiles": {
     "builder-default": {
+      "model": "openai/gpt-5.5",
+      "variant": "xhigh",
+      "description": "Primary implementation model. Prefer subscription-backed providers before usage-based fallbacks.",
+      "fallbackModelProfiles": [
+        "builder-gpt54-openai",
+        "builder-gpt55-opencode",
+        "builder-claude-sonnet"
+      ]
+    },
+    "builder-gpt54-openai": {
+      "model": "openai/gpt-5.4",
+      "variant": "xhigh",
+      "description": "Subscription-backed OpenAI fallback for implementation."
+    },
+    "builder-gpt55-opencode": {
       "model": "opencode/gpt-5.5",
       "variant": "high",
-      "description": "Default model for implementation workers.",
-      "fallbackModelProfiles": ["builder-same-model-openrouter", "research-default"]
+      "description": "Same logical model through a usage-based provider. Keep after subscription-backed fallbacks."
     },
-    "builder-same-model-openrouter": {
-      "model": "openrouter/gpt-5.5",
-      "variant": "high",
-      "description": "Provider fallback for the same logical model when the primary provider is overloaded or unavailable."
+    "builder-claude-sonnet": {
+      "model": "opencode/claude-sonnet-4-6",
+      "variant": "max",
+      "description": "Different model family fallback for implementation."
     },
-    "research-default": {
-      "model": "opencode/gpt-5.5",
+    "analysis-default": {
+      "model": "openai/gpt-5.5",
       "variant": "medium",
-      "description": "Default model for read-only analysis and QA."
+      "description": "Default model for research, QA, and triage.",
+      "fallbackModelProfiles": [
+        "analysis-gpt54-openai",
+        "analysis-gpt55-opencode",
+        "analysis-claude-sonnet"
+      ]
+    },
+    "analysis-gpt54-openai": {
+      "model": "openai/gpt-5.4",
+      "variant": "xhigh",
+      "description": "Subscription-backed OpenAI fallback for analysis work."
+    },
+    "analysis-gpt55-opencode": {
+      "model": "opencode/gpt-5.5",
+      "variant": "high",
+      "description": "Same logical analysis model through a usage-based provider."
+    },
+    "analysis-claude-sonnet": {
+      "model": "opencode/claude-sonnet-4-6",
+      "variant": "max",
+      "description": "Different model family fallback for analysis."
+    },
+    "control-default": {
+      "model": "openai/gpt-5.5",
+      "variant": "medium",
+      "description": "Control-plane and orchestrator model.",
+      "fallbackModelProfiles": [
+        "control-gpt54-openai",
+        "control-gpt55-opencode",
+        "control-haiku"
+      ]
+    },
+    "control-gpt54-openai": {
+      "model": "openai/gpt-5.4",
+      "variant": "xhigh",
+      "description": "Subscription-backed OpenAI fallback for control-plane requests."
+    },
+    "control-gpt55-opencode": {
+      "model": "opencode/gpt-5.5",
+      "variant": "high",
+      "description": "Usage-based provider fallback for control-plane requests."
+    },
+    "control-haiku": {
+      "model": "opencode/claude-haiku-4-5",
+      "description": "Small-model fallback for simple routing/control tasks."
     }
   },
   "workerProfiles": {
@@ -78,16 +144,16 @@
       "modelProfile": "builder-default"
     },
     "researcher": {
-      "modelProfile": "research-default"
+      "modelProfile": "analysis-default"
     },
     "qa": {
-      "modelProfile": "research-default"
+      "modelProfile": "analysis-default"
     },
     "triager": {
-      "modelProfile": "research-default"
+      "modelProfile": "analysis-default"
     },
     "orchestrator": {
-      "modelProfile": "research-default"
+      "modelProfile": "control-default"
     }
   },
   "reporting": {
