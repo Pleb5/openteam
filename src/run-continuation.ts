@@ -1,3 +1,4 @@
+import {createHash} from "node:crypto"
 import {evaluateEvidencePolicy} from "./evidence-policy.js"
 import type {TaskContinuation, TaskContinuationKind, TaskItem, TaskRunRecord, VerificationRunnerResult} from "./types.js"
 
@@ -10,8 +11,15 @@ const slug = (value: string) =>
 
 const now = () => new Date().toISOString()
 
+const compactContinuationSource = (record: TaskRunRecord): string => {
+  const source = record.continuation?.originRunId || record.continuation?.fromRunId || record.taskId || record.runId
+  const readable = slug(source).slice(0, 24) || "run"
+  const digest = createHash("sha256").update(source).digest("hex").slice(0, 10)
+  return `${readable}-${digest}`
+}
+
 const taskId = (kind: TaskContinuationKind, record: TaskRunRecord) =>
-  `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${kind}-${slug(record.taskId || record.runId)}`
+  `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${kind}-${compactContinuationSource(record)}`
 
 const summarizeResult = (result: VerificationRunnerResult) => {
   const details = result.note ?? result.flow ?? result.url ?? result.blocker ?? result.error ?? result.skippedReason ?? result.logFile ?? ""
@@ -36,6 +44,7 @@ export const createRunContinuation = (
     version: 1,
     kind,
     fromRunId: record.runId,
+    originRunId: record.continuation?.originRunId ?? record.continuation?.fromRunId ?? record.runId,
     fromRunFile: record.runFile,
     contextId: record.context.id,
     checkout: record.context.checkout,

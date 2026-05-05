@@ -5,6 +5,7 @@ import {spawn} from "node:child_process"
 import {spawnSync} from "node:child_process"
 import path from "node:path"
 import process from "node:process"
+import {agentBrowserSocketDir} from "./agent-browser-runtime.js"
 import {startBunker, type RunningBunker} from "./bunker.js"
 import {consolePrompt} from "./commands/console.js"
 import {cleanupStaleRuns, cleanupStaleRunsForContext} from "./commands/runs.js"
@@ -160,6 +161,7 @@ export const checkoutRuntimeEnv = (checkout: string, env: Record<string, string>
     BUN_INSTALL_CACHE_DIR: dirs.bunCache,
     npm_config_store_dir: dirs.pnpmStore,
     ...env,
+    AGENT_BROWSER_SOCKET_DIR: agentBrowserSocketDir(env),
     PATH: pathValue,
   }
 }
@@ -527,6 +529,7 @@ const writeOcfg = async (agent: PreparedAgent, checkout: string, runtime?: Agent
           OPENTEAM_TMP_DIR: runtimeDirs.tmp,
           OPENTEAM_CACHE_DIR: runtimeDirs.cache,
           OPENTEAM_ARTIFACTS_DIR: runtimeDirs.artifacts,
+          AGENT_BROWSER_SOCKET_DIR: agentBrowserSocketDir(mcp.environment),
           OPENTEAM_BROWSER_PROFILE: path.join(agent.paths.browser, "profile"),
           OPENTEAM_BUNKER_URL: runtime?.bunker?.uri ?? "",
           OPENTEAM_AGENT_NPUB: getSelfNpub(agent),
@@ -545,7 +548,9 @@ const agentBrowserToolSource = (input: {
   allowedDomains: string[]
   maxOutputChars: number
 }) => `import { tool } from "@opencode-ai/plugin"
+import { createHash } from "node:crypto"
 import { mkdir, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import path from "node:path"
 
 const BINARY = ${JSON.stringify(input.command)}
@@ -565,8 +570,16 @@ const dirs = (directory: string) => {
 const safeName = (value: string) =>
   value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "artifact"
 
+const shortHash = (value: string) => createHash("sha256").update(value || "session").digest("hex").slice(0, 16)
+
 const sessionName = () =>
-  "openteam-" + safeName(process.env.OPENTEAM_RUN_ID || process.env.OPENTEAM_TASK_MANIFEST || process.cwd())
+  "ot-" + shortHash(process.env.OPENTEAM_RUN_ID || process.env.OPENTEAM_TASK_MANIFEST || process.cwd())
+
+const socketDir = () => {
+  const configured = CONFIG_ENV.AGENT_BROWSER_SOCKET_DIR?.trim() || process.env.AGENT_BROWSER_SOCKET_DIR?.trim()
+  if (configured) return configured
+  return path.join(tmpdir(), "ot-ab-" + (typeof process.getuid === "function" ? String(process.getuid()) : "user"))
+}
 
 const artifactPath = (directory: string, name: string, ext: string) =>
   path.join(dirs(directory).artifacts, safeName(name) + "-" + Date.now() + "." + ext)
@@ -578,6 +591,7 @@ const setupEnv = async (directory: string) => {
   return {
     ...process.env,
     ...CONFIG_ENV,
+    AGENT_BROWSER_SOCKET_DIR: socketDir(),
     OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR: browserDirs.artifacts,
     OPENTEAM_AGENT_BROWSER_PROFILE_DIR: browserDirs.profile,
     OPENTEAM_BROWSER_CLI_ARTIFACTS_DIR: browserDirs.artifacts,

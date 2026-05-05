@@ -57,6 +57,7 @@ const verificationInstructionLines = (input: {mode: "code" | "web"; url?: string
 
   return [
     ...base,
+    `Use $OPENTEAM_ARTIFACTS_DIR as the artifact root. Do not assume checkout-local .openteam/artifacts exists; bulk artifacts may live in the sibling runtime directory.`,
     `If evidence is missing or weak, the run will finish as needs-review; continue verification or report a concrete blocker rather than claiming complete success.`,
   ]
 }

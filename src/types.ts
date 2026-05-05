@@ -295,6 +295,7 @@ export type TaskContinuation = {
   version: 1
   kind: TaskContinuationKind
   fromRunId: string
+  originRunId?: string
   fromRunFile?: string
   contextId: string
   checkout?: string

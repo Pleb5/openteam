@@ -4,6 +4,7 @@ import {mkdir, mkdtemp, readFile, writeFile} from "node:fs/promises"
 import {spawnSync} from "node:child_process"
 import {tmpdir} from "node:os"
 import path from "node:path"
+import {agentBrowserSessionName, agentBrowserSocketDir} from "../src/agent-browser-runtime.js"
 import {browserInspection} from "../src/commands/browser.js"
 import {acceptsControlDms} from "../src/commands/profile.js"
 import {cleanupStaleRunsForContext, runEvidenceView, stopRunRecord, summarizeRuns} from "../src/commands/runs.js"
@@ -1056,6 +1057,32 @@ describe("runtime invariants", () => {
     expect(item.modelProfile).toBeUndefined()
   })
 
+  test("continuation task ids stay compact across repeated resumes", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const root = runRecord(app, {
+      runId: "builder-01-20260505062958-original-task-with-a-readable-description",
+      taskId: "20260505062958-original-task-with-a-readable-description",
+      context: {
+        id: "ctx1",
+        checkout: path.join(runtimeRoot, "checkout"),
+        branch: "openteam/test",
+      },
+    })
+    const secondRecord = runRecord(app, {
+      runId: "builder-01-20260505105136-continue-20260505090542-continue-20260505062958-original-task-with-a-readable-description",
+      taskId: "20260505105136-continue-20260505090542-continue-20260505062958-original-task-with-a-readable-description",
+      context: root.context,
+      continuation: createContinuationTaskItem(root, {kind: "continue"}).continuation,
+    })
+
+    const item = createContinuationTaskItem(secondRecord, {kind: "continue"})
+
+    expect(item.id.length).toBeLessThanOrEqual(60)
+    expect(item.id).not.toContain("continue-20260505090542-continue")
+    expect(item.continuation?.originRunId).toBe(root.runId)
+  })
+
   test("continuation resolution leases the prior idle context without rediscovery", async () => {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
     const app = makeApp(runtimeRoot)
@@ -1647,7 +1674,7 @@ describe("runtime invariants", () => {
           command: [
             "sh",
             "-c",
-            "test -d \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" && test \"$AGENT_BROWSER_EXECUTABLE_PATH\" = \"/usr/bin/chromium\" && test \"$OPENTEAM_AGENT_BROWSER_SESSION\" = \"openteam-run-123\" && printf \"$OPENTEAM_AGENT_BROWSER_SESSION\" > \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/session.txt\"",
+            `test -d "$OPENTEAM_AGENT_BROWSER_PROFILE_DIR" && test "$AGENT_BROWSER_EXECUTABLE_PATH" = "/usr/bin/chromium" && test "$OPENTEAM_AGENT_BROWSER_SESSION" = "${agentBrowserSessionName("run:123")}" && test -n "$AGENT_BROWSER_SOCKET_DIR" && printf "$OPENTEAM_AGENT_BROWSER_SESSION" > "$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/session.txt"`,
           ],
           artifactsDir: ".openteam/artifacts/verification/agent-browser",
         },
@@ -1655,7 +1682,8 @@ describe("runtime invariants", () => {
     }
 
     const plan = createVerificationPlan(app, "web", {stacks: ["web"]})
-    const results = await runLocalVerificationRunners({checkout, plan, env: {OPENTEAM_RUN_ID: "run:123"}})
+    const artifactsRoot = path.join(runtimeRoot, "artifacts")
+    const results = await runLocalVerificationRunners({checkout, plan, env: {OPENTEAM_RUN_ID: "run:123", OPENTEAM_ARTIFACTS_DIR: artifactsRoot}})
     const evidence = runEvidenceView(runRecord(app, {
       mode: "web",
       state: "succeeded",
@@ -1683,10 +1711,10 @@ describe("runtime invariants", () => {
     expect(plan.runners.find(runner => runner.id === "agent-browser")?.kind).toBe("browser-cli")
     expect(agentBrowserResult?.state).toBe("succeeded")
     expect(agentBrowserResult?.evidenceType).toBe("browser")
-    expect(agentBrowserResult?.artifacts).toContain(".openteam/artifacts/verification/agent-browser")
-    expect(agentBrowserResult?.logFile).toContain(path.join(".openteam", "artifacts", "verification", "agent-browser"))
-    expect(existsSync(path.join(checkout, ".openteam", "artifacts", "verification", "agent-browser", "profile"))).toBe(true)
-    expect(await readFile(path.join(checkout, ".openteam", "artifacts", "verification", "agent-browser", "session.txt"), "utf8")).toBe("openteam-run-123")
+    expect(agentBrowserResult?.artifacts).toContain(path.join(artifactsRoot, "verification", "agent-browser"))
+    expect(agentBrowserResult?.logFile).toContain(path.join(artifactsRoot, "verification", "agent-browser"))
+    expect(existsSync(path.join(artifactsRoot, "verification", "agent-browser", "profile"))).toBe(true)
+    expect(await readFile(path.join(artifactsRoot, "verification", "agent-browser", "session.txt"), "utf8")).toBe(agentBrowserSessionName("run:123"))
     expect(evidence.groupSummary.browser).toBe(1)
     expect(evidence.level).toBe("strong")
   })
@@ -1862,6 +1890,8 @@ describe("runtime invariants", () => {
     expect(source).toContain("export const record_evidence = tool")
     expect(source).toContain("--session")
     expect(source).toContain("sessionName()")
+    expect(source).toContain('"ot-" + shortHash')
+    expect(source).toContain("AGENT_BROWSER_SOCKET_DIR")
     expect(source).toContain("--allowed-domains")
     expect(source).toContain("--console-file")
     expect(source).not.toContain('"--all"')
@@ -1897,6 +1927,15 @@ describe("runtime invariants", () => {
     const orchestrator = await prepareAgent(app, "orchestrator-01", {runtimeId: "agent-browser-tools-test-orchestrator"})
     expect(await writeAgentBrowserTools(orchestrator, checkout)).toBeUndefined()
     expect(existsSync(toolFile)).toBe(false)
+  })
+
+  test("agent-browser runtime helpers keep unix socket paths short", () => {
+    const runId = "builder-01-20260505112551-continue-20260505105136-continue-20260505090542-continue"
+    const session = agentBrowserSessionName(runId)
+    const socketDir = agentBrowserSocketDir({})
+
+    expect(session).toMatch(/^ot-[a-f0-9]{16}$/)
+    expect(path.join(socketDir, `${session}.sock`).length).toBeLessThanOrEqual(103)
   })
 
   test("verify command resolves checkout from worker runtime environment", async () => {
@@ -2134,6 +2173,7 @@ describe("runtime invariants", () => {
     expect(env.TEMP).toBe("/repo/.openteam-runtime/tmp")
     expect(env.XDG_CACHE_HOME).toBe("/repo/.openteam-runtime/cache")
     expect(env.OPENTEAM_ARTIFACTS_DIR).toBe("/repo/.openteam-runtime/artifacts")
+    expect(env.AGENT_BROWSER_SOCKET_DIR).toBe(agentBrowserSocketDir({}))
     expect(env.OPENTEAM_CHECKOUT).toBe("/repo/checkout")
     expect(env.OPENTEAM_CHECKOUT_RUNTIME_DIR).toBe("/repo/.openteam-runtime")
     expect(env.npm_config_cache).toBe("/repo/.openteam-runtime/cache/npm")

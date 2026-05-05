@@ -3,6 +3,7 @@ import {spawn, spawnSync} from "node:child_process"
 import {mkdir, readFile, writeFile} from "node:fs/promises"
 import process from "node:process"
 import path from "node:path"
+import {agentBrowserSessionName, agentBrowserSocketDir} from "./agent-browser-runtime.js"
 import {wrapDevEnvCommand, type DevEnv} from "./dev-env.js"
 import {projectProfilePath, type ProjectProfile, type ProjectCommandHint} from "./project-profile.js"
 import type {
@@ -277,9 +278,6 @@ const safeName = (value: string) =>
     .replace(/^-+|-+$/g, "")
     .slice(0, 80) || "runner"
 
-const agentBrowserSessionName = (checkout: string, env: Record<string, string>) =>
-  `openteam-${safeName(env.OPENTEAM_RUN_ID || process.env.OPENTEAM_RUN_ID || checkout)}`
-
 const commandKey = (command: string[]) => command.join("\0")
 
 const firstProfileCommand = (profile?: ProjectProfile) => {
@@ -325,23 +323,28 @@ const relativeArtifactPath = (checkout: string, value: string) => {
   return relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : value
 }
 
-const verificationArtifactsDir = async (checkout: string, runner?: VerificationRunnerPlan) => {
-  const dir = resolveCheckoutPath(checkout, runner?.artifactsDir ?? VERIFICATION_ARTIFACTS_DIR)
+const verificationArtifactsDir = async (checkout: string, runner?: VerificationRunnerPlan, env: Record<string, string> = {}) => {
+  const baseArtifactsDir = env.OPENTEAM_ARTIFACTS_DIR || process.env.OPENTEAM_ARTIFACTS_DIR
+  const value = runner?.kind === "browser-cli" && baseArtifactsDir
+    ? path.join(baseArtifactsDir, "verification", runner.id)
+    : runner?.artifactsDir ?? VERIFICATION_ARTIFACTS_DIR
+  const dir = resolveCheckoutPath(checkout, value)
   await mkdir(dir, {recursive: true})
   return dir
 }
 
-const logFileForRunner = async (checkout: string, runner: VerificationRunnerPlan) =>
-  path.join(await verificationArtifactsDir(checkout, runner), `${safeName(runner.id)}-${Date.now()}.log`)
+const logFileForRunner = async (checkout: string, runner: VerificationRunnerPlan, env: Record<string, string>) =>
+  path.join(await verificationArtifactsDir(checkout, runner, env), `${safeName(runner.id)}-${Date.now()}.log`)
 
 const runnerExecutionEnv = async (checkout: string, runner: VerificationRunnerPlan, env: Record<string, string>): Promise<Record<string, string>> => {
   if (runner.kind !== "browser-cli") return {}
 
-  const artifactsDir = await verificationArtifactsDir(checkout, runner)
+  const artifactsDir = await verificationArtifactsDir(checkout, runner, env)
   const profileDir = path.join(artifactsDir, "profile")
   await mkdir(profileDir, {recursive: true})
-  const session = agentBrowserSessionName(checkout, env)
+  const session = agentBrowserSessionName(env.OPENTEAM_RUN_ID || process.env.OPENTEAM_RUN_ID || checkout)
   return {
+    AGENT_BROWSER_SOCKET_DIR: agentBrowserSocketDir(env),
     OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR: artifactsDir,
     OPENTEAM_AGENT_BROWSER_PROFILE_DIR: profileDir,
     OPENTEAM_AGENT_BROWSER_SESSION: session,
@@ -402,8 +405,8 @@ const runCommand = async (
 ) => {
   const startedAt = now()
   const started = Date.now()
-  const logFile = await logFileForRunner(checkout, runner)
   const executionEnv = await runnerExecutionEnv(checkout, runner, env)
+  const logFile = await logFileForRunner(checkout, runner, {...env, ...executionEnv})
   const artifacts = commandArtifactsForRunner(checkout, runner, executionEnv)
   const stream = createWriteStream(logFile, {flags: "a"})
   const [cmd, ...args] = command
