@@ -1531,6 +1531,24 @@ const resolveBaseCommit = (mirror: string, baseRef: string) => {
   throw new Error(`unable to resolve base ref ${baseRef} in ${mirror}`)
 }
 
+export const resolveFreshRepoBaseCommit = async (
+  app: AppCfg,
+  identity: RepoIdentity,
+  options: {
+    targetHint?: string
+    baseRef?: string
+  } = {},
+): Promise<{baseRef: string; baseCommit: string; source: string}> => {
+  const sources = cloneSources(identity, options.targetHint)
+  const resolved = await ensureMirrorFromSources(app, identity, sources)
+  const baseRef = options.baseRef || identity.defaultBranch || "HEAD"
+  return {
+    baseRef,
+    baseCommit: resolveBaseCommit(resolved.mirror, baseRef),
+    source: resolved.source,
+  }
+}
+
 const lease = (context: RepoContext, agent: PreparedAgent, item: TaskItem, mode: TaskMode): RepoContext => ({
   ...context,
   state: "leased",

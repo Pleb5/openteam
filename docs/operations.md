@@ -100,6 +100,8 @@ Configured GRASP servers are the fallback fork namespace: openteam derives fork 
 For explicit non-provider deployments, fork population still uses normal Git smart HTTP: openteam derives or reads a writable fork clone URL, pushes upstream heads/tags to it, then announces the fork on Nostr.
 For Nostr-native clone URLs that include the upstream owner npub/pubkey in the path, fork clone URL derivation replaces that owner path segment with the orchestrator npub and uses the repository announcement `d` tag as the fork repo name.
 One-off jobs launched through the orchestrator get isolated runtime directories, state files, browser profiles, Playwright artifacts, logs, and run records.
+For new non-continuation work, openteam refreshes the repo object cache before selecting the base commit; idle same-repo contexts are reused only when their recorded base commit is still current.
+Continuations intentionally preserve the prior checkout and do not fetch, rebase, or refresh the base automatically.
 Different Nostr repo targets can run concurrently.
 The same canonical Nostr repo is serialized by default; use the explicit `in parallel` operator phrase, or `--parallel` on direct `launch`, to create a separate same-repo context.
 Current one-off job limits are deliberately small: builder 2, researcher 2, qa 1, triager 1.
@@ -234,6 +236,7 @@ Worker process policy:
 - if the only owner announcements matching a submodule clone URL are deleted, PR publication must fail instead of falling back to the orchestrator fork or stale d-tag
 - submodule checkouts must not rely on host-global Git credentials; openteam disables ambient submodule credential helpers during preparation and rewires submodule `origin` to the openteam fork before publishing
 - Normal `repo publish pr` and `repo publish pr-update` require strong evidence from the active run/checkout; use `--draft` or `--wip` only when incomplete verification is intentional
+- Normal `repo publish pr` and `repo publish pr-update` also verify that the checkout-local base snapshot is still current; stale bases block normal publication, while `--draft`, `--wip`, and `--dry-run` report the stale-base metadata without publishing a normal open/update event
 - workers should treat GUI openers, system package installs, writes outside checkout/runtime, and broad destructive cleanup as blockers unless explicitly authorized
 - non-orchestrator workers should not ask interactive questions or inspect orchestrator lifecycle internals such as stale cleanup, continuation gates, worker stopping, repo-context lease release, or `runtime/runs`; see `docs/opencode-runtime-behavior-plan.md`
 

@@ -2064,6 +2064,7 @@ export const runTask = async (
         id: contextId,
         checkout,
         branch,
+        baseRef: resolved.context.baseRef,
         baseCommit: resolved.context.baseCommit,
       },
       ...(mode === "web" ? {browser: browserRunInfo(agent)} : {}),

@@ -139,7 +139,9 @@ export type TaskManifest = {
     contextId: string
     checkout: string
     branch: string
+    baseRef?: string
     baseCommit?: string
+    upstreamBaseRef?: string
     repo: ManifestRepoIdentity
     upstreamRepo?: ManifestRepoIdentity
     fork?: {
@@ -307,7 +309,9 @@ export const buildTaskManifest = (input: BuildTaskManifestInput): TaskManifest =
       contextId: input.resolved.context.id,
       checkout,
       branch: input.resolved.context.branch,
+      baseRef: input.resolved.context.baseRef,
       baseCommit: input.resolved.context.baseCommit,
+      upstreamBaseRef: input.resolved.upstreamIdentity ? input.resolved.context.baseRef : undefined,
       repo: repoIdentitySummary(input.resolved.identity),
       upstreamRepo: input.resolved.upstreamIdentity
         ? repoIdentitySummary(input.resolved.upstreamIdentity)

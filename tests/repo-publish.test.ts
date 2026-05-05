@@ -21,6 +21,7 @@ import {
   preparePullRequestSourceCloneUrls,
   pullRequestCloneUrlsForTarget,
   repoMaintainerPubkeys,
+  resolvePullRequestBaseFreshness,
   upstreamPullRequestNeedsClone,
 } from "../src/repo-publish.js"
 import type {AppCfg} from "../src/types.js"
@@ -34,6 +35,25 @@ const runGit = (cwd: string, args: string[]) => {
   const result = spawnSync("git", args, {cwd, encoding: "utf8"})
   if (result.status !== 0) throw new Error(result.stderr.trim() || `git ${args.join(" ")} failed`)
   return result.stdout.trim()
+}
+
+const initPublishRepo = async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "openteam-publish-repo-"))
+  runGit(root, ["init"])
+  runGit(root, ["config", "user.email", "test@example.com"])
+  runGit(root, ["config", "user.name", "Test User"])
+  await writeFile(path.join(root, "README.md"), "base\n")
+  runGit(root, ["add", "README.md"])
+  runGit(root, ["commit", "-m", "base"])
+  const base = runGit(root, ["rev-parse", "HEAD"])
+  return {root, base}
+}
+
+const advancePublishRepo = async (root: string) => {
+  await writeFile(path.join(root, "fresh.txt"), `fresh ${Date.now()}\n`)
+  runGit(root, ["add", "fresh.txt"])
+  runGit(root, ["commit", "-m", "fresh"])
+  return runGit(root, ["rev-parse", "HEAD"])
 }
 
 const testApp = (runtimeRoot: string): AppCfg => ({
@@ -342,5 +362,56 @@ describe("repo publish event builders", () => {
     const {file} = await writeContext({defaultScope: "upstream"})
 
     await expect(loadRepoPublishContext(file)).rejects.toThrow("missing upstreamRepo")
+  })
+
+  test("reports current and stale PR base snapshots from a fresh mirror", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-publish-runtime-"))
+    const {root, base} = await initPublishRepo()
+    const repo = {...validIdentity, cloneUrls: [root], defaultBranch: "master"}
+    const target = {
+      scope: "repo" as const,
+      identity: repo,
+      target: "repo",
+      context: {
+        version: 1 as const,
+        agentId: "builder-01",
+        target: "repo",
+        checkout: root,
+        defaultScope: "repo" as const,
+        baseRef: "master",
+        baseCommit: base,
+        repo,
+        policy: validPolicy,
+      },
+    }
+
+    const current = await resolvePullRequestBaseFreshness(testApp(runtimeRoot), target)
+    expect(current.enforced).toBe(true)
+    expect(current.stale).toBe(false)
+    expect(current.allowed).toBe(true)
+
+    const latest = await advancePublishRepo(root)
+    const stale = await resolvePullRequestBaseFreshness(testApp(runtimeRoot), target)
+    expect(stale.stale).toBe(true)
+    expect(stale.allowed).toBe(false)
+    expect(stale.contextBaseCommit).toBe(base)
+    expect(stale.currentBaseCommit).toBe(latest)
+
+    expect((await resolvePullRequestBaseFreshness(testApp(runtimeRoot), target, {dryRun: true})).allowed).toBe(true)
+    expect((await resolvePullRequestBaseFreshness(testApp(runtimeRoot), target, {draft: true})).allowed).toBe(true)
+  })
+
+  test("skips stale-base enforcement when no context or run base commit exists", async () => {
+    const {root} = await initPublishRepo()
+    const repo = {...validIdentity, cloneUrls: [root], defaultBranch: "master"}
+    const freshness = await resolvePullRequestBaseFreshness(testApp(await mkdtemp(path.join(tmpdir(), "openteam-publish-runtime-"))), {
+      scope: "repo" as const,
+      identity: repo,
+      target: "repo",
+    })
+
+    expect(freshness.enforced).toBe(false)
+    expect(freshness.allowed).toBe(true)
+    expect(freshness.reason).toContain("skipped")
   })
 })

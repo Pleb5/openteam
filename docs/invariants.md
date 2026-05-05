@@ -10,6 +10,9 @@ These are runtime rules that must be enforced by code and tests, not only by age
 - The same repo serializes by default; parallel same-repo work requires explicit `parallel` mode.
 - Cleanup may only release a context when the lease still matches the run being cleaned up.
 - Cleanup must not delete checkouts.
+- New non-continuation runs must refresh the repo mirror/object cache before selecting their base commit.
+- Idle contexts may be reused only when their recorded `baseCommit` still matches the freshly resolved base for the same repo and mode.
+- Continuations must preserve the prior checkout and must not fetch, rebase, or mutate the base automatically.
 
 ## Worker Boundaries
 
@@ -52,6 +55,7 @@ These are runtime rules that must be enforced by code and tests, not only by age
 - Each new worker run should have a done contract describing required evidence, success policy, and PR policy.
 - A successful worker phase with missing or weak evidence must finish as `needs-review`, not plain `succeeded`.
 - Normal PR publication should be gated on strong worker-produced verification evidence unless the task explicitly asks for draft/WIP output.
+- Normal PR publication and PR update publication must block when the checkout-local base snapshot is stale; draft/WIP and dry-run paths may report stale-base metadata without blocking.
 - Run observation must be deterministic and side-effect-light: observation may write `runtime/orchestrator/observations.json` and reports, but it must not mutate run records, start workers, stop workers, or clean leases.
 - Guarded mobile-native runners must not install SDKs, boot emulators, create simulators, or write outside the managed checkout/runtime.
 - Runtime checks should produce exact invariant failure messages, not heuristic supervision.

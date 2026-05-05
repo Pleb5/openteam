@@ -632,6 +632,7 @@ export type TaskRunRecord = {
     id: string
     checkout: string
     branch: string
+    baseRef?: string
     baseCommit?: string
   }
   devEnv?: {

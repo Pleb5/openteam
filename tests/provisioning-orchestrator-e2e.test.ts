@@ -232,6 +232,13 @@ const initRepo = async () => {
   return root
 }
 
+const commitChange = async (root: string, name: string, content: string) => {
+  await writeFile(path.join(root, name), content)
+  runGit(root, ["add", name])
+  runGit(root, ["commit", "-m", `change ${name}`])
+  return runGit(root, ["rev-parse", "HEAD"])
+}
+
 const appWithSeededRepo = async (identifier = "repo") => {
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
   const app = makeApp(runtimeRoot)
@@ -493,7 +500,105 @@ describe("Round 2 - repo context leasing and provisioning handoff", () => {
     })
 
     expect(second.context.id).toBe(first.context.id)
+    expect(second.context.baseCommit).toBe(first.context.baseCommit)
     expect(second.context.lease?.jobId).toBe("task-b")
+  })
+
+  test("new work resolves latest upstream after the object cache already exists", async () => {
+    const {app, root} = await appWithSeededRepo()
+    const agent = await prepareAgent(app, "builder-01")
+    const first = await resolveRepoTarget(app, agent, {
+      id: "task-a",
+      task: "first",
+      createdAt: "",
+      state: "queued",
+      agentId: "builder-01",
+      target: "repo",
+      mode: "code",
+    })
+    await releaseRepoContext(app, first.context.id, {workerId: "builder-01", jobId: "task-a"})
+    const latest = await commitChange(root, "fresh.txt", "fresh\n")
+
+    const second = await resolveRepoTarget(app, agent, {
+      id: "task-b",
+      task: "second",
+      createdAt: "",
+      state: "queued",
+      agentId: "builder-01",
+      target: "repo",
+      mode: "code",
+    })
+
+    expect(second.context.baseCommit).toBe(latest)
+  })
+
+  test("idle context is not reused after upstream base advances", async () => {
+    const {app, root} = await appWithSeededRepo()
+    const agent = await prepareAgent(app, "builder-01")
+    const first = await resolveRepoTarget(app, agent, {
+      id: "task-a",
+      task: "first",
+      createdAt: "",
+      state: "queued",
+      agentId: "builder-01",
+      target: "repo",
+      mode: "code",
+    })
+    await releaseRepoContext(app, first.context.id, {workerId: "builder-01", jobId: "task-a"})
+    await commitChange(root, "advance.txt", "advance\n")
+
+    const second = await resolveRepoTarget(app, agent, {
+      id: "task-b",
+      task: "second",
+      createdAt: "",
+      state: "queued",
+      agentId: "builder-01",
+      target: "repo",
+      mode: "code",
+    })
+
+    expect(second.context.id).not.toBe(first.context.id)
+    expect(second.context.baseCommit).not.toBe(first.context.baseCommit)
+  })
+
+  test("continuation reuses prior context even if upstream advanced", async () => {
+    const {app, root} = await appWithSeededRepo()
+    const agent = await prepareAgent(app, "builder-01")
+    const first = await resolveRepoTarget(app, agent, {
+      id: "task-a",
+      task: "first",
+      createdAt: "",
+      state: "queued",
+      agentId: "builder-01",
+      target: "repo",
+      mode: "code",
+    })
+    await releaseRepoContext(app, first.context.id, {workerId: "builder-01", jobId: "task-a"})
+    await commitChange(root, "later.txt", "later\n")
+
+    const continued = await resolveRepoTarget(app, agent, {
+      id: "task-b",
+      task: "continue",
+      createdAt: "",
+      state: "queued",
+      agentId: "builder-01",
+      mode: "code",
+      continuation: {
+        version: 1,
+        kind: "continue",
+        fromRunId: "task-a",
+        contextId: first.context.id,
+        priorState: "needs-review",
+        missingEvidence: [],
+        prBlockers: [],
+        carryEvidence: false,
+        evidenceResults: [],
+        createdAt: "",
+      },
+    })
+
+    expect(continued.context.id).toBe(first.context.id)
+    expect(continued.context.baseCommit).toBe(first.context.baseCommit)
   })
 
   test("explicit parallel work creates a separate context even when an idle context exists", async () => {

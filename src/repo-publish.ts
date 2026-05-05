@@ -20,6 +20,7 @@ import {configureCheckoutGitAuth, gitAuthEnv} from "./git-auth.js"
 import {publishEventDetailed, secretKey, type PublishSummary} from "./nostr.js"
 import {
   ensureOrchestratorForkForRepo,
+  resolveFreshRepoBaseCommit,
   resolveRepoAnnouncementTarget,
   resolveOwnerRepoAnnouncementByCloneUrl,
   resolveRepoRelayPolicy,
@@ -64,6 +65,9 @@ export type RepoPublishContext = {
   contextId?: string
   checkout?: string
   defaultScope?: RepoPublishScope
+  baseRef?: string
+  baseCommit?: string
+  upstreamBaseRef?: string
   repo: RepoIdentity
   upstreamRepo?: RepoIdentity
   policy: RepoRelayPolicy
@@ -97,6 +101,19 @@ export type RepoPublishResult = {
   relays: string[]
   event: UnsignedRepoEvent
   publish?: PublishSummary
+}
+
+export type PullRequestBaseFreshness = {
+  enforced: boolean
+  stale: boolean
+  allowed: boolean
+  dryRun: boolean
+  draft: boolean
+  reason?: string
+  baseRef?: string
+  contextBaseCommit?: string
+  currentBaseCommit?: string
+  source?: string
 }
 
 type ResolveOptions = {
@@ -325,6 +342,9 @@ export const writeRepoPublishContext = async (
     contextId: resolved.context.id,
     checkout: resolved.context.checkout,
     defaultScope,
+    baseRef: resolved.context.baseRef,
+    baseCommit: resolved.context.baseCommit,
+    upstreamBaseRef: resolved.upstreamIdentity ? resolved.context.baseRef : undefined,
     repo: resolved.identity,
     upstreamRepo: resolved.upstreamIdentity,
     policy,
@@ -863,6 +883,62 @@ export const preparePullRequestSourceCloneUrls = async (
 export const upstreamPullRequestNeedsClone = (
   target: Pick<ResolvedRepoPublishTarget, "scope" | "identity" | "context">,
 ) => target.scope === "upstream" && Boolean(target.context?.repo && target.context.repo.key !== target.identity.key)
+
+export const resolvePullRequestBaseFreshness = async (
+  app: AppCfg,
+  target: Pick<ResolvedRepoPublishTarget, "scope" | "identity" | "context" | "target">,
+  options: {
+    dryRun?: boolean
+    draft?: boolean
+    runBaseRef?: string
+    runBaseCommit?: string
+  } = {},
+): Promise<PullRequestBaseFreshness> => {
+  const dryRun = options.dryRun ?? false
+  const draft = options.draft ?? false
+  const baseCommit = target.context?.baseCommit || options.runBaseCommit
+  const baseRef = (
+    target.scope === "upstream"
+      ? target.context?.upstreamBaseRef || target.context?.baseRef
+      : target.context?.baseRef
+  ) || options.runBaseRef || target.identity.defaultBranch || "HEAD"
+
+  if (!baseCommit) {
+    return {
+      enforced: false,
+      stale: false,
+      allowed: true,
+      dryRun,
+      draft,
+      baseRef,
+      reason: "context base commit unavailable; skipped stale-base enforcement",
+    }
+  }
+
+  const current = await resolveFreshRepoBaseCommit(app, target.identity, {
+    targetHint: target.target,
+    baseRef,
+  })
+  const stale = current.baseCommit !== baseCommit
+  return {
+    enforced: true,
+    stale,
+    allowed: !stale || dryRun || draft,
+    dryRun,
+    draft,
+    baseRef: current.baseRef,
+    contextBaseCommit: baseCommit,
+    currentBaseCommit: current.baseCommit,
+    source: current.source,
+    reason: stale
+      ? dryRun
+        ? "base is stale; dry-run reports without blocking"
+        : draft
+          ? "base is stale; draft/WIP publication allowed"
+          : "base is stale; normal PR publication blocked"
+      : "base is current",
+  }
+}
 
 export const publishPolicySummary = (target: ResolvedRepoPublishTarget) => ({
   scope: target.scope,

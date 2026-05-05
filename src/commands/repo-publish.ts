@@ -16,6 +16,7 @@ import {
   publishRepoEvent,
   repoMaintainerPubkeys,
   repoAddrForPublishTarget,
+  resolvePullRequestBaseFreshness,
   resolveRepoPublishTarget,
   type ExtraTags,
   type RepoPublishScope,
@@ -214,6 +215,29 @@ const assertPullRequestPublicationAllowed = async (
   ].join("\n"))
 }
 
+const assertPullRequestBaseCurrent = async (
+  app: AppCfg,
+  target: Awaited<ReturnType<typeof resolveRepoPublishTarget>>,
+  args: string[],
+  dryRun: boolean,
+) => {
+  const record = await readRunRecordFromEnv()
+  const freshness = await resolvePullRequestBaseFreshness(app, target, {
+    dryRun,
+    draft: draftRequested(args),
+    runBaseCommit: record?.context?.baseCommit,
+    runBaseRef: record?.context?.baseRef,
+  })
+  if (freshness.allowed) return freshness
+  throw new Error([
+    `PR publication blocked: ${freshness.reason}`,
+    `base ref: ${freshness.baseRef ?? "unknown"}`,
+    `run base: ${freshness.contextBaseCommit ?? "unknown"}`,
+    `current base: ${freshness.currentBaseCommit ?? "unknown"}`,
+    "Refresh or start from the current base, or explicitly publish a draft/WIP PR with --draft or --wip.",
+  ].join("\n"))
+}
+
 export const repoPolicyCommand = async (app: AppCfg, args: string[]) => {
   const target = await resolveRepoPublishTarget(app, repoPublishOpts(app, args))
   printRepoPublishResult(publishPolicySummary(target))
@@ -311,6 +335,7 @@ export const repoPublishCommand = async (app: AppCfg, kind: string, args: string
 
   if (kind === "pr") {
     const publicationPolicy = await assertPullRequestPublicationAllowed(target, args, opts.dryRun)
+    const baseFreshness = await assertPullRequestBaseCurrent(app, target, args, opts.dryRun)
     const recipients = pullRequestRecipients(target, args)
     const tipCommitOid = must(value(args, "--tip"), "--tip")
     const clone = await pullRequestCloneUrls(app, target, args, tipCommitOid, opts.dryRun)
@@ -349,12 +374,14 @@ export const repoPublishCommand = async (app: AppCfg, kind: string, args: string
       ...result,
       initialStatus,
       publicationPolicy,
+      baseFreshness,
     })
     return
   }
 
   if (kind === "pr-update") {
     const publicationPolicy = await assertPullRequestPublicationAllowed(target, args, opts.dryRun)
+    const baseFreshness = await assertPullRequestBaseCurrent(app, target, args, opts.dryRun)
     const recipients = pullRequestRecipients(target, args)
     const tipCommitOid = must(value(args, "--tip"), "--tip")
     const clone = await pullRequestCloneUrls(app, target, args, tipCommitOid, opts.dryRun)
@@ -371,6 +398,7 @@ export const repoPublishCommand = async (app: AppCfg, kind: string, args: string
     printRepoPublishResult({
       ...result,
       publicationPolicy,
+      baseFreshness,
     })
     return
   }
