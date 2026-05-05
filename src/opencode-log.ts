@@ -4,8 +4,11 @@ const stripAnsi = (value: string) =>
 export type OpenCodeHardFailureCategory =
   | "opencode-database-locked"
   | "model-config-invalid"
+  | "model-unavailable"
+  | "model-provider-unavailable"
   | "model-provider-auth-failed"
   | "model-provider-server-error"
+  | "opencode-auth-unavailable"
   | "tool-permission-rejected"
   | "opencode-policy-blocked"
   | "publication-blocked"
@@ -38,11 +41,13 @@ export const detectOpenCodeHardFailure = (text: string) => {
   const checks: Array<[RegExp, OpenCodeHardFailureCategory, string, boolean?]> = [
     [/Error:\s*database is locked/i, "opencode-database-locked", "OpenCode runtime database was locked", true],
     [/\bdatabase is locked\b/i, "opencode-database-locked", "OpenCode runtime database was locked", true],
-    [/ProviderModelNotFoundError/i, "model-config-invalid", "configured opencode model was not found by provider"],
+    [/ProviderModelNotFoundError/i, "model-unavailable", "configured opencode model was not found by provider"],
     [/Model not found:\s*[^\n.]+/i, "model-config-invalid", "configured opencode model was not found by provider"],
-    [/No provider found for model|Provider not found|Unknown provider/i, "model-config-invalid", "configured opencode provider was not found"],
+    [/No provider found for model|Provider not found|Unknown provider/i, "model-provider-unavailable", "configured opencode provider was not found"],
     [/invalid (?:model )?variant|unknown variant/i, "model-config-invalid", "configured opencode model variant was not accepted"],
+    [/missing (?:opencode )?auth|auth\.json.*(?:missing|not found)|no auth state/i, "opencode-auth-unavailable", "OpenCode auth state was unavailable"],
     [/AuthenticationError|Unauthorized|invalid api key|missing api key/i, "model-provider-auth-failed", "model provider authentication failed"],
+    [/models\.dev.*(?:timed out|timeout|failed to fetch)/i, "model-provider-unavailable", "OpenCode model registry lookup failed", true],
     [/"code"\s*:\s*"server_error"/i, "model-provider-server-error", "model provider returned server_error", true],
     [/"type"\s*:\s*"server_error"/i, "model-provider-server-error", "model provider returned server_error", true],
     [/permission requested:[\s\S]{0,300}auto-rejecting/i, "tool-permission-rejected", "tool permission request was auto-rejected"],
@@ -83,6 +88,29 @@ export const detectWorkerVerificationBlockers = (text: string) => {
     const match = clean.match(pattern)
     return match ? [{reason, evidence: match[0].replace(/\s+/g, " ").slice(0, 240)}] : []
   })
+}
+
+export type OpenCodeToolBoundary = {
+  tool: string
+  started: number
+  completed: number
+  inFlight: boolean
+}
+
+export const detectOpenCodeToolBoundaries = (text: string) => {
+  const clean = stripAnsi(text)
+  const tools = new Map<string, OpenCodeToolBoundary>()
+  const pattern = /^.*service=tool\.registry\s+status=(started|completed)[^\n]*$/gm
+  for (const match of clean.matchAll(pattern)) {
+    const status = match[1]
+    const tool = match[0].trim().split(/\s+/).at(-1) ?? "unknown"
+    const current = tools.get(tool) ?? {tool, started: 0, completed: 0, inFlight: false}
+    if (status === "started") current.started += 1
+    if (status === "completed") current.completed += 1
+    current.inFlight = current.started > current.completed
+    tools.set(tool, current)
+  }
+  return [...tools.values()]
 }
 
 export type OpenCodeBlockedKind = "permission" | "question" | "policy"

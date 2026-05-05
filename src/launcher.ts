@@ -20,7 +20,8 @@ import {buildFinalResponseRecord, createOutputTailCapture, type OutputTailSnapsh
 import {redactSensitiveText} from "./log-redaction.js"
 import {assertModelSelectionValid, resolveModelSelection} from "./model-profiles.js"
 import {selectOpencodePrimaryAgent, writeOpencodeManagedAgents} from "./opencode-agents.js"
-import {detectOpenCodeHardFailure, type OpenCodeHardFailure} from "./opencode-log.js"
+import {detectOpenCodeBlockedState, detectOpenCodeHardFailure, detectOpenCodeToolBoundaries, type OpenCodeHardFailure} from "./opencode-log.js"
+import {writeOpenCodeRuntimeHandoff} from "./opencode-runtime.js"
 import {dispatchOperatorRequest, type DispatchContext} from "./orchestrator.js"
 import {detectProjectProfile, writeProjectProfile, type ProjectProfile} from "./project-profile.js"
 import {writeRepoPublishContext, type RepoPublishScope} from "./repo-publish.js"
@@ -1074,6 +1075,58 @@ const opencodeAttemptLogFile = (logFile: string, attempt: number) => {
   return `${base}-retry-${attempt}${ext || ".log"}`
 }
 
+const startOpenCodeWorkerWatchdog = (record: TaskRunRecord, logFile: string, intervalMs = 15_000) => {
+  let lastFingerprint = ""
+  let stopped = false
+  const check = async () => {
+    if (stopped || !existsSync(logFile)) return
+    const [info, text] = await Promise.all([
+      stat(logFile).catch(() => undefined),
+      readFile(logFile, "utf8").catch(() => ""),
+    ])
+    const idleMs = info ? Date.now() - info.mtimeMs : undefined
+    const blocked = text ? detectOpenCodeBlockedState(text) : undefined
+    const inFlightTools = text
+      ? detectOpenCodeToolBoundaries(text).filter(item => item.inFlight).map(item => item.tool)
+      : []
+    const severity = blocked
+      ? "critical"
+      : inFlightTools.length > 0
+        ? "warning"
+        : idleMs !== undefined && idleMs >= 30 * 60_000
+          ? "critical"
+          : idleMs !== undefined && idleMs >= 10 * 60_000
+            ? "warning"
+            : "info"
+    const fingerprint = JSON.stringify({kind: blocked?.kind, evidence: blocked?.evidence, inFlightTools, severity})
+    if (fingerprint === lastFingerprint && severity === "info") return
+    if (fingerprint === lastFingerprint) return
+    lastFingerprint = fingerprint
+    await updateRunRecord(record, {
+      opencodeWatchdog: {
+        checkedAt: now(),
+        logFile,
+        blockedKind: blocked?.kind,
+        blockedReason: blocked?.reason,
+        blockedEvidence: blocked?.evidence,
+        inFlightTools,
+        idleMs,
+        severity,
+      },
+    }).catch(() => undefined)
+  }
+  const timer = setInterval(() => void check().catch(() => undefined), intervalMs)
+  timer.unref?.()
+  void check().catch(() => undefined)
+  return {
+    stop: async () => {
+      clearInterval(timer)
+      await check().catch(() => undefined)
+      stopped = true
+    },
+  }
+}
+
 const runWorkerOpencodeSessionWithRetry = async (input: {
   agent: PreparedAgent
   checkout: string
@@ -1094,19 +1147,24 @@ const runWorkerOpencodeSessionWithRetry = async (input: {
     await updateRunRecord(input.runRecord, {logs: {opencode: attemptLogFile, opencodeAttempts: attempts}})
 
     try {
-      return await runOpencodeSession(
-        input.agent,
-        input.checkout,
-        input.idTask,
-        input.prompt,
-        attemptLogFile,
-        input.modelSelection,
-        pid => updateRunRecord(input.runRecord, {process: {opencodePid: pid}}),
-        input.env,
-        input.devEnv,
-        undefined,
-        {stateId: input.runRecord.runId, attempt},
-      )
+      const watchdog = startOpenCodeWorkerWatchdog(input.runRecord, attemptLogFile)
+      try {
+        return await runOpencodeSession(
+          input.agent,
+          input.checkout,
+          input.idTask,
+          input.prompt,
+          attemptLogFile,
+          input.modelSelection,
+          pid => updateRunRecord(input.runRecord, {process: {opencodePid: pid}}),
+          input.env,
+          input.devEnv,
+          undefined,
+          {stateId: input.runRecord.runId, attempt},
+        )
+      } finally {
+        await watchdog.stop()
+      }
     } catch (error) {
       lastError = error
       const hardFailure = error instanceof OpenCodeHardFailureError ? error.hardFailure : undefined
@@ -1519,6 +1577,9 @@ const updateRunRecord = async (record: TaskRunRecord, patch: Partial<TaskRunReco
   if (patch.process) {
     record.process = {...record.process, ...patch.process}
   }
+  if (patch.opencodeWatchdog) {
+    record.opencodeWatchdog = {...record.opencodeWatchdog, ...patch.opencodeWatchdog}
+  }
   if (patch.devServer) {
     record.devServer = {...record.devServer, ...patch.devServer}
   }
@@ -1533,6 +1594,7 @@ const updateRunRecord = async (record: TaskRunRecord, patch: Partial<TaskRunReco
   if (patch.repo) record.repo = patch.repo
   if (patch.context) record.context = patch.context
   if (patch.subject) record.subject = patch.subject
+  if (patch.opencode) record.opencode = patch.opencode
   if (patch.devEnv) record.devEnv = patch.devEnv
   if (patch.projectProfile) record.projectProfile = patch.projectProfile
   if (patch.target !== undefined) record.target = patch.target
@@ -1941,6 +2003,7 @@ export const runTask = async (
   let cleanupError: unknown
   let resolvedSubject: ResolvedTaskSubject | undefined
   let taskManifestFile = ""
+  let opencodeRuntime = undefined as TaskRunRecord["opencode"]
 
   try {
     await runPhase(runRecord, "validate-model-config", async () => {
@@ -2020,6 +2083,19 @@ export const runTask = async (
     )
 
     await runPhase(runRecord, "prepare-checkout", () => prepareCheckout(agent, checkout))
+    opencodeRuntime = await runPhase(runRecord, "write-opencode-runtime-handoff", () => writeOpenCodeRuntimeHandoff({
+      app,
+      checkout,
+      binary: agent.app.config.opencode.binary,
+      opencodeAgent,
+      modelSelection,
+    }), {
+      opencodeAgent,
+      model: modelSelection.model ?? "",
+      modelProfile: modelSelection.modelProfile ?? "",
+      modelVariant: modelSelection.variant ?? "",
+    })
+    await updateRunRecord(runRecord, {opencode: opencodeRuntime})
     if (item.subject) {
       resolvedSubject = await runPhase(
         runRecord,
@@ -2109,6 +2185,7 @@ export const runTask = async (
       doneContract,
       modelSelection,
       opencodeAgent,
+      opencodeRuntime,
       subject: resolvedSubject,
       runtime,
     })

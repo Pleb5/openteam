@@ -290,6 +290,44 @@ describe("task manifest", () => {
     expect(manifest.run.opencodeAgent).toBe("openteam-builder")
   })
 
+  test("records sanitized opencode runtime handoff", () => {
+    const base = input("/work/repo")
+    const manifest = buildTaskManifest({
+      ...base,
+      opencodeRuntime: {
+        version: 1,
+        generatedAt: "2026-05-01T00:00:00.000Z",
+        agent: "openteam-builder",
+        binary: "opencode",
+        model: "openai/gpt-5.5",
+        variant: "xhigh",
+        modelProfile: "builder-default",
+        modelSource: "worker-profile",
+        provider: "openai",
+        modelId: "gpt-5.5",
+        selectedModelAvailable: true,
+        availableModels: [{model: "openai/gpt-5.5", variant: "xhigh", source: "modelProfile", profile: "builder-default"}],
+        auth: {
+          sourceDataDir: "(host OpenCode data dir; path withheld)",
+          sourceStateDir: "(host OpenCode state dir; path withheld)",
+          authJsonPresent: true,
+          modelJsonPresent: true,
+          kvJsonPresent: true,
+          hydrated: true,
+          status: "ready",
+        },
+        files: {
+          json: "/work/repo/.openteam/opencode-runtime.json",
+          summary: "/work/repo/.openteam/context/opencode-auth.md",
+        },
+      },
+    })
+
+    expect(manifest.opencode?.provider).toBe("openai")
+    expect(manifest.opencode?.auth.status).toBe("ready")
+    expect(JSON.stringify(manifest)).not.toContain("auth.json")
+  })
+
   test("records web runtime facts without storing the signer URL", () => {
     const manifest = buildTaskManifest({
       ...input("/work/repo"),

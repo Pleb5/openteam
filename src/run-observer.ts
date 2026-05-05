@@ -37,6 +37,8 @@ export type RunObservationSnapshot = {
   opencodeBlockedKind?: string
   opencodeBlockedReason?: string
   opencodeStallSeverity?: "warning" | "critical"
+  opencodeWatchdogSeverity?: string
+  opencodeInFlightTools?: string[]
   devUrl?: string
   devStatus?: string
   devHealthy: boolean
@@ -161,6 +163,8 @@ export const snapshotRunObservation = async (
     opencodeBlockedKind: diagnosis.opencodeProgress.blocked?.kind,
     opencodeBlockedReason: diagnosis.opencodeProgress.blocked?.reason,
     opencodeStallSeverity: diagnosis.opencodeProgress.stallSeverity,
+    opencodeWatchdogSeverity: record.opencodeWatchdog?.severity,
+    opencodeInFlightTools: record.opencodeWatchdog?.inFlightTools,
     devUrl: devHealth.url,
     devStatus: diagnosis.devServer.status,
     devHealthy: devHealth.ok,
@@ -189,6 +193,8 @@ const fieldSeverity = (field: string, to: unknown): ObservationSeverity => {
   if (field === "opencodeBlockedKind" && to) return "critical"
   if (field === "opencodeStallSeverity" && to === "critical") return "critical"
   if (field === "opencodeStallSeverity" && to === "warning") return "warning"
+  if (field === "opencodeWatchdogSeverity" && to === "critical") return "critical"
+  if (field === "opencodeWatchdogSeverity" && to === "warning") return "warning"
   if (field === "evidenceLevel" && (to === "failed" || to === "blocked")) return "critical"
   if (field === "evidenceLevel" && (to === "weak" || to === "none")) return "warning"
   if (field === "prEligible" && to === true) return "info"
@@ -225,6 +231,7 @@ const diffSnapshots = (
     "activePhase",
     "opencodeBlockedKind",
     "opencodeStallSeverity",
+    "opencodeWatchdogSeverity",
     "devHealthy",
     "evidenceLevel",
     "prEligible",

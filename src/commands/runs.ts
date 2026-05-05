@@ -3,7 +3,7 @@ import {readFile, readdir, stat, writeFile} from "node:fs/promises"
 import path from "node:path"
 import {prepareAgent} from "../config.js"
 import {evaluateEvidencePolicy, evidenceLevel, groupEvidenceResults, verificationFailuresBlockTask} from "../evidence-policy.js"
-import {detectOpenCodeBlockedState, detectOpenCodeHardFailure, detectWorkerVerificationBlockers, lastMeaningfulLogLine} from "../opencode-log.js"
+import {detectOpenCodeBlockedState, detectOpenCodeHardFailure, detectOpenCodeToolBoundaries, detectWorkerVerificationBlockers, lastMeaningfulLogLine} from "../opencode-log.js"
 import {loadRepoRegistry, releaseRepoContext} from "../repo.js"
 import {evaluateRunRecord, type RunEvalResult} from "../run-evals.js"
 import {runImplementationProgressSignals} from "../run-progress.js"
@@ -199,6 +199,7 @@ const opencodeProgressInfo = async (file?: string, fallbackStartedAt?: string) =
     ...info,
     ageMs,
     blocked: text ? detectOpenCodeBlockedState(text) : undefined,
+    toolBoundaries: text ? detectOpenCodeToolBoundaries(text) : [],
     lastLine: text ? lastMeaningfulLogLine(text) : undefined,
   }
 }
@@ -312,6 +313,8 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
 
     if (runningPhase?.name === "opencode-worker" && opencodeProgress.blocked) {
       reasons.push(`${opencodeProgress.blocked.reason}: ${opencodeProgress.blocked.evidence}`)
+    } else if (runningPhase?.name === "opencode-worker" && opencodeProgress.toolBoundaries.some(item => item.inFlight)) {
+      reasons.push(`OpenCode tool boundary still in flight: ${opencodeProgress.toolBoundaries.filter(item => item.inFlight).map(item => item.tool).join(", ")}`)
     } else if (runningPhase?.name === "opencode-worker" && opencodeStallSeverity) {
       reasons.push(`OpenCode worker has no output for ${Math.round((opencodeIdleMs ?? 0) / 60_000)} minutes while the run is still active`)
     }
@@ -387,6 +390,8 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
       logModifiedAt: opencodeProgress.modifiedAt,
       lastLine: opencodeProgress.lastLine,
       blocked: opencodeProgress.blocked,
+      toolBoundaries: opencodeProgress.toolBoundaries,
+      inFlightTools: opencodeProgress.toolBoundaries.filter(item => item.inFlight).map(item => item.tool),
       stallSeverity: opencodeStallSeverity,
       idleWarningMs: OPENCODE_IDLE_WARNING_MS,
       idleCriticalMs: OPENCODE_IDLE_CRITICAL_MS,

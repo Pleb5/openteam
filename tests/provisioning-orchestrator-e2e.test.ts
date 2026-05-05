@@ -918,7 +918,7 @@ describe("Round 4 - run diagnosis and stale cleanup", () => {
 
     expect(summary.state).toBe("failed")
     expect(summary.storedState).toBe("needs-review")
-    expect(summary.failureCategory).toBe("model-config-invalid")
+    expect(summary.failureCategory).toBe("model-unavailable")
     expect(summary.staleReasons?.join(" ")).toContain("OpenCode log contains hard failure")
   })
 

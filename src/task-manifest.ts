@@ -5,6 +5,7 @@ import type {ProjectProfile} from "./project-profile.js"
 import type {RepoRelayPolicy} from "./repo.js"
 import type {
   DoneContract,
+  OpenCodeRuntimeHandoff,
   PreparedAgent,
   ResolvedModelSelection,
   RepoIdentity,
@@ -126,6 +127,7 @@ export type TaskManifest = {
     source?: TaskItem["source"]
     startedAt: string
   }
+  opencode?: OpenCodeRuntimeHandoff
   task: {
     text: string
     target: string
@@ -205,6 +207,7 @@ export type BuildTaskManifestInput = {
   doneContract: DoneContract
   modelSelection?: ResolvedModelSelection
   opencodeAgent?: string
+  opencodeRuntime?: OpenCodeRuntimeHandoff
   subject?: ResolvedTaskSubject
   runtime?: TaskManifestRuntime
 }
@@ -298,6 +301,7 @@ export const buildTaskManifest = (input: BuildTaskManifestInput): TaskManifest =
       subject: subjectSummary(input.subject),
       continuation: continuationSummary(input.item.continuation),
     },
+    opencode: input.opencodeRuntime,
     repo: {
       target: stripUrlCredentials(input.resolved.target),
       contextId: input.resolved.context.id,

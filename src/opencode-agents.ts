@@ -135,17 +135,20 @@ const renderPermission = (rules: Record<string, string | Record<string, string>>
 
 const primaryPermission = (role: OpencodePrimaryRole, capabilities: WorkerCapabilities) => {
   const rules: Record<string, string | Record<string, string>> = {
+    read: "allow",
+    glob: "allow",
+    grep: "allow",
+    list: "allow",
+    webfetch: "allow",
+    websearch: "allow",
     question: role === "orchestrator" ? "allow" : "deny",
     plan_enter: "allow",
+    external_directory: {"*": "deny"},
   }
 
-  if (!capabilities.canEdit) {
-    rules.edit = "deny"
-  }
+  rules.edit = capabilities.canEdit ? "allow" : "deny"
 
-  if (!capabilities.canSpawnSubagents) {
-    rules.task = "deny"
-  }
+  rules.task = capabilities.canSpawnSubagents ? "allow" : "deny"
 
   const bash: Record<string, string> = {}
   if (!capabilities.canEdit) {

@@ -23,7 +23,7 @@ import {
   writeAgentBrowserTools,
   writeCheckoutToolShims,
 } from "../src/launcher.js"
-import {detectOpenCodeHardFailure, detectWorkerVerificationBlockers} from "../src/opencode-log.js"
+import {detectOpenCodeHardFailure, detectOpenCodeToolBoundaries, detectWorkerVerificationBlockers} from "../src/opencode-log.js"
 import {detectProjectProfile, writeProjectProfile} from "../src/project-profile.js"
 import {
   applyObservationReportPolicy,
@@ -1034,6 +1034,26 @@ describe("runtime invariants", () => {
     expect(prompt.join(" ")).toContain("repo-native:failed")
   })
 
+  test("continuation drops raw model override after model infrastructure failure", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const record = runRecord(app, {
+      model: "openai/retired-model",
+      requestedModelProfile: "builder-default",
+      failureCategory: "model-unavailable",
+      context: {
+        id: "ctx1",
+        checkout: path.join(runtimeRoot, "checkout"),
+        branch: "openteam/test",
+      },
+    })
+
+    const item = createContinuationTaskItem(record, {kind: "retry"})
+
+    expect(item.model).toBeUndefined()
+    expect(item.modelProfile).toBe("builder-default")
+  })
+
   test("continuation resolution leases the prior idle context without rediscovery", async () => {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
     const app = makeApp(runtimeRoot)
@@ -1483,9 +1503,21 @@ describe("runtime invariants", () => {
     expect(detectOpenCodeHardFailure('Error: {"type":"server_error","code":"server_error"}')?.reason).toContain("server_error")
     expect(detectOpenCodeHardFailure("Error: database is locked")?.category).toBe("opencode-database-locked")
     expect(detectOpenCodeHardFailure("Error: database is locked")?.retryable).toBe(true)
+    expect(detectOpenCodeHardFailure("ProviderModelNotFoundError")?.category).toBe("model-unavailable")
+    expect(detectOpenCodeHardFailure("Failed to fetch models.dev because the operation timed out")?.category).toBe("model-provider-unavailable")
     expect(detectOpenCodeHardFailure("! permission requested: external_directory (/tmp/*); auto-rejecting")?.reason).toContain("auto-rejected")
     expect(detectOpenCodeHardFailure("sandbox denied the requested command")?.reason).toContain("sandbox policy")
     expect(detectOpenCodeHardFailure("normal repo command failed with Error: test output")).toBeUndefined()
+  })
+
+  test("OpenCode logs detect tool registry boundaries", () => {
+    expect(detectOpenCodeToolBoundaries([
+      "INFO service=tool.registry status=started webfetch",
+      "INFO service=tool.registry status=completed duration=0 grep",
+    ].join("\n"))).toEqual([
+      {tool: "webfetch", started: 1, completed: 0, inFlight: true},
+      {tool: "grep", started: 0, completed: 1, inFlight: false},
+    ])
   })
 
   test("worker logs detect verification blockers without classifying normal errors", () => {

@@ -228,6 +228,7 @@ const formatObservationReport = (event: RunObservationEvent) => {
     evidence ? `evidence: ${evidence}` : "",
     snapshot.devUrl && snapshot.devHealthy ? `url: ${snapshot.devUrl}` : "",
     snapshot.opencodeLogAgeMs !== undefined ? `opencode idle: ${Math.round(snapshot.opencodeLogAgeMs / 60_000)}m${snapshot.opencodeLastLine ? ` last=${truncate(snapshot.opencodeLastLine, 80)}` : ""}` : "",
+    snapshot.opencodeInFlightTools?.length ? `opencode tools in flight: ${snapshot.opencodeInFlightTools.join(", ")}` : "",
     `why: ${observationReason(event)}`,
     snapshot.contextId && (snapshot.state === "stale" || snapshot.contextLeaseMatchesRun === false) ? `context: ${snapshot.contextId}` : "",
     `next: ${next}`,

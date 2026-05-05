@@ -355,6 +355,39 @@ export type ResolvedModelSelection = {
   source: ResolvedModelSelectionSource
 }
 
+export type OpenCodeRuntimeHandoff = {
+  version: 1
+  generatedAt: string
+  agent: string
+  binary: string
+  model?: string
+  variant?: string
+  modelProfile?: string
+  modelSource?: ResolvedModelSelectionSource
+  provider?: string
+  modelId?: string
+  selectedModelAvailable: boolean
+  availableModels: Array<{
+    model: string
+    variant?: string
+    source: string
+    profile?: string
+  }>
+  auth: {
+    sourceDataDir: string
+    sourceStateDir: string
+    authJsonPresent: boolean
+    modelJsonPresent: boolean
+    kvJsonPresent: boolean
+    hydrated: boolean
+    status: "ready" | "missing-auth" | "missing-model-state" | "model-unset"
+  }
+  files: {
+    json: string
+    summary: string
+  }
+}
+
 export type FinalResponseRecord = {
   text: string
   source: "opencode-output-tail" | "operator-file"
@@ -571,6 +604,7 @@ export type TaskRunRecord = {
   workerProfile?: string
   modelSource?: ResolvedModelSelectionSource
   opencodeAgent?: string
+  opencode?: OpenCodeRuntimeHandoff
   target?: string
   mode?: TaskMode
   parallel?: boolean
@@ -634,6 +668,16 @@ export type TaskRunRecord = {
     opencodePid?: number
     devPid?: number
     bunkerPid?: number
+  }
+  opencodeWatchdog?: {
+    checkedAt: string
+    logFile?: string
+    blockedKind?: string
+    blockedReason?: string
+    blockedEvidence?: string
+    inFlightTools?: string[]
+    idleMs?: number
+    severity?: "info" | "warning" | "critical"
   }
   devServer?: {
     url?: string

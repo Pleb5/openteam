@@ -99,6 +99,7 @@ export const createContinuationTaskItem = (
 ): TaskItem => {
   const agentId = record.baseAgentId || record.agentId
   const continuation = createRunContinuation(record, options.kind, options.carryEvidence ?? options.kind !== "retry")
+  const priorModelFailed = /^(model-|opencode-auth-)/.test(record.failureCategory ?? "")
   return {
     id: taskId(options.kind, record),
     task: options.task?.trim() || defaultContinuationTask(record, options.kind),
@@ -107,7 +108,7 @@ export const createContinuationTaskItem = (
     agentId,
     target: record.target,
     mode: record.mode,
-    model: options.model || record.model,
+    model: options.model || (priorModelFailed ? undefined : record.model),
     modelProfile: options.modelProfile || record.requestedModelProfile,
     modelVariant: options.modelVariant || record.requestedModelVariant,
     continuation,
