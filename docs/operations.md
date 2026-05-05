@@ -223,10 +223,10 @@ Treat `runtime/status.json` as observability cache only; run records and `runtim
 
 Worker process policy:
 
-- worker, provisioning, dev-server, and browser MCP processes receive checkout-local temp/cache env vars
-- `TMPDIR`, `TMP`, `TEMP`, and `OPENTEAM_TMP_DIR` point to `.openteam/tmp`
-- `XDG_CACHE_HOME`, package-manager cache vars, and `OPENTEAM_CACHE_DIR` point under `.openteam/cache`
-- `OPENTEAM_ARTIFACTS_DIR` points to `.openteam/artifacts`
+- worker, provisioning, dev-server, and browser MCP processes receive openteam-managed temp/cache env vars
+- checkout-local `.openteam` is reserved for small metadata, shims, handoff files, and sanitized context
+- `TMPDIR`, `TMP`, `TEMP`, `OPENTEAM_TMP_DIR`, package-manager caches, and `OPENTEAM_ARTIFACTS_DIR` point to the sibling bulk runtime directory `.openteam-runtime` by default, outside the watched checkout tree
+- `OPENTEAM_CHECKOUT_RUNTIME_DIR` records the bulk runtime directory for tools that need to place generated state outside the source checkout
 - managed Git checkouts use an openteam repo-local credential helper for configured provider fork remotes
 - workers should use plain `git push origin <branch>` from the managed checkout and should not use `gh auth`, host-global credential helpers, or personal Git remotes for openteam fork publication
 - Nostr-git PR publication should use `openteam repo publish pr ...` after pushing the branch; global `gh auth` is not part of the default publication path

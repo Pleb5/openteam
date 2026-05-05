@@ -10,7 +10,7 @@ import {consolePrompt} from "./commands/console.js"
 import {cleanupStaleRuns, cleanupStaleRunsForContext} from "./commands/runs.js"
 import {prepareAgent} from "./config.js"
 import {detectDevEnv, wrapDevEnvCommand, type DevEnv} from "./dev-env.js"
-import {checkDevHealthOnce, processAlive, startAgentDevServer, stopChildProcess, waitForDevHealth} from "./dev-server.js"
+import {checkDevHealthOnce, DevServerStartError, processAlive, startAgentDevServer, stopChildProcess, waitForDevHealth} from "./dev-server.js"
 import {createDoneContract} from "./done-contract.js"
 import {pollInboundTasks, subscribeInboundTasks} from "./dm.js"
 import {recordReportOutboxAttempts} from "./dm-outbox.js"
@@ -34,6 +34,7 @@ import {
 } from "./reporting-policy.js"
 import {readGitSubmodules, releaseRepoContext, resolveRepoAnnouncementTarget, resolveRepoRelayPolicy, resolveRepoTarget} from "./repo.js"
 import {runImplementationProgressSignals} from "./run-progress.js"
+import {formatRuntimeBloatSummary, scanCheckoutRuntimeBloat} from "./runtime-bloat.js"
 import {continuationEvidenceForCarry} from "./run-continuation.js"
 import {formatObservationEvent, observeRuns} from "./run-observer.js"
 import {prepareTaskSubject, resolveTaskSubject} from "./subject.js"
@@ -116,16 +117,19 @@ const runtimeName = (value: string) =>
 
 export const checkoutRuntimeDirs = (checkout: string) => {
   const root = path.join(checkout, ".openteam")
+  const bulkRoot = process.env.OPENTEAM_CHECKOUT_RUNTIME_ROOT?.trim()
+    || path.join(path.dirname(checkout), ".openteam-runtime")
   return {
     root,
+    bulkRoot,
     bin: path.join(root, "bin"),
-    tmp: path.join(root, "tmp"),
-    cache: path.join(root, "cache"),
-    artifacts: path.join(root, "artifacts"),
-    npmCache: path.join(root, "cache", "npm"),
-    yarnCache: path.join(root, "cache", "yarn"),
-    bunCache: path.join(root, "cache", "bun"),
-    pnpmStore: path.join(root, "cache", "pnpm-store"),
+    tmp: path.join(bulkRoot, "tmp"),
+    cache: path.join(bulkRoot, "cache"),
+    artifacts: path.join(bulkRoot, "artifacts"),
+    npmCache: path.join(bulkRoot, "cache", "npm"),
+    yarnCache: path.join(bulkRoot, "cache", "yarn"),
+    bunCache: path.join(bulkRoot, "cache", "bun"),
+    pnpmStore: path.join(bulkRoot, "cache", "pnpm-store"),
   }
 }
 
@@ -150,6 +154,7 @@ export const checkoutRuntimeEnv = (checkout: string, env: Record<string, string>
     OPENTEAM_CACHE_DIR: dirs.cache,
     OPENTEAM_ARTIFACTS_DIR: dirs.artifacts,
     OPENTEAM_CHECKOUT: checkout,
+    OPENTEAM_CHECKOUT_RUNTIME_DIR: dirs.bulkRoot,
     npm_config_cache: dirs.npmCache,
     YARN_CACHE_FOLDER: dirs.yarnCache,
     BUN_INSTALL_CACHE_DIR: dirs.bunCache,
@@ -160,7 +165,7 @@ export const checkoutRuntimeEnv = (checkout: string, env: Record<string, string>
 }
 
 export const opencodeRuntimeDirs = (checkout: string, stateId: string, attempt = 1) => {
-  const root = path.join(checkoutRuntimeDirs(checkout).root, "opencode", runtimeName(stateId), `attempt-${attempt}`)
+  const root = path.join(checkoutRuntimeDirs(checkout).bulkRoot, "opencode", runtimeName(stateId), `attempt-${attempt}`)
   return {
     root,
     data: path.join(root, "data"),
@@ -342,6 +347,15 @@ export const provisionWorkerControlCommand = (text: string) => {
   return patterns.map(pattern => text.match(pattern)?.[0]).find(Boolean)
 }
 
+export const provisionCheckoutLocalRuntimeCommand = (text: string) => {
+  const patterns = [
+    /\b(mkdir|install|pnpm|npm|yarn|bun|corepack)\b[^\n]*(?:\.\/)?\.openteam\/(?:cache|tmp|artifacts|opencode)\b/i,
+    /\b(?:TMPDIR|TMP|TEMP|XDG_CACHE_HOME|OPENTEAM_TMP_DIR|OPENTEAM_CACHE_DIR|OPENTEAM_ARTIFACTS_DIR|BUN_INSTALL_CACHE_DIR|PNPM_STORE_DIR)=(?:"|')?[^\n]*(?:\.\/)?\.openteam\/(?:cache|tmp|artifacts|opencode)\b/i,
+    /\b--(?:store-dir|cache|cache-dir|output-dir)\s+(?:"|')?(?:\.\/)?\.openteam\/(?:cache|tmp|artifacts|opencode)\b/i,
+  ]
+  return patterns.map(pattern => text.match(pattern)?.[0]).find(Boolean)
+}
+
 export const categorizeProvisioningFailure = (input: {
   logText?: string
   projectProfile?: Pick<ProjectProfile, "blockers">
@@ -351,6 +365,9 @@ export const categorizeProvisioningFailure = (input: {
   const text = [input.logText, errorText].filter(Boolean).join("\n")
   if (provisionWorkerControlCommand(text) || /provisioning attempted worker-control command/i.test(text)) {
     return "provision-worker-control"
+  }
+  if (provisionCheckoutLocalRuntimeCommand(text) || /provisioning used checkout-local runtime path/i.test(text)) {
+    return "provision-checkout-local-runtime"
   }
   if ((input.projectProfile?.blockers ?? []).length > 0) {
     return "project-profile-blocker"
@@ -376,6 +393,10 @@ const assertProvisionLogClean = async (logFile: string) => {
   const match = provisionWorkerControlCommand(text)
   if (match) {
     throw new Error(`provisioning attempted worker-control command: ${match}`)
+  }
+  const checkoutLocalRuntimeMatch = provisionCheckoutLocalRuntimeCommand(text)
+  if (checkoutLocalRuntimeMatch) {
+    throw new Error(`provisioning used checkout-local runtime path instead of OPENTEAM_* runtime dirs: ${checkoutLocalRuntimeMatch}`)
   }
 }
 
@@ -534,7 +555,7 @@ const ALLOWED_DOMAINS = ${JSON.stringify(input.allowedDomains.join(","))}
 const MAX_OUTPUT_CHARS = ${JSON.stringify(input.maxOutputChars)}
 
 const dirs = (directory: string) => {
-  const artifacts = path.join(directory, ".openteam", "artifacts", "verification", "agent-browser")
+  const artifacts = path.join(process.env.OPENTEAM_ARTIFACTS_DIR || path.join(directory, ".openteam", "artifacts"), "verification", "agent-browser")
   return {
     artifacts,
     profile: path.join(artifacts, "profile"),
@@ -584,14 +605,14 @@ const run = async (args: string[], context: { directory: string; abort: AbortSig
     new Response(proc.stderr).text(),
     proc.exited,
   ])
-  const text = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n")
+  const text = [stdout.trim(), stderr.trim()].filter(Boolean).join("\\n")
   if (code !== 0) {
     throw new Error(text || "agent-browser exited with code " + code)
   }
   if (text.length <= MAX_OUTPUT_CHARS) return text || "ok"
   const raw = artifactPath(context.directory, options.rawName ?? args[0] ?? "output", "txt")
   await writeFile(raw, text)
-  return text.slice(0, MAX_OUTPUT_CHARS) + "\n\n[truncated; full output: " + raw + "]"
+  return text.slice(0, MAX_OUTPUT_CHARS) + "\\n\\n[truncated; full output: " + raw + "]"
 }
 
 export const open = tool({
@@ -648,34 +669,51 @@ export const fill = tool({
 })
 
 export const press = tool({
-  description: "Press a key on the page or within a selector/ref.",
+  description: "Press a key on the currently focused page element.",
   args: {
     key: tool.schema.string().describe("Key to press, such as Enter, Escape, or ArrowDown"),
-    selector: tool.schema.string().optional().describe("Optional selector or snapshot ref to target first"),
   },
   async execute(args, context) {
-    return run(["press", ...(args.selector ? [args.selector] : []), args.key], context)
+    return run(["press", args.key], context)
   },
 })
 
 export const type = tool({
-  description: "Type text into the focused element or selected input without replacing existing text.",
+  description: "Type text without replacing existing text. Uses keyboard typing when no selector is provided.",
   args: {
     text: tool.schema.string().describe("Text to type"),
-    selector: tool.schema.string().optional().describe("Optional selector or snapshot ref to target first"),
+    selector: tool.schema.string().optional().describe("Optional selector or snapshot ref to type into"),
   },
   async execute(args, context) {
-    return run(["type", ...(args.selector ? [args.selector] : []), args.text], context)
+    if (args.selector) return run(["type", args.selector, args.text], context)
+    return run(["keyboard", "type", args.text], context)
   },
 })
 
 export const find = tool({
-  description: "Find elements matching visible text, label, role, selector, or snapshot-ref-friendly query.",
+  description: "Find elements with agent-browser semantic locators and optionally act on them.",
   args: {
-    query: tool.schema.string().describe("Text, semantic query, selector, or other agent-browser find query"),
+    locator: tool.schema.enum(["role", "text", "label", "placeholder", "alt", "title", "testid", "first", "last", "nth"]).describe("agent-browser find locator type"),
+    value: tool.schema.string().describe("Locator value, such as role, text, label, selector, or nth index"),
+    selector: tool.schema.string().optional().describe("Selector required when locator is nth"),
+    action: tool.schema.enum(["click", "fill", "type", "hover", "focus", "check", "uncheck"]).optional().describe("Optional action to perform; defaults to agent-browser click"),
+    text: tool.schema.string().optional().describe("Text for fill/type actions"),
+    name: tool.schema.string().optional().describe("Accessible name filter for role locators"),
+    exact: tool.schema.boolean().optional().describe("Require exact text/name match"),
   },
   async execute(args, context) {
-    return run(["find", args.query, "--json", "--max-output", String(MAX_OUTPUT_CHARS)], context, { rawName: "find" })
+    if (args.locator === "nth" && !args.selector) throw new Error("selector is required for find nth")
+    const locatorArgs = args.locator === "nth" ? [args.locator, args.value, args.selector!] : [args.locator, args.value]
+    return run([
+      "find",
+      ...locatorArgs,
+      ...(args.action ? [args.action] : []),
+      ...(args.text ? [args.text] : []),
+      ...(args.name ? ["--name", args.name] : []),
+      ...(args.exact ? ["--exact"] : []),
+      "--json",
+      "--max-output", String(MAX_OUTPUT_CHARS),
+    ], context, { rawName: "find" })
   },
 })
 
@@ -687,7 +725,7 @@ export const scroll = tool({
     selector: tool.schema.string().optional().describe("Optional selector or snapshot ref to scroll"),
   },
   async execute(args, context) {
-    return run(["scroll", args.direction, ...(args.amount ? [args.amount] : []), ...(args.selector ? [args.selector] : [])], context)
+    return run(["scroll", args.direction, ...(args.amount ? [args.amount] : []), ...(args.selector ? ["--selector", args.selector] : [])], context)
   },
 })
 
@@ -763,15 +801,15 @@ export const wait = tool({
 })
 
 export const screenshot = tool({
-  description: "Capture a screenshot under .openteam/artifacts/verification/agent-browser.",
+  description: "Capture a screenshot under OPENTEAM_ARTIFACTS_DIR/verification/agent-browser.",
   args: {
     name: tool.schema.string().optional().describe("Artifact name prefix"),
     full: tool.schema.boolean().optional().describe("Capture full page"),
   },
   async execute(args, context) {
     const file = artifactPath(context.directory, args.name || "screenshot", "png")
-    const output = await run(["screenshot", file, ...(args.full ? ["--full"] : [])], context)
-    return output + "\nscreenshot: " + file
+    const output = await run(["screenshot", ...(args.full ? ["--full"] : []), file], context)
+    return output + "\\nscreenshot: " + file
   },
 })
 
@@ -823,7 +861,7 @@ export const record_evidence = tool({
     ]
     const proc = Bun.spawn(cmd, { cwd: context.directory, env: process.env, stdout: "pipe", stderr: "pipe", signal: context.abort })
     const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
-    const text = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n")
+    const text = [stdout.trim(), stderr.trim()].filter(Boolean).join("\\n")
     if (code !== 0) throw new Error(text || "openteam verify browser exited with code " + code)
     return text || "browser evidence recorded"
   },
@@ -873,6 +911,16 @@ const prepareCheckout = async (agent: PreparedAgent, checkout: string, runtime?:
 const writeViteWrapper = async (agent: PreparedAgent, checkout: string) => {
   const file = path.join(checkout, ".openteam.vite.config.ts")
   const allow = [agent.repo.root, path.join(agent.repo.root, "node_modules")]
+  const ignored = [
+    "**/.openteam/**",
+    "**/.opencode/**",
+    "**/.openteam-runtime/**",
+    "**/runtime/**",
+    "**/.git/**",
+    "**/playwright-report/**",
+    "**/test-results/**",
+    "**/coverage/**",
+  ]
   const content = [
     'import {mergeConfig} from "vite"',
     'import baseConfig from "./vite.config"',
@@ -881,6 +929,9 @@ const writeViteWrapper = async (agent: PreparedAgent, checkout: string) => {
     "  server: {",
     "    fs: {",
     `      allow: ${JSON.stringify(allow)},`,
+    "    },",
+    "    watch: {",
+    `      ignored: ${JSON.stringify(ignored)},`,
     "    },",
     "  },",
     "})",
@@ -1203,7 +1254,6 @@ const runWorkerOpencodeSessionWithRetry = async (input: {
   if (modelAttemptPlan.length === 0) throw new Error("OpenCode worker retry plan did not include any model attempts")
   const policy = opencodeRetryPolicy(input.agent.app, modelAttemptPlan.length)
   let lastError: unknown
-
   let globalAttempt = 0
 
   for (let modelIndex = 0; modelIndex < modelAttemptPlan.length && globalAttempt < policy.maxTotalAttempts; modelIndex += 1) {
@@ -1223,6 +1273,7 @@ const runWorkerOpencodeSessionWithRetry = async (input: {
       await updateRunRecord(input.runRecord, {logs: {opencode: attemptLogFile, opencodeAttempts: attempts}})
       await updateRunRecordModelSelection(input.runRecord, modelSelection)
       await writeOpenCodeAttemptRecord(input.runRecord, attemptRecord)
+
       try {
         const watchdog = startOpenCodeWorkerWatchdog(input.runRecord, attemptLogFile)
         try {
@@ -1623,6 +1674,7 @@ export const contextBusyContextId = (error: unknown) => {
 const taskFailureCategory = (error: unknown) => {
   const hardFailure = openCodeHardFailureFromError(error)
   if (hardFailure) return hardFailure.category
+  if (error instanceof DevServerStartError) return error.category
   const text = formatError(error)
   if (contextBusyContextId(error)) return "context-busy"
   if (/model|provider|variant/i.test(text) && /opencode|provider\/model|not found|invalid|required/i.test(text)) return "model-config-invalid"
@@ -1707,18 +1759,18 @@ const updateRunRecord = async (record: TaskRunRecord, patch: Partial<TaskRunReco
   if (patch.context) record.context = patch.context
   if (patch.subject) record.subject = patch.subject
   if (patch.opencode) record.opencode = patch.opencode
-  if (patch.devEnv) record.devEnv = patch.devEnv
   if (patch.opencodeAttemptRecords) record.opencodeAttemptRecords = patch.opencodeAttemptRecords
+  if (patch.devEnv) record.devEnv = patch.devEnv
   if (patch.projectProfile) record.projectProfile = patch.projectProfile
   if (patch.target !== undefined) record.target = patch.target
   if (patch.mode !== undefined) record.mode = patch.mode
   if (patch.model !== undefined) record.model = patch.model
-  if (patch.doneContract !== undefined) record.doneContract = patch.doneContract
   if (patch.resolvedModel !== undefined) record.resolvedModel = patch.resolvedModel
   if (patch.modelProfile !== undefined) record.modelProfile = patch.modelProfile
   if (patch.modelVariant !== undefined) record.modelVariant = patch.modelVariant
   if (patch.modelSource !== undefined) record.modelSource = patch.modelSource
   if (patch.workerProfile !== undefined) record.workerProfile = patch.workerProfile
+  if (patch.doneContract !== undefined) record.doneContract = patch.doneContract
   if (patch.workerState !== undefined) record.workerState = patch.workerState
   if (patch.verificationState !== undefined) record.verificationState = patch.verificationState
   if (patch.failureCategory !== undefined) record.failureCategory = patch.failureCategory
@@ -2132,16 +2184,16 @@ export const runTask = async (
       return {
         model: modelSelection.model,
         modelProfile: modelSelection.modelProfile,
-        modelAttempts: modelAttemptPlan.length,
         modelVariant: modelSelection.variant,
         modelSource: modelSelection.source,
+        modelAttempts: modelAttemptPlan.length,
       }
     }, {
       model: modelSelection.model ?? "",
       modelProfile: modelSelection.modelProfile ?? "",
-      modelAttempts: modelAttemptPlan.length,
       modelVariant: modelSelection.variant ?? "",
       modelSource: modelSelection.source,
+      modelAttempts: modelAttemptPlan.length,
     })
 
     const resolveTarget = async () => {
@@ -2211,9 +2263,9 @@ export const runTask = async (
       app,
       checkout,
       binary: agent.app.config.opencode.binary,
-      modelAttemptPlan,
       opencodeAgent,
       modelSelection,
+      modelAttemptPlan,
     }), {
       opencodeAgent,
       model: modelSelection.model ?? "",
@@ -2313,6 +2365,12 @@ export const runTask = async (
       opencodeRuntime,
       subject: resolvedSubject,
       runtime,
+      environmentPaths: {
+        runtime: checkoutRuntimeDirs(checkout).bulkRoot,
+        scratch: checkoutRuntimeDirs(checkout).tmp,
+        cache: checkoutRuntimeDirs(checkout).cache,
+        artifacts: checkoutRuntimeDirs(checkout).artifacts,
+      },
     })
     taskManifestFile = await runPhase(runRecord, "write-task-manifest", () => writeCurrentTaskManifest())
     await updateRunRecord(runRecord, {taskManifestPath: taskManifestFile})
@@ -2494,6 +2552,12 @@ export const runTask = async (
         await runPhase(runRecord, "sync-grasp-servers", () => syncGraspServers(agent))
       } catch (error) {
         process.stderr.write(`grasp server sync skipped: ${String(error)}\n`)
+      }
+
+      const runtimeBloat = await runPhase(runRecord, "preflight-watch-scope", () => scanCheckoutRuntimeBloat(checkout), {checkout})
+      const runtimeBloatWarnings = formatRuntimeBloatSummary(runtimeBloat)
+      if (runtimeBloatWarnings.length > 0) {
+        process.stderr.write(`checkout-local runtime bloat may pressure dev-server watchers:\n${runtimeBloatWarnings.map(line => `- ${line}`).join("\n")}\n`)
       }
 
       let dev = await runPhase(runRecord, "start-dev-server", () => startDev(agent, idTask, checkout, devEnv))

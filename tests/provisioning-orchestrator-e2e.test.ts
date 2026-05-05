@@ -23,6 +23,7 @@ import {
   assertVerificationToolingReady,
   categorizeProvisioningFailure,
   checkoutRuntimeEnv,
+  provisionCheckoutLocalRuntimeCommand,
   defaultRepoPublishScope,
   provisionWorkerControlCommand,
   writeCheckoutToolShims,
@@ -937,12 +938,20 @@ describe("Round 3 - provisioning guardrails and checkout runtime", () => {
     expect(provisionWorkerControlCommand("openteam repo policy --target repo")).toBeUndefined()
   })
 
-  test("checkout runtime env confines temp, cache, and artifacts to checkout", () => {
+  test("provision log scanner catches checkout-local runtime cache writes", () => {
+    const text = 'pnpm install --frozen-lockfile --store-dir ".openteam/cache/pnpm-store"'
+
+    expect(provisionCheckoutLocalRuntimeCommand(text)).toContain(".openteam/cache")
+    expect(categorizeProvisioningFailure({logText: text})).toBe("provision-checkout-local-runtime")
+  })
+
+  test("checkout runtime env keeps temp, cache, and artifacts outside checkout", () => {
     const env = checkoutRuntimeEnv("/work/repo", {OPENTEAM_PHASE: "provision"})
 
-    expect(env.TMPDIR).toBe("/work/repo/.openteam/tmp")
-    expect(env.XDG_CACHE_HOME).toBe("/work/repo/.openteam/cache")
-    expect(env.OPENTEAM_ARTIFACTS_DIR).toBe("/work/repo/.openteam/artifacts")
+    expect(env.TMPDIR).toBe("/work/.openteam-runtime/tmp")
+    expect(env.XDG_CACHE_HOME).toBe("/work/.openteam-runtime/cache")
+    expect(env.OPENTEAM_ARTIFACTS_DIR).toBe("/work/.openteam-runtime/artifacts")
+    expect(env.OPENTEAM_CHECKOUT_RUNTIME_DIR).toBe("/work/.openteam-runtime")
     expect(env.PATH?.split(":")[0]).toBe("/work/repo/.openteam/bin")
     expect(env.OPENTEAM_PHASE).toBe("provision")
   })

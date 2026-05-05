@@ -455,6 +455,7 @@ export type ProvisionFailureCategory =
   | "project-profile-blocker"
   | "verification-tooling-missing"
   | "dev-env-wrapper-failed"
+  | "provision-checkout-local-runtime"
   | "provision-stale-no-process"
 
 export type TaskRunPhase = {
@@ -466,6 +467,7 @@ export type TaskRunPhase = {
   details?: Record<string, unknown>
   error?: string
 }
+
 export type OpenCodeAttemptState = "running" | "succeeded" | "failed" | "skipped"
 
 export type OpenCodeAttemptRecord = {
@@ -494,7 +496,6 @@ export type OpenCodeAttemptRecord = {
   fallbackEligible?: boolean
   nextAction?: "retry-same-model" | "fallback-model" | "fail"
 }
-
 
 export type RepoIdentity = {
   key: string
@@ -727,8 +728,8 @@ export type TaskRunRecord = {
     opencodeAttempts?: string[]
     provision?: string
     dev?: string
-  opencodeAttemptRecords?: OpenCodeAttemptRecord[]
   }
+  opencodeAttemptRecords?: OpenCodeAttemptRecord[]
   process?: {
     runnerPid?: number
     provisionPid?: number

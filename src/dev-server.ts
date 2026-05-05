@@ -1,5 +1,5 @@
 import {createWriteStream} from "node:fs"
-import {mkdir} from "node:fs/promises"
+import {mkdir, readFile} from "node:fs/promises"
 import {spawn, type ChildProcess} from "node:child_process"
 import net from "node:net"
 import path from "node:path"
@@ -23,6 +23,97 @@ export type StartedDevServer = {
   logFile: string
   command: string[]
   processGroup: boolean
+}
+
+export type DevServerFailureCategory =
+  | "dev-server-watch-exhaustion"
+  | "dev-server-fd-exhaustion"
+  | "dev-server-disk-full"
+  | "dev-server-start-failed"
+
+export type DevServerRuntimeFailure = {
+  category: DevServerFailureCategory
+  reason: string
+  evidence?: string
+  path?: string
+}
+
+export class DevServerStartError extends Error {
+  category: DevServerFailureCategory
+  logFile: string
+  exitCode?: number | null
+  exitSignal?: string | null
+
+  constructor(message: string, details: {
+    category: DevServerFailureCategory
+    logFile: string
+    exitCode?: number | null
+    exitSignal?: string | null
+  }) {
+    super(message)
+    this.name = "DevServerStartError"
+    this.category = details.category
+    this.logFile = details.logFile
+    this.exitCode = details.exitCode
+    this.exitSignal = details.exitSignal
+  }
+}
+
+const DEV_SERVER_STABILITY_MS = 1500
+
+export const detectDevServerRuntimeFailure = (text: string): DevServerRuntimeFailure | undefined => {
+  const watchPath = text.match(/(?:watch|path|filename):?\s*'([^']+)'/i)?.[1]
+    ?? text.match(/watch '([^']+)'/i)?.[1]
+  const line = text.split(/\r?\n/).find(item => /ENOSPC|EMFILE|file watchers|inotify/i.test(item))?.trim()
+
+  if (/ENOSPC/i.test(text) && /watch|file watchers|inotify|FSWatcher|NodeFsHandler/i.test(text)) {
+    return {
+      category: "dev-server-watch-exhaustion",
+      reason: "dev server exhausted file watchers while scanning the checkout",
+      evidence: line,
+      path: watchPath,
+    }
+  }
+
+  if (/EMFILE|too many open files/i.test(text)) {
+    return {
+      category: "dev-server-fd-exhaustion",
+      reason: "dev server exhausted process file descriptors",
+      evidence: line,
+    }
+  }
+
+  if (/ENOSPC|no space left on device/i.test(text)) {
+    return {
+      category: "dev-server-disk-full",
+      reason: "dev server ran out of disk space",
+      evidence: line,
+    }
+  }
+
+  return undefined
+}
+
+const devServerStartError = async (input: {
+  logFile: string
+  code: number | null
+  signal: NodeJS.Signals | null
+}) => {
+  const logText = await readFile(input.logFile, "utf8").catch(() => "")
+  const failure = detectDevServerRuntimeFailure(logText)
+  const category = failure?.category ?? "dev-server-start-failed"
+  const details = [
+    `dev server exited before stable readiness with code ${input.code ?? -1}`,
+    input.signal ? `signal ${input.signal}` : "",
+    failure?.reason,
+    failure?.path ? `path ${failure.path}` : "",
+  ].filter(Boolean).join("; ")
+  return new DevServerStartError(details, {
+    category,
+    logFile: input.logFile,
+    exitCode: input.code,
+    exitSignal: input.signal,
+  })
 }
 
 const isPortFree = async (port: number) => {
@@ -147,13 +238,16 @@ export const startConfiguredDevServer = async (options: {
     detached: options.detached,
     mirrorOutput: options.mirrorOutput,
   })
-  const ready = waitForDevHealth(url, options.timeoutMs)
-  const exitBeforeReady = new Promise<never>((_, reject) => {
-    const onClose = (code: number | null) => reject(new Error(`dev server exited before ready with code ${code ?? -1}`))
-    child.once("close", onClose)
-    ready.finally(() => child.off("close", onClose))
+  const exit = new Promise<never>((_, reject) => {
+    child.once("close", (code, signal) => {
+      void devServerStartError({logFile: options.logFile, code, signal}).then(reject)
+    })
   })
-  await Promise.race([ready, exitBeforeReady])
+  await Promise.race([waitForDevHealth(url, options.timeoutMs), exit])
+  await Promise.race([
+    new Promise(resolve => setTimeout(resolve, DEV_SERVER_STABILITY_MS)),
+    exit,
+  ])
   return {child, url, logFile: options.logFile, command, processGroup: Boolean(options.detached)}
 }
 

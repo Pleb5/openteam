@@ -11,6 +11,7 @@ import {statusReport} from "../src/commands/status.js"
 import {verifyCommand} from "../src/commands/verify.js"
 import {prepareAgent} from "../src/config.js"
 import {assertControlAllowed} from "../src/control-guard.js"
+import {detectDevServerRuntimeFailure} from "../src/dev-server.js"
 import {detectDevEnv, wrapDevEnvCommand} from "../src/dev-env.js"
 import {createDoneContract} from "../src/done-contract.js"
 import {evaluateEvidencePolicy, prPublicationDecision} from "../src/evidence-policy.js"
@@ -36,6 +37,7 @@ import {continuationEvidenceForCarry, continuationPromptLines, createContinuatio
 import {observeRun, observeRuns} from "../src/run-observer.js"
 import {executeOperatorTakeover, operatorTakeoverHandoffPath, releaseOperatorTakeover} from "../src/run-takeover.js"
 import {refreshRuntimeStatus} from "../src/runtime-status.js"
+import {scanCheckoutRuntimeBloat} from "../src/runtime-bloat.js"
 import {resolveTaskSubject, subjectPromptLines} from "../src/subject.js"
 import {
   appendVerificationResultsFile,
@@ -1843,8 +1845,10 @@ describe("runtime invariants", () => {
 
     const written = await writeAgentBrowserTools(agent, checkout)
     const source = await readFile(toolFile, "utf8")
+    const syntax = spawnSync(process.execPath, ["--check", toolFile], {encoding: "utf8"})
 
     expect(written).toBe(toolFile)
+    expect(syntax.status, syntax.stderr).toBe(0)
     expect(source).toContain("export const open = tool")
     expect(source).toContain("export const snapshot = tool")
     expect(source).toContain("export const press = tool")
@@ -1870,9 +1874,19 @@ describe("runtime invariants", () => {
     expect(source).toContain("MAX_OUTPUT_CHARS = 12345")
     expect(source).toContain("--max-output")
     expect(source).toContain("String(MAX_OUTPUT_CHARS)")
-    expect(source).toContain("return run([\"press\"")
-    expect(source).toContain("return run([\"type\"")
-    expect(source).toContain("return run([\"find\"")
+    expect(source).toContain('join("\\n")')
+    expect(source).toContain('"\\n\\n[truncated; full output: "')
+    expect(source).toContain('return output + "\\nscreenshot: " + file')
+    expect(source).not.toContain('join("\n")')
+    expect(source).not.toContain('return output + "\nscreenshot: " + file')
+    expect(source).toContain('return run(["press", args.key]')
+    expect(source).toContain('return run(["type", args.selector, args.text]')
+    expect(source).toContain('return run(["keyboard", "type", args.text]')
+    expect(source).toContain('locator: tool.schema.enum(["role", "text", "label"')
+    expect(source).toContain('args.locator === "nth"')
+    expect(source).toContain('"find",')
+    expect(source).toContain('["--selector", args.selector]')
+    expect(source).toContain('await run(["screenshot", ...(args.full ? ["--full"] : []), file]')
     expect(source).toContain("return run([\"scroll\"")
     expect(source).toContain("return run([\"select\"")
     expect(source).toContain("return run([\"check\"")
@@ -2112,18 +2126,36 @@ describe("runtime invariants", () => {
     })
   })
 
-  test("worker process env confines temp and cache paths to checkout runtime dirs", () => {
+  test("worker process env keeps bulk runtime paths outside checkout", () => {
     const env = checkoutRuntimeEnv("/repo/checkout", {OPENTEAM_PHASE: "provision"})
 
-    expect(env.TMPDIR).toBe("/repo/checkout/.openteam/tmp")
-    expect(env.TMP).toBe("/repo/checkout/.openteam/tmp")
-    expect(env.TEMP).toBe("/repo/checkout/.openteam/tmp")
-    expect(env.XDG_CACHE_HOME).toBe("/repo/checkout/.openteam/cache")
-    expect(env.OPENTEAM_ARTIFACTS_DIR).toBe("/repo/checkout/.openteam/artifacts")
+    expect(env.TMPDIR).toBe("/repo/.openteam-runtime/tmp")
+    expect(env.TMP).toBe("/repo/.openteam-runtime/tmp")
+    expect(env.TEMP).toBe("/repo/.openteam-runtime/tmp")
+    expect(env.XDG_CACHE_HOME).toBe("/repo/.openteam-runtime/cache")
+    expect(env.OPENTEAM_ARTIFACTS_DIR).toBe("/repo/.openteam-runtime/artifacts")
     expect(env.OPENTEAM_CHECKOUT).toBe("/repo/checkout")
-    expect(env.npm_config_cache).toBe("/repo/checkout/.openteam/cache/npm")
+    expect(env.OPENTEAM_CHECKOUT_RUNTIME_DIR).toBe("/repo/.openteam-runtime")
+    expect(env.npm_config_cache).toBe("/repo/.openteam-runtime/cache/npm")
     expect(env.PATH?.split(":")[0]).toBe("/repo/checkout/.openteam/bin")
     expect(env.OPENTEAM_PHASE).toBe("provision")
+  })
+
+  test("dev-server log classifier detects watcher exhaustion", () => {
+    const failure = detectDevServerRuntimeFailure("Error: ENOSPC: System limit for number of file watchers reached, watch '/repo/checkout/.openteam/opencode/snapshot/objects/aa'\n")
+
+    expect(failure?.category).toBe("dev-server-watch-exhaustion")
+    expect(failure?.path).toContain(".openteam/opencode")
+  })
+
+  test("runtime bloat scan reports checkout-local generated directories", async () => {
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    await mkdir(path.join(checkout, ".openteam", "opencode", "snapshot"), {recursive: true})
+    await writeFile(path.join(checkout, ".openteam", "opencode", "snapshot", "object"), "x")
+
+    const report = await scanCheckoutRuntimeBloat(checkout, {includeBelowThreshold: true})
+
+    expect(report.entries.some(entry => entry.relativePath === ".openteam/opencode")).toBe(true)
   })
 
   test("managed checkout git credentials resolve provider token for matching fork URL only", async () => {

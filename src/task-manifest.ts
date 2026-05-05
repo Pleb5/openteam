@@ -164,9 +164,10 @@ export type TaskManifest = {
     projectStacks: string[]
     projectDocs: string[]
     projectBlockers: string[]
-    scratchPath: ".openteam/tmp"
-    cachePath: ".openteam/cache"
-    artifactsPath: ".openteam/artifacts"
+    runtimePath: string
+    scratchPath: string
+    cachePath: string
+    artifactsPath: string
   }
   files: {
     taskManifest: string
@@ -212,6 +213,22 @@ export type BuildTaskManifestInput = {
   opencodeRuntime?: OpenCodeRuntimeHandoff
   subject?: ResolvedTaskSubject
   runtime?: TaskManifestRuntime
+  environmentPaths?: {
+    runtime: string
+    scratch: string
+    cache: string
+    artifacts: string
+  }
+}
+
+const defaultEnvironmentPaths = (checkout: string) => {
+  const runtime = path.join(path.dirname(checkout), ".openteam-runtime")
+  return {
+    runtime,
+    scratch: path.join(runtime, "tmp"),
+    cache: path.join(runtime, "cache"),
+    artifacts: path.join(runtime, "artifacts"),
+  }
 }
 
 const repoIdentitySummary = (identity: RepoIdentity): ManifestRepoIdentity => ({
@@ -273,6 +290,7 @@ const continuationSummary = (continuation?: TaskItem["continuation"]): ManifestC
 export const buildTaskManifest = (input: BuildTaskManifestInput): TaskManifest => {
   const checkout = input.resolved.context.checkout
   const manifestFile = taskManifestPath(checkout)
+  const environmentPaths = input.environmentPaths ?? defaultEnvironmentPaths(checkout)
   return {
     version: 1,
     generatedAt: new Date().toISOString(),
@@ -338,9 +356,10 @@ export const buildTaskManifest = (input: BuildTaskManifestInput): TaskManifest =
       projectStacks: input.projectProfile.stacks,
       projectDocs: input.projectProfile.docs,
       projectBlockers: input.projectProfile.blockers,
-      scratchPath: ".openteam/tmp",
-      cachePath: ".openteam/cache",
-      artifactsPath: ".openteam/artifacts",
+      runtimePath: environmentPaths.runtime,
+      scratchPath: environmentPaths.scratch,
+      cachePath: environmentPaths.cache,
+      artifactsPath: environmentPaths.artifacts,
     },
     files: {
       taskManifest: manifestFile,
