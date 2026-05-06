@@ -574,12 +574,15 @@ const safeName = (value: string) =>
 const shortHash = (value: string) => createHash("sha256").update(value || "session").digest("hex").slice(0, 16)
 
 const sessionName = () =>
+  CONFIG_ENV.OPENTEAM_AGENT_BROWSER_SESSION?.trim() ||
+  process.env.OPENTEAM_AGENT_BROWSER_SESSION ||
   "ot-" + shortHash(process.env.OPENTEAM_RUN_ID || process.env.OPENTEAM_TASK_MANIFEST || process.cwd())
 
 const socketDir = () => {
   const configured = CONFIG_ENV.AGENT_BROWSER_SOCKET_DIR?.trim() || process.env.AGENT_BROWSER_SOCKET_DIR?.trim()
   if (configured) return configured
-  return path.join(tmpdir(), "ot-ab-" + (typeof process.getuid === "function" ? String(process.getuid()) : "user"))
+  const base = process.platform === "win32" ? tmpdir() : "/tmp"
+  return path.join(base, "ot-ab-" + (typeof process.getuid === "function" ? String(process.getuid()) : "user"))
 }
 
 const artifactPath = (directory: string, name: string, ext: string) =>

@@ -10,8 +10,9 @@ export const agentBrowserSessionName = (value?: string) => {
 }
 
 export const agentBrowserSocketDir = (env: Record<string, string | undefined> = process.env) => {
-  const configured = env.AGENT_BROWSER_SOCKET_DIR?.trim()
+  const configured = env.AGENT_BROWSER_SOCKET_DIR?.trim() || process.env.AGENT_BROWSER_SOCKET_DIR?.trim()
   if (configured) return configured
   const uid = typeof process.getuid === "function" ? String(process.getuid()) : "user"
-  return path.join(tmpdir(), `ot-ab-${uid}`)
+  const base = process.platform === "win32" ? tmpdir() : "/tmp"
+  return path.join(base, `ot-ab-${uid}`)
 }

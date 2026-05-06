@@ -2036,11 +2036,76 @@ describe("runtime invariants", () => {
 
   test("agent-browser runtime helpers keep unix socket paths short", () => {
     const runId = "builder-01-20260505112551-continue-20260505105136-continue-20260505090542-continue"
-    const session = agentBrowserSessionName(runId)
-    const socketDir = agentBrowserSocketDir({})
+    const originalTmpdir = process.env.TMPDIR
+    const originalSocketDir = process.env.AGENT_BROWSER_SOCKET_DIR
 
-    expect(session).toMatch(/^ot-[a-f0-9]{16}$/)
-    expect(path.join(socketDir, `${session}.sock`).length).toBeLessThanOrEqual(103)
+    try {
+      delete process.env.AGENT_BROWSER_SOCKET_DIR
+      process.env.TMPDIR = path.join("/home/test", "very-long-managed-runtime".repeat(12), "tmp")
+      const session = agentBrowserSessionName(runId)
+      const socketDir = agentBrowserSocketDir({})
+
+      expect(session).toMatch(/^ot-[a-f0-9]{16}$/)
+      expect(path.join(socketDir, `${session}.sock`).length).toBeLessThanOrEqual(103)
+      if (process.platform !== "win32") {
+        const uid = typeof process.getuid === "function" ? process.getuid() : "user"
+        expect(socketDir).toBe(path.join("/tmp", `ot-ab-${uid}`))
+      }
+    } finally {
+      if (originalTmpdir === undefined) delete process.env.TMPDIR
+      else process.env.TMPDIR = originalTmpdir
+      if (originalSocketDir === undefined) delete process.env.AGENT_BROWSER_SOCKET_DIR
+      else process.env.AGENT_BROWSER_SOCKET_DIR = originalSocketDir
+    }
+  })
+
+  test("browser-cli runner respects explicit agent-browser env overrides", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    const app = makeApp(runtimeRoot)
+    const artifactsRoot = path.join(runtimeRoot, "artifacts")
+    const socketDir = path.join(await mkdtemp(path.join(tmpdir(), "agent-browser-sock-")), "s")
+    const originalSocketDir = process.env.AGENT_BROWSER_SOCKET_DIR
+    const originalSession = process.env.OPENTEAM_AGENT_BROWSER_SESSION
+    app.config.verification = {
+      defaultRunners: {web: ["agent-browser"]},
+      runners: {
+        "agent-browser": {
+          kind: "browser-cli",
+          enabled: true,
+          local: true,
+          modes: ["web"],
+          stacks: ["web"],
+          command: [
+            "sh",
+            "-c",
+            `printf '%s\n%s' "$AGENT_BROWSER_SOCKET_DIR" "$OPENTEAM_AGENT_BROWSER_SESSION" > "$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/env.txt"`,
+          ],
+        },
+      },
+    }
+
+    try {
+      process.env.AGENT_BROWSER_SOCKET_DIR = socketDir
+      process.env.OPENTEAM_AGENT_BROWSER_SESSION = "ab"
+      const plan = createVerificationPlan(app, "web", {stacks: ["web"]})
+      const results = await runLocalVerificationRunners({
+        checkout,
+        plan,
+        env: {OPENTEAM_RUN_ID: "run:123", OPENTEAM_ARTIFACTS_DIR: artifactsRoot},
+      })
+
+      expect(results.find(result => result.id === "agent-browser")?.state).toBe("succeeded")
+      expect(await readFile(
+        path.join(artifactsRoot, "verification", "agent-browser", "env.txt"),
+        "utf8",
+      )).toBe(`${socketDir}\nab`)
+    } finally {
+      if (originalSocketDir === undefined) delete process.env.AGENT_BROWSER_SOCKET_DIR
+      else process.env.AGENT_BROWSER_SOCKET_DIR = originalSocketDir
+      if (originalSession === undefined) delete process.env.OPENTEAM_AGENT_BROWSER_SESSION
+      else process.env.OPENTEAM_AGENT_BROWSER_SESSION = originalSession
+    }
   })
 
   test("verify command resolves checkout from worker runtime environment", async () => {

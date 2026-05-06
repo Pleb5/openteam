@@ -343,9 +343,13 @@ const runnerExecutionEnv = async (checkout: string, runner: VerificationRunnerPl
   const artifactsDir = await verificationArtifactsDir(checkout, runner, env)
   const profileDir = path.join(artifactsDir, "profile")
   await mkdir(profileDir, {recursive: true})
-  const session = agentBrowserSessionName(env.OPENTEAM_RUN_ID || process.env.OPENTEAM_RUN_ID || checkout)
+  const runnerEnv = runner.environment ?? {}
+  const session = env.OPENTEAM_AGENT_BROWSER_SESSION
+    || runnerEnv.OPENTEAM_AGENT_BROWSER_SESSION
+    || process.env.OPENTEAM_AGENT_BROWSER_SESSION
+    || agentBrowserSessionName(env.OPENTEAM_RUN_ID || process.env.OPENTEAM_RUN_ID || checkout)
   return {
-    AGENT_BROWSER_SOCKET_DIR: agentBrowserSocketDir(env),
+    AGENT_BROWSER_SOCKET_DIR: agentBrowserSocketDir({...runnerEnv, ...env}),
     OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR: artifactsDir,
     OPENTEAM_AGENT_BROWSER_PROFILE_DIR: profileDir,
     OPENTEAM_AGENT_BROWSER_SESSION: session,
