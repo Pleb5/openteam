@@ -1,4 +1,5 @@
 import {existsSync} from "node:fs"
+import {readFile} from "node:fs/promises"
 import {spawnSync} from "node:child_process"
 import {loadApp, prepareAgent} from "./config.js"
 import {assertAppConfigValid, formatConfigValidationIssues, validateAppConfig, type ConfigValidationOptions} from "./config-validate.js"
@@ -47,7 +48,7 @@ import {dispatchOperatorRequest} from "./orchestrator.js"
 import {refreshRuntimeStatus} from "./runtime-status.js"
 import {waitForDetachedLaunchReceipt} from "./launch-receipt.js"
 import {runObserverDaemon} from "./observer-daemon.js"
-import {listWorkers, startJob, startWorker, stopWorker} from "./supervisor.js"
+import {listWorkers, startJob, startTaskItemJob, startWorker, stopWorker} from "./supervisor.js"
 import type {AppCfg, TaskItem, TaskMode} from "./types.js"
 import {
   destroyNostr,
@@ -83,6 +84,7 @@ const help = () => {
   runs observe <run-id> [--json]
   runs watch [--active|--needs-review] [--once] [--interval-ms <ms>] [--limit <n>] [--json]
   observe-daemon [--interval-ms <ms>]
+  run-task-file <agentId|role> --task-file <path> --attach   # internal detached job entrypoint
   runs continue <run-id> [--task <text>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--no-carry-evidence] [--dry-run] [--force]
   runs repair-evidence <run-id> [--task <text>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--no-carry-evidence] [--dry-run] [--force]
   runs retry <run-id> [--task <text>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--dry-run] [--force]
@@ -327,7 +329,7 @@ const main = async () => {
     return
   }
 
-  const known = new Set(["doctor", "console", "prepare", "launch", "enqueue", "serve", "observe-daemon", "worker", "runs", "browser", "verify", "repo", "service", "relay", "profile", "tokens", "git"])
+  const known = new Set(["doctor", "console", "prepare", "launch", "run-task-file", "enqueue", "serve", "observe-daemon", "worker", "runs", "browser", "verify", "repo", "service", "relay", "profile", "tokens", "git"])
   if (!known.has(cmd)) {
     const handled = await dispatchOperatorRequest(app, args.join(" "), dispatchContext(args))
     if (handled.handled) {
@@ -404,6 +406,17 @@ const main = async () => {
     const task = must(value(args, "--task"), "--task")
     const file = await enqueueTask(app, worker(app, sub), task, taskOpts(args))
     console.log(file)
+    return
+  }
+
+  if (cmd === "run-task-file") {
+    if (!flag(args, "--attach")) throw new Error("run-task-file is an internal detached child entrypoint and requires --attach")
+    const id = worker(app, sub)
+    const taskFile = must(value(args, "--task-file"), "--task-file")
+    const item = JSON.parse(await readFile(taskFile, "utf8")) as TaskItem
+    assertAppConfigValid(app, {capability: "launch", agentId: id, mode: item.mode})
+    delete process.env.OPENTEAM_INTERNAL_DETACHED_LAUNCH
+    console.log(JSON.stringify(await runTask(app, id, item), null, 2))
     return
   }
 
@@ -526,6 +539,32 @@ const main = async () => {
     if (item.continuation?.contextId) {
       await cleanupStaleRunsForContext(app, item.continuation.contextId)
     }
+    const role = app.config.agents[agentId]?.role || agentId
+    const launchMode = resolveLaunchExecutionMode({
+      args,
+      role,
+      mode: item.mode,
+      stdinIsTTY: process.stdin.isTTY,
+      stdoutIsTTY: process.stdout.isTTY,
+      env: process.env,
+    })
+    if (launchMode.detached) {
+      if (!launchMode.explicit) {
+        console.error(`continuation defaulting to --detach: ${launchMode.reason}; use --attach to stream and wait in the foreground`)
+      }
+      const entry = await startTaskItemJob(app, {agentId, role, item})
+      const waitStarted = !flag(args, "--no-wait-started")
+      const waitStartedMs = Number.parseInt(value(args, "--wait-started-ms") || "15000", 10)
+      const receipt = waitStarted
+        ? await waitForDetachedLaunchReceipt(app, entry, {timeoutMs: Number.isFinite(waitStartedMs) ? waitStartedMs : 15_000})
+        : undefined
+      console.log(JSON.stringify({entry, receipt}, null, 2))
+      if (receipt?.state === "failed" || receipt?.state === "stale" || receipt?.state === "process-exited") {
+        process.exitCode = 1
+      }
+      return
+    }
+    delete process.env.OPENTEAM_INTERNAL_DETACHED_LAUNCH
     console.log(JSON.stringify(await runTask(app, agentId, item), null, 2))
     return
   }

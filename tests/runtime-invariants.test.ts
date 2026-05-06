@@ -39,6 +39,7 @@ import {observeRun, observeRuns} from "../src/run-observer.js"
 import {appendObserverAlert, observerAlertsPath} from "../src/observer-notifications.js"
 import {observerHealth, writeObserverState} from "../src/observer-state.js"
 import {waitForDetachedLaunchReceipt} from "../src/launch-receipt.js"
+import {startTaskItemJob} from "../src/supervisor.js"
 import {executeOperatorTakeover, formatOperatorTakeoverResult, operatorTakeoverHandoffPath, releaseOperatorTakeover} from "../src/run-takeover.js"
 import {refreshRuntimeStatus} from "../src/runtime-status.js"
 import {scanCheckoutRuntimeBloat} from "../src/runtime-bloat.js"
@@ -1112,6 +1113,27 @@ describe("runtime invariants", () => {
     expect(prompt.join(" ")).toContain("Prior review subject")
     expect(prompt.join(" ")).toContain("browser:succeeded")
     expect(prompt.join(" ")).toContain("repo-native:failed")
+  })
+
+  test("detached task item job preserves continuation payload in handoff file", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const prior = runRecord(app, {
+      state: "failed",
+      context: {id: "ctx1", checkout: path.join(runtimeRoot, "checkout"), branch: "openteam/test"},
+      verification: {
+        plan: createVerificationPlan(app, "code", {stacks: []}),
+        results: [{id: "repo-native", kind: "command", state: "succeeded", evidenceType: "repo-native", source: "worker"}],
+      },
+    })
+    const item = createContinuationTaskItem(prior, {kind: "continue"})
+    const entry = await startTaskItemJob(app, {agentId: "builder-01", role: "builder", item})
+    const handoff = JSON.parse(await readFile(entry.taskFile, "utf8")) as TaskItem
+
+    expect(entry.runtimeId).toBe(handoff.runtimeId)
+    expect(handoff.continuation?.fromRunId).toBe(prior.runId)
+    expect(handoff.continuation?.contextId).toBe("ctx1")
+    expect(handoff.continuation?.evidenceResults).toHaveLength(1)
   })
 
   test("continuation drops raw model/profile overrides after model infrastructure failure", async () => {

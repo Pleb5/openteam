@@ -58,6 +58,7 @@ const defaultJobLimit = (role: string) => {
 
 const stateDir = (app: AppCfg) => path.join(app.config.runtimeRoot, "orchestrator")
 const stateFile = (app: AppCfg) => path.join(stateDir(app), "workers.json")
+const taskHandoffDir = (app: AppCfg) => path.join(app.config.runtimeRoot, "orchestrator", "task-handoffs")
 
 const alive = (pid: number) => {
   try {
@@ -286,6 +287,81 @@ export const startJob = async (
   filtered.push(next)
   await save(app, filtered)
   return next
+}
+
+export const startTaskItemJob = async (
+  app: AppCfg,
+  args: {
+    agentId: string
+    role: string
+    item: TaskItem
+    name?: string
+  },
+) => {
+  assertAppConfigValid(app, {capability: "launch", agentId: args.agentId, mode: args.item.mode ?? app.config.repos[app.config.agents[args.agentId]?.repo || ""]?.mode ?? "web"})
+  const logsDir = path.join(app.config.runtimeRoot, "logs")
+  const handoffDir = taskHandoffDir(app)
+  await Promise.all([mkdir(logsDir, {recursive: true}), mkdir(handoffDir, {recursive: true})])
+
+  const suffix = uniqueSuffix()
+  const baseName = args.name || `${args.role}-job-${slug(args.item.target || args.agentId)}-${jobSlug(args.item.task)}-${suffix}`
+  const runtimeId = args.item.runtimeId || `${args.agentId}-${baseName}`
+  const workers = await pruneDead(app)
+  const existing = workers.find(item => item.name === baseName)
+  if (existing && alive(existing.pid)) {
+    throw new Error(`worker ${baseName} is already running (pid ${existing.pid})`)
+  }
+
+  const activeForRole = workers.filter(item => item.kind === "job" && item.role === args.role && alive(item.pid))
+  const limit = defaultJobLimit(args.role)
+  if (activeForRole.length >= limit) {
+    throw new Error(`role ${args.role} already has ${activeForRole.length}/${limit} active one-off jobs; wait, stop one, or raise the runtime limit in code`)
+  }
+
+  await seedWorkerIdentity(app, args.agentId)
+
+  const taskFile = path.join(handoffDir, `${baseName}.json`)
+  const item: TaskItem = {...args.item, runtimeId, agentId: args.agentId}
+  await writeFile(taskFile, `${JSON.stringify(item, null, 2)}\n`)
+  const logFile = path.join(logsDir, `${baseName}.log`)
+  const handle = await open(logFile, "w")
+  const script = path.join(app.root, "scripts", "openteam")
+  const cliArgs = ["run-task-file", args.agentId, "--task-file", taskFile, "--attach"]
+
+  const child = spawn(script, cliArgs, {
+    cwd: app.root,
+    env: {...process.env, OPENTEAM_CALLER_CWD: process.cwd(), OPENTEAM_INTERNAL_DETACHED_LAUNCH: "1", ...encodeTaskContextEnv(item)},
+    detached: true,
+    stdio: ["ignore", handle.fd, handle.fd],
+  })
+  child.unref()
+  await handle.close()
+
+  const next: ManagedWorker = {
+    name: baseName,
+    kind: "job",
+    agentId: args.agentId,
+    runtimeId,
+    role: args.role,
+    target: item.target,
+    mode: item.mode,
+    model: item.model,
+    modelProfile: item.modelProfile,
+    modelVariant: item.modelVariant,
+    task: item.task,
+    subject: item.subject,
+    parallel: item.parallel,
+    recipients: item.recipients,
+    source: item.source,
+    pid: child.pid!,
+    logFile,
+    startedAt: now(),
+  }
+
+  const filtered = workers.filter(item => item.name !== baseName)
+  filtered.push(next)
+  await save(app, filtered)
+  return {...next, taskFile}
 }
 
 export const stopWorker = async (app: AppCfg, name: string) => {
