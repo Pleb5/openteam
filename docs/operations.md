@@ -143,6 +143,7 @@ bun run src/cli.ts launch builder --target <repo-hint-or-30617-key> --mode web -
 ```
 
 This automatically seeds the selected worker identity from shared config before the task run begins.
+When a worker launch runs from a non-interactive shell, such as an AI tool call or service context, openteam defaults it to `--detach` so the caller's command timeout cannot kill the run's process tree. Use `--attach` only when you intentionally want foreground streaming and accept that the caller owns the lifetime of the run.
 Researcher tasks are read-only by default and include planning; their expected output is a handoff brief, not a patch or PR.
 
 Long-lived worker loop:

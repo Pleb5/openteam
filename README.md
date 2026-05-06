@@ -125,6 +125,8 @@ bun run src/cli.ts launch researcher --target 30617:<owner-pubkey>:<repo-d-tag> 
 bun run src/cli.ts launch builder --target 30617:<owner-pubkey>:<repo-d-tag> --mode web --task "Investigate issue"
 ```
 
+Non-interactive worker launches default to detached execution so OpenCode/Bash command timeouts do not kill the worker, dev server, and browser runtime. Add `--attach` only for foreground debugging.
+
 Run inspection and browser attach:
 
 ```bash

@@ -4,6 +4,7 @@ import {loadApp, prepareAgent} from "./config.js"
 import {assertAppConfigValid, formatConfigValidationIssues, validateAppConfig, type ConfigValidationOptions} from "./config-validate.js"
 import {assertControlAllowed} from "./control-guard.js"
 import {gitCredentialFromStdin} from "./git-auth.js"
+import {resolveLaunchExecutionMode} from "./launch-mode.js"
 import {browserCommand} from "./commands/browser.js"
 import {consolePrompt} from "./commands/console.js"
 import {
@@ -65,7 +66,8 @@ const help = () => {
   status
   console prompt
   prepare <agentId|role>
-  launch <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--parallel] [--runtime-id <id>] [--detach]
+  launch <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--parallel] [--runtime-id <id>] [--detach|--attach]
+    Non-interactive worker launches default to --detach; use --attach only for foreground debugging.
   enqueue <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>]
   serve [agentId|role]   # defaults to orchestrator-01 when omitted
   worker start <agentId|role> [--target <nostr-repo|hint|alias>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--name <worker-name>]
@@ -341,11 +343,23 @@ const main = async () => {
     const task = must(value(args, "--task"), "--task")
     const id = worker(app, sub)
     const opts = taskOpts(args)
+    const role = app.config.agents[id]?.role || id
     assertAppConfigValid(app, {capability: "launch", agentId: id, mode: opts.mode ?? "web"})
-    if (flag(args, "--detach")) {
+    const launchMode = resolveLaunchExecutionMode({
+      args,
+      role,
+      mode: opts.mode,
+      stdinIsTTY: process.stdin.isTTY,
+      stdoutIsTTY: process.stdout.isTTY,
+      env: process.env,
+    })
+    if (launchMode.detached) {
+      if (!launchMode.explicit) {
+        console.error(`launch defaulting to --detach: ${launchMode.reason}; use --attach to stream and wait in the foreground`)
+      }
       const entry = await startJob(app, {
         agentId: id,
-        role: app.config.agents[id]?.role || id,
+        role,
         task,
         target: opts.target,
         mode: opts.mode,

@@ -106,6 +106,7 @@ Prefer these verbs over vague control-plane phrasing when possible.
 Guidance:
 
 - use `launch` for one-off focused work
+- non-interactive worker `launch` defaults to detached execution; use `--attach` only for deliberate foreground debugging where the caller can safely own the run lifetime
 - one-off jobs get isolated runtime directories, state files, browser profiles, artifacts, logs, and run records
 - use `worker start` only when a long-running watcher or pinned repo worker is actually needed
 - use `worker list` before starting another persistent worker for the same role/target
