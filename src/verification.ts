@@ -238,8 +238,66 @@ export const readVerificationPlan = async (checkout: string) => {
   return readJsonIfExists<VerificationPlan>(verificationPlanPath(checkout))
 }
 
+const verificationStateFromLegacyStatus = (value: unknown): VerificationRunnerResult["state"] => {
+  if (value === "succeeded" || value === "failed" || value === "skipped" || value === "blocked") return value
+  if (value === "passed" || value === "pass" || value === true) return "succeeded"
+  if (value === "fail" || value === false) return "failed"
+  if (value === "skip") return "skipped"
+  return "failed"
+}
+
+const stringArray = (value: unknown): string[] | undefined => {
+  if (Array.isArray(value)) return value.filter(item => typeof item === "string")
+  if (typeof value === "string" && value) return [value]
+  return undefined
+}
+
+const optionalString = (value: unknown) => typeof value === "string" && value ? value : undefined
+
+const noteFromLegacyFields = (value: Record<string, unknown>) => {
+  const notes = [value.note, value.notes, value.evidence]
+    .filter(item => typeof item === "string" && item.trim()) as string[]
+  return notes.length ? notes.join("\n") : undefined
+}
+
+export const normalizeVerificationResult = (value: unknown): VerificationRunnerResult => {
+  const raw = typeof value === "object" && value !== null ? value as Record<string, unknown> : {}
+  const id = optionalString(raw.id) ?? optionalString(raw.runnerId) ?? "unknown"
+  const kind = optionalString(raw.kind) as VerificationRunnerResult["kind"] | undefined
+  const result: VerificationRunnerResult = {
+    id,
+    kind: kind ?? "command",
+    state: verificationStateFromLegacyStatus(raw.state ?? raw.status),
+    evidenceType: optionalString(raw.evidenceType) as VerificationRunnerResult["evidenceType"] | undefined,
+    source: optionalString(raw.source) as VerificationRunnerResult["source"] | undefined,
+    startedAt: optionalString(raw.startedAt),
+    finishedAt: optionalString(raw.finishedAt),
+    durationMs: typeof raw.durationMs === "number" ? raw.durationMs : undefined,
+    command: stringArray(raw.command),
+    cwd: optionalString(raw.cwd),
+    logFile: optionalString(raw.logFile),
+    artifacts: stringArray(raw.artifacts),
+    screenshots: stringArray(raw.screenshots),
+    url: optionalString(raw.url),
+    flow: optionalString(raw.flow),
+    consoleSummary: optionalString(raw.consoleSummary),
+    networkSummary: optionalString(raw.networkSummary),
+    eventIds: stringArray(raw.eventIds),
+    urlHealth: raw.urlHealth && typeof raw.urlHealth === "object" ? raw.urlHealth as VerificationRunnerResult["urlHealth"] : undefined,
+    exitCode: typeof raw.exitCode === "number" ? raw.exitCode : undefined,
+    signal: optionalString(raw.signal),
+    error: optionalString(raw.error),
+    blocker: optionalString(raw.blocker),
+    skippedReason: optionalString(raw.skippedReason),
+    note: noteFromLegacyFields(raw),
+  }
+  if (!result.evidenceType && id === "repo-native") result.evidenceType = "repo-native"
+  return result
+}
+
 export const readVerificationResults = async (checkout: string) => {
-  return await readJsonIfExists<VerificationRunnerResult[]>(verificationResultsPath(checkout)) ?? []
+  const results = await readJsonIfExists<unknown[]>(verificationResultsPath(checkout)) ?? []
+  return Array.isArray(results) ? results.map(normalizeVerificationResult) : []
 }
 
 export const appendVerificationResultsFile = async (checkout: string, results: VerificationRunnerResult[]) => {
@@ -247,7 +305,7 @@ export const appendVerificationResultsFile = async (checkout: string, results: V
   const file = verificationResultsPath(checkout)
   await mkdir(path.dirname(file), {recursive: true})
   const current = await readVerificationResults(checkout)
-  const next = [...current, ...results]
+  const next = [...current, ...results.map(normalizeVerificationResult)]
   await writeFile(file, `${JSON.stringify(next, null, 2)}\n`)
   return next
 }

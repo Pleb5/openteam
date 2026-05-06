@@ -491,6 +491,10 @@ const writeOcfg = async (agent: PreparedAgent, checkout: string, runtime?: Agent
   await ensureDir(dir)
   const cfg: Record<string, unknown> = {
     agent: opencodeManagedAgentConfig(agent, checkout),
+    provider: {
+      openai: {options: {chunkTimeout: 10 * 60_000}},
+      opencode: {options: {chunkTimeout: 10 * 60_000}},
+    },
   }
 
   if (mcp.command.length > 0) {
@@ -1278,6 +1282,11 @@ const updateRunRecordModelSelection = async (record: TaskRunRecord, selection: R
   })
 }
 
+const OPENCODE_MODEL_STALL_WARNING_MS = 5 * 60_000
+const OPENCODE_MODEL_STALL_CRITICAL_MS = 10 * 60_000
+const OPENCODE_IDLE_WARNING_MS = 10 * 60_000
+const OPENCODE_IDLE_CRITICAL_MS = 30 * 60_000
+
 const startOpenCodeWorkerWatchdog = (record: TaskRunRecord, logFile: string, intervalMs = 15_000, dbPath?: string) => {
   let lastFingerprint = ""
   let stopped = false
@@ -1290,7 +1299,7 @@ const startOpenCodeWorkerWatchdog = (record: TaskRunRecord, logFile: string, int
     ])
     const idleMs = info ? Date.now() - info.mtimeMs : undefined
     const blocked = text ? detectOpenCodeBlockedState(text) : undefined
-    const runtimeState = await inspectOpenCodeDbState(dbPath ?? resolveOpenCodeDbPath({logFile})).catch(() => undefined)
+    const runtimeState = await inspectOpenCodeDbState(dbPath ?? resolveOpenCodeDbPath({logFile}), {stallThresholdMs: OPENCODE_MODEL_STALL_WARNING_MS}).catch(() => undefined)
     const inFlightTools = text
       ? detectOpenCodeToolBoundaries(text).filter(item => item.inFlight).map(item => item.tool)
       : []
@@ -1304,10 +1313,10 @@ const startOpenCodeWorkerWatchdog = (record: TaskRunRecord, logFile: string, int
       : allInFlightTools.length > 0
         ? "warning"
         : modelStreamStalled
-          ? (runtimeState.messageAgeMs ?? 0) >= 30 * 60_000 ? "critical" : "warning"
-          : idleMs !== undefined && idleMs >= 30 * 60_000
+          ? (runtimeState.messageAgeMs ?? 0) >= OPENCODE_MODEL_STALL_CRITICAL_MS ? "critical" : "warning"
+          : idleMs !== undefined && idleMs >= OPENCODE_IDLE_CRITICAL_MS
             ? "critical"
-            : idleMs !== undefined && idleMs >= 10 * 60_000
+            : idleMs !== undefined && idleMs >= OPENCODE_IDLE_WARNING_MS
               ? "warning"
               : "info"
     const runtimeHardFailure = !blocked && severity === "critical" && runtimeState

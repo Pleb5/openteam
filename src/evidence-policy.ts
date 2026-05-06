@@ -40,7 +40,7 @@ const hasText = (result: VerificationRunnerResult, pattern: RegExp) =>
     result.logFile,
     result.artifacts?.join(" "),
     result.screenshots?.join(" "),
-    result.command?.join(" "),
+    Array.isArray(result.command) ? result.command.join(" ") : typeof result.command === "string" ? result.command : undefined,
     result.url,
     result.flow,
     result.consoleSummary,

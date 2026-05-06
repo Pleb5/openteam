@@ -19,7 +19,30 @@ if [[ $# -eq 0 ]]; then
     env OPENTEAM_CALLER_CWD="$CALLER_CWD" "$BUN_BIN" run src/cli.ts service start orchestrator-01 >/dev/null
   }
 
+  start_alert_watcher() {
+    if [[ "${OPENTEAM_DISABLE_LOCAL_ALERTS:-}" == "1" ]]; then
+      return 0
+    fi
+
+    local alerts="$ROOT/runtime/orchestrator/alerts.jsonl"
+    mkdir -p "$(dirname -- "$alerts")"
+    touch "$alerts"
+
+    (
+      parent="$$"
+      tail --pid="$parent" -n0 -F "$alerts" 2>/dev/null | while IFS= read -r line; do
+        kill -0 "$parent" 2>/dev/null || exit 0
+        summary="$({ "$BUN_BIN" -e 'const input = await Bun.stdin.text(); const alert = JSON.parse(input); const run = String(alert.runId || "").slice(-28); const message = String(alert.message || "").split("\n").find(Boolean) || "openteam alert"; const next = alert.recommendedAction ? ` next: ${alert.recommendedAction}` : ""; console.log(`${String(alert.severity || "alert").toUpperCase()} ${run}: ${message}${next}`)' <<<"$line"; } 2>/dev/null || printf '%s' "$line")"
+        printf '\a\n%s\n' "$summary" >&2
+        if command -v notify-send >/dev/null 2>&1; then
+          notify-send -a openteam -u critical "openteam alert" "$summary" >/dev/null 2>&1 || true
+        fi
+      done
+    ) &
+  }
+
   ensure_orchestrator
+  start_alert_watcher
 
   OPENCODE_BIN="$(command -v opencode || true)"
   if [[ -z "$OPENCODE_BIN" ]]; then

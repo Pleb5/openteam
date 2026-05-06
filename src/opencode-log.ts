@@ -164,7 +164,7 @@ export const detectOpenCodeHardFailure = (text: string) => {
 export const detectWorkerVerificationBlockers = (text: string) => {
   const clean = stripAnsi(text)
   const checks: Array<[RegExp, string]> = [
-    [/\b(SIGTRAP)\b/i, "browser/runtime process exited with SIGTRAP"],
+    [/DevToolsActivePort|Chrome exited early|Trace\/breakpoint trap|\bchromium\b[^\n]*(?:SIGTRAP|core dumped)|\b(SIGTRAP)\b/i, "local browser runtime unavailable"],
     [/\bsvelte-kit\b[^\n]*(?:not found|executable|failed|exited\s+127|code\s+127)/i, "svelte-kit executable failed or was unavailable"],
     [/npm (?:ERR! )?code EOVERRIDE|override conflict/i, "npm dependency override conflict"],
     [/gitlint:\s*command not found|No module named ['"]?gitlint\.cli/i, "repo commit hook requires gitlint but it was unavailable"],

@@ -14,6 +14,7 @@ import {prepareAgent} from "../src/config.js"
 import {assertControlAllowed} from "../src/control-guard.js"
 import {detectDevServerRuntimeFailure} from "../src/dev-server.js"
 import {detectDevEnv, wrapDevEnvCommand} from "../src/dev-env.js"
+import {reportMetadataFromBody} from "../src/dm-outbox.js"
 import {createDoneContract} from "../src/done-contract.js"
 import {evaluateEvidencePolicy, prPublicationDecision} from "../src/evidence-policy.js"
 import {configureCheckoutGitAuth, gitCredentialFromStdin} from "../src/git-auth.js"
@@ -901,6 +902,52 @@ describe("runtime invariants", () => {
     expect(alerts.trim().split("\n")).toHaveLength(1)
   })
 
+  test("evidence policy tolerates malformed verification command fields", () => {
+    const view = evaluateEvidencePolicy(createDoneContract("builder", "code", "Fix worker bug"), [{
+      id: "repo-native",
+      kind: "command",
+      state: "succeeded",
+      command: "pnpm test",
+      note: "repo-native check passed",
+    } as any])
+
+    expect(view.level).not.toBe("failed")
+  })
+
+  test("legacy verification rows normalize before evidence policy evaluation", async () => {
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    await mkdir(path.join(checkout, ".openteam"), {recursive: true})
+    await writeFile(path.join(checkout, ".openteam", "verification-results.json"), JSON.stringify([{
+      runnerId: "repo-native",
+      command: "pnpm test",
+      status: "passed",
+      evidence: "repo-native checks passed",
+      notes: "build succeeded",
+    }], null, 2))
+
+    const results = await readVerificationResults(checkout)
+    const view = evaluateEvidencePolicy(createDoneContract("builder", "code", "Fix worker bug"), results)
+
+    expect(results[0]?.id).toBe("repo-native")
+    expect(results[0]?.state).toBe("succeeded")
+    expect(results[0]?.command).toEqual(["pnpm test"])
+    expect(results[0]?.evidenceType).toBe("repo-native")
+    expect(results[0]?.note).toContain("repo-native checks passed")
+    expect(view.level).not.toBe("failed")
+  })
+
+  test("observation reports are classified separately from task reports", () => {
+    const metadata = reportMetadataFromBody([
+      "observation: [builder-01] running opencode-idle-critical",
+      "run: builder-01-task-a",
+      "family: builder-01-task-a",
+      "next: openteam runs observe builder-01-task-a",
+    ].join("\n"))
+
+    expect(metadata.eventType).toBe("observation-report")
+    expect(metadata.runId).toBe("builder-01-task-a")
+  })
+
   test("detached launch receipt confirms run startup from the matching runtime id", async () => {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
     const app = makeApp(runtimeRoot)
@@ -1659,6 +1706,8 @@ describe("runtime invariants", () => {
 
   test("worker logs detect verification blockers without classifying normal errors", () => {
     expect(detectWorkerVerificationBlockers("Playwright Chromium exited with SIGTRAP")).toHaveLength(2)
+    expect(detectWorkerVerificationBlockers("Chrome exited early without writing DevToolsActivePort").at(0)?.reason).toContain("browser runtime")
+    expect(detectWorkerVerificationBlockers("Trace/breakpoint trap (core dumped) chromium --headless").at(0)?.reason).toContain("browser runtime")
     expect(detectOpenCodeHardFailure("Publication is still blocked by the environment")?.reason).toContain("publication")
     expect(detectWorkerVerificationBlockers("gitlint: command not found").at(0)?.reason).toContain("gitlint")
     expect(detectWorkerVerificationBlockers("To get started with GitHub CLI, please run: gh auth login").at(0)?.reason).toContain("GitHub CLI")
@@ -2148,6 +2197,32 @@ describe("runtime invariants", () => {
     } finally {
       console.log = originalLog
     }
+  })
+
+  test("verify list renders normalized legacy result rows", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = await mkdtemp(path.join(tmpdir(), "openteam-checkout-"))
+    const app = makeApp(runtimeRoot)
+    await writeVerificationPlan(checkout, createVerificationPlan(app, "code", {stacks: []}))
+    await mkdir(path.join(checkout, ".openteam"), {recursive: true})
+    await writeFile(path.join(checkout, ".openteam", "verification-results.json"), JSON.stringify([{
+      runnerId: "repo-native",
+      command: "pnpm test",
+      status: "passed",
+      notes: "legacy row passed",
+    }], null, 2))
+
+    const lines: string[] = []
+    const originalLog = console.log
+    console.log = (value?: unknown) => { lines.push(String(value ?? "")) }
+    try {
+      await verifyCommand(app, "list", ["verify", "list", "--checkout", checkout])
+    } finally {
+      console.log = originalLog
+    }
+
+    expect(lines.join("\n")).toContain("result: repo-native succeeded")
+    expect(lines.join("\n")).not.toContain("undefined undefined")
   })
 
   test("workers can record agentic verification evidence without running a command", async () => {

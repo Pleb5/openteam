@@ -146,6 +146,8 @@ export const writeRunRecord = async (record: TaskRunRecord) => {
 
 const nowIso = () => new Date().toISOString()
 const STALE_NO_ACTIVITY_MS = 10 * 60_000
+const OPENCODE_MODEL_STALL_WARNING_MS = 5 * 60_000
+const OPENCODE_MODEL_STALL_CRITICAL_MS = 10 * 60_000
 const OPENCODE_IDLE_WARNING_MS = 10 * 60_000
 const OPENCODE_IDLE_CRITICAL_MS = 30 * 60_000
 
@@ -260,7 +262,7 @@ const opencodeRuntimeProgress = async (record: TaskRunRecord, checkout?: string)
     attempt: attempt?.attempt ?? 1,
     logFile: record.logs?.opencode,
   })
-  return inspectOpenCodeDbState(dbPath, {stallThresholdMs: OPENCODE_IDLE_WARNING_MS}).catch(() => undefined)
+  return inspectOpenCodeDbState(dbPath, {stallThresholdMs: OPENCODE_MODEL_STALL_WARNING_MS}).catch(() => undefined)
 }
 
 const workerVerificationBlockers = async (file?: string) => {
@@ -341,7 +343,7 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
   const opencodeRuntimeStalled = opencodeRuntime?.kind === "model-stream-stalled" || opencodeRuntime?.kind === "model-stream-stalled-after-tool"
   const opencodeStallSeverity: "warning" | "critical" | undefined = record.state === "running" && runningPhase?.name === "opencode-worker" && !opencodeProgress.blocked
     ? opencodeRuntimeStalled
-      ? (opencodeRuntime.messageAgeMs ?? 0) >= OPENCODE_IDLE_CRITICAL_MS ? "critical" : "warning"
+      ? (opencodeRuntime.messageAgeMs ?? 0) >= OPENCODE_MODEL_STALL_CRITICAL_MS ? "critical" : "warning"
       : typeof opencodeIdleMs === "number"
         ? opencodeIdleMs >= OPENCODE_IDLE_CRITICAL_MS
           ? "critical"
@@ -483,6 +485,8 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
       runtime: opencodeRuntime,
       idleWarningMs: OPENCODE_IDLE_WARNING_MS,
       idleCriticalMs: OPENCODE_IDLE_CRITICAL_MS,
+      modelStallWarningMs: OPENCODE_MODEL_STALL_WARNING_MS,
+      modelStallCriticalMs: OPENCODE_MODEL_STALL_CRITICAL_MS,
     },
     devServer: {
       ...record.devServer,

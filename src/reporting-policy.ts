@@ -219,7 +219,7 @@ const formatObservationReport = (event: RunObservationEvent) => {
   const next = nextForState(snapshot.runId, snapshot.state, snapshot.recommendedAction)
   const evidence = evidenceText(snapshot.evidenceLevel, snapshot.prEligible)
   return [
-    `[${snapshot.agentId}] ${snapshot.state}${failure ? ` ${failure}` : ""}`,
+    `observation: [${snapshot.agentId}] ${snapshot.state}${failure ? ` ${failure}` : ""}`,
     `run: ${snapshot.runId}`,
     `family: ${snapshot.familyKey ?? snapshot.runId}`,
     `target: ${compactTarget(snapshot.target)}`,
