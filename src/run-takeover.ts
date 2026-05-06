@@ -48,6 +48,8 @@ export const operatorTakeoverHandoffPath = (checkout: string) =>
 
 const opencodeCommand = (app: AppCfg, checkout: string) => [app.config.opencode.binary || "opencode", "--dir", checkout]
 
+const operatorTakeoverTerminalWarning = "Run the suggested command only from a real human terminal. Do not execute it from OpenCode Bash, an openteam worker, or any managed/non-interactive automation session."
+
 const runGit = (checkout: string, args: string[]) => {
   if (!existsSync(path.join(checkout, ".git"))) return undefined
   const result = spawnSync("git", args, {cwd: checkout, encoding: "utf8", maxBuffer: 1024 * 1024})
@@ -179,6 +181,7 @@ export const buildOperatorTakeoverHandoff = async (
     "Start by reading this takeover handoff and .openteam/task.json. Continue manually from the current checkout state, verify any claims before publishing, and use openteam verify/openteam repo helpers only when useful.",
     "",
     "## Suggested Command",
+    operatorTakeoverTerminalWarning,
     "",
     "```sh",
     commandText(command),
@@ -318,5 +321,6 @@ export const formatOperatorTakeoverResult = (result: Awaited<ReturnType<typeof e
   `handoff: ${result.handoffFile}`,
   `context held: ${result.contextHeld ? "yes" : result.willHoldContext ? "planned" : "no"}`,
   `stopped managed worker: ${result.stoppedManagedWorker ? "yes" : result.shouldStopManagedWorker ? "planned" : "no"}`,
+  `warning: ${operatorTakeoverTerminalWarning}`,
   `command: ${result.commandText}`,
 ].join("\n")

@@ -73,9 +73,9 @@ The orchestrator should prefer the local CLI control surface rather than inventi
 Useful commands:
 
 ```bash
-openteam launch builder --target 30617:<owner-pubkey>:<repo-d-tag> --mode web --task "..."
-openteam launch builder --target 30617:<owner-pubkey>:<repo-d-tag> --mode web --parallel --task "..."
-openteam launch researcher --target 30617:<owner-pubkey>:<repo-d-tag> --mode code --task "Research the safest implementation plan for ..."
+openteam launch builder --target 30617:<owner-pubkey>:<repo-d-tag> --mode web --task "..." --detach
+openteam launch builder --target 30617:<owner-pubkey>:<repo-d-tag> --mode web --parallel --task "..." --detach
+openteam launch researcher --target 30617:<owner-pubkey>:<repo-d-tag> --mode code --task "Research the safest implementation plan for ..." --detach
 openteam enqueue builder --target <repo-hint-or-alias> --mode code --task "..."
 openteam worker start triager --target <repo-hint-or-alias> --mode code --name triager-repo-a
 openteam worker stop triager-repo-a
@@ -106,7 +106,7 @@ Prefer these verbs over vague control-plane phrasing when possible.
 Guidance:
 
 - use `launch` for one-off focused work
-- non-interactive worker `launch` defaults to detached execution; use `--attach` only for deliberate foreground debugging where the caller can safely own the run lifetime
+- non-interactive worker `launch` defaults to detached execution; from OpenCode or other managed/non-interactive sessions, use `--detach` and never `--attach` because the caller's tool timeout can kill the run
 - one-off jobs get isolated runtime directories, state files, browser profiles, artifacts, logs, and run records
 - use `worker start` only when a long-running watcher or pinned repo worker is actually needed
 - use `worker list` before starting another persistent worker for the same role/target
@@ -119,6 +119,7 @@ Guidance:
 - use `runs evidence <run-id>` to classify completion as evidence-backed, weak-evidence, blocked, failed, or needing human review
 - use `runs repair-evidence <run-id>` when the worker likely completed the edit but evidence is missing, weak, or blocked
 - use `runs continue <run-id> --task "..."` for broader follow-up on the same idle repo context
+- for operator takeover, prepare the handoff and report the suggested command; do not execute the suggested `opencode --dir ...` command from OpenCode, an openteam worker, or automation
 - continuation refuses busy contexts; do not bypass repo leases when a context is already active
 - use `runs observe <run-id>` for a single-run live snapshot and `runs watch --active` for transition polling
 - treat `runtime/orchestrator/observations.json` as the persisted last-seen observation state for run transitions

@@ -223,7 +223,7 @@ export const startJob = async (
   const logFile = path.join(logsDir, `${baseName}.log`)
   const handle = await open(logFile, "w")
   const script = path.join(app.root, "scripts", "openteam")
-  const cliArgs = ["launch", args.agentId, "--runtime-id", runtimeId, "--task", args.task]
+  const cliArgs = ["launch", args.agentId, "--runtime-id", runtimeId, "--task", args.task, "--attach"]
   if (args.target) cliArgs.push("--target", args.target)
   if (args.mode) cliArgs.push("--mode", args.mode)
   if (args.model) cliArgs.push("--model", args.model)
@@ -236,7 +236,7 @@ export const startJob = async (
 
   const child = spawn(script, cliArgs, {
     cwd: app.root,
-    env: {...process.env, OPENTEAM_CALLER_CWD: process.cwd(), ...encodeTaskContextEnv(args)},
+    env: {...process.env, OPENTEAM_CALLER_CWD: process.cwd(), OPENTEAM_INTERNAL_DETACHED_LAUNCH: "1", ...encodeTaskContextEnv(args)},
     detached: true,
     stdio: ["ignore", handle.fd, handle.fd],
   })

@@ -46,19 +46,55 @@ describe("launch execution mode", () => {
     expect(mode.explicit).toBe(false)
   })
 
-  test("honors explicit attach in non-interactive worker launch", () => {
-    expect(resolveLaunchExecutionMode({
+  test("rejects explicit attach in non-interactive worker launch", () => {
+    expect(() => resolveLaunchExecutionMode({
       args: ["--attach"],
       role: "builder",
       mode: "web",
       stdinIsTTY: false,
       stdoutIsTTY: false,
       env: {},
+    })).toThrow("--attach is not allowed")
+  })
+
+  test("allows internal detached supervisor child to attach to its log", () => {
+    expect(resolveLaunchExecutionMode({
+      args: ["--attach"],
+      role: "builder",
+      mode: "web",
+      stdinIsTTY: false,
+      stdoutIsTTY: false,
+      env: {OPENTEAM_INTERNAL_DETACHED_LAUNCH: "1", OPENTEAM_OPENCODE_CONTEXT: "1"},
     })).toEqual({
       detached: false,
       explicit: true,
       reason: "--attach requested",
     })
+  })
+
+  test("rejects explicit attach in managed OpenCode context even with interactive stdio", () => {
+    expect(() => resolveLaunchExecutionMode({
+      args: ["--attach"],
+      role: "builder",
+      mode: "web",
+      stdinIsTTY: true,
+      stdoutIsTTY: true,
+      env: {OPENTEAM_OPENCODE_CONTEXT: "1"},
+    })).toThrow("--attach is not allowed")
+  })
+
+  test("detects managed openteam OpenCode context even when stdio looks interactive", () => {
+    const mode = resolveLaunchExecutionMode({
+      args: [],
+      role: "builder",
+      mode: "web",
+      stdinIsTTY: true,
+      stdoutIsTTY: true,
+      env: {OPENTEAM_OPENCODE_STATE_DIR: "/tmp/openteam-state"},
+    })
+
+    expect(mode.detached).toBe(true)
+    expect(mode.explicit).toBe(false)
   })
 
   test("honors explicit detach in interactive launch", () => {

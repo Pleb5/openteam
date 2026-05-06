@@ -28,7 +28,7 @@ if [[ $# -eq 0 ]]; then
   fi
 
   PROMPT="$(env OPENTEAM_CALLER_CWD="$CALLER_CWD" "$BUN_BIN" run src/cli.ts console prompt)"
-  exec env OPENTEAM_CALLER_CWD="$CALLER_CWD" "$OPENCODE_BIN" "$ROOT" --prompt "$PROMPT"
+  exec env OPENTEAM_CALLER_CWD="$CALLER_CWD" OPENTEAM_OPENCODE_CONTEXT=1 "$OPENCODE_BIN" "$ROOT" --prompt "$PROMPT"
 fi
 
 exec env OPENTEAM_CALLER_CWD="$CALLER_CWD" "$BUN_BIN" run src/cli.ts "$@"

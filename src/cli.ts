@@ -67,7 +67,7 @@ const help = () => {
   console prompt
   prepare <agentId|role>
   launch <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--parallel] [--runtime-id <id>] [--detach|--attach]
-    Non-interactive worker launches default to --detach; use --attach only for foreground debugging.
+    Non-interactive worker launches default to --detach. --attach is refused from managed OpenCode contexts; use it only from a real foreground terminal.
   enqueue <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>]
   serve [agentId|role]   # defaults to orchestrator-01 when omitted
   worker start <agentId|role> [--target <nostr-repo|hint|alias>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--name <worker-name>]
@@ -375,6 +375,7 @@ const main = async () => {
       console.log(JSON.stringify(entry, null, 2))
       return
     }
+    delete process.env.OPENTEAM_INTERNAL_DETACHED_LAUNCH
     const result = await runTask(app, id, {
       id: "",
       task,

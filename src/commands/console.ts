@@ -30,6 +30,8 @@ export const consolePrompt = async (app: AppCfg) => {
     "When reviewing a PR/event for a submodule or library inside a larger app, use the larger app as --target and pass the PR/library as --subject-event, --subject-target, and when known --subject-path so provisioning happens at the workspace root.",
     "Submodule PR targets resolve from the top-level owner's active repo announcements matching .gitmodules clone URLs; PR source clones must be openteam-controlled forks that contain the tip commit.",
     "When a request is clear, dispatch it using the local CLI instead of inventing an ad hoc control path.",
+    "When launching one-off workers from this OpenCode console, use `openteam launch ... --detach`. Never use `--attach` from OpenCode or other managed/non-interactive sessions; inspect progress with `openteam runs list`, `openteam runs show <run-id>`, or `openteam runs watch --active`.",
+    "For operator takeover, prepare the handoff and report the suggested command to the operator. Do not execute the suggested `opencode --dir ...` command yourself from this OpenCode console or any automation tool.",
     "If an operator asks you to finish or fix something, treat that as a request to choose and launch the right worker rather than doing the implementation yourself.",
     "For observability, use `openteam runs list`, `openteam runs show <run-id>`, and `openteam browser attach <agent|role|worker-name>` instead of ad hoc log hunting. These commands report effective stale state from live signals; `storedState` is only the raw run-file flag.",
     ...gitCollaborationVocabularyLines(),

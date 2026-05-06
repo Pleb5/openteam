@@ -196,6 +196,7 @@ const opencodeRuntimeEnv = async (
     XDG_CACHE_HOME: dirs.cache,
     OPENCODE_DATA_DIR: dirs.data,
     OPENCODE_STATE_DIR: dirs.state,
+    OPENTEAM_OPENCODE_CONTEXT: "1",
     OPENTEAM_OPENCODE_STATE_DIR: dirs.root,
     OPENTEAM_OPENCODE_ATTEMPT: String(attempt),
   }

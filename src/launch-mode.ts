@@ -10,6 +10,8 @@ export type LaunchExecutionMode = {
 
 const workerRoles = new Set(["builder", "triager", "qa", "researcher"])
 
+const isInternalDetachedLaunch = (env: NodeJS.ProcessEnv) => env.OPENTEAM_INTERNAL_DETACHED_LAUNCH === "1"
+
 export const isNonInteractiveLaunchContext = (input: {
   stdinIsTTY?: boolean
   stdoutIsTTY?: boolean
@@ -19,7 +21,15 @@ export const isNonInteractiveLaunchContext = (input: {
   return (
     input.stdinIsTTY === false ||
     input.stdoutIsTTY === false ||
-    Boolean(env.OPENCODE_SESSION || env.OPENCODE_CALL_ID || env.OPENCODE_TOOL_CALL_ID || env.OPENCLAW_SESSION)
+    Boolean(
+      env.OPENCODE_SESSION ||
+      env.OPENCODE_CALL_ID ||
+      env.OPENCODE_TOOL_CALL_ID ||
+      env.OPENCLAW_SESSION ||
+      env.OPENTEAM_OPENCODE_CONTEXT ||
+      env.OPENTEAM_OPENCODE_STATE_DIR ||
+      env.OPENTEAM_OPENCODE_ATTEMPT,
+    )
   )
 }
 
@@ -31,6 +41,7 @@ export const resolveLaunchExecutionMode = (input: {
   stdoutIsTTY?: boolean
   env?: NodeJS.ProcessEnv
 }): LaunchExecutionMode => {
+  const env = input.env ?? process.env
   const wantsDetach = input.args.includes("--detach")
   const wantsAttach = input.args.includes("--attach")
   if (wantsDetach && wantsAttach) {
@@ -40,10 +51,13 @@ export const resolveLaunchExecutionMode = (input: {
     return {detached: true, explicit: true, reason: "--detach requested"}
   }
   if (wantsAttach) {
+    if (workerRoles.has(input.role) && isNonInteractiveLaunchContext({...input, env}) && !isInternalDetachedLaunch(env)) {
+      throw new Error("--attach is not allowed for worker launches from managed or non-interactive OpenCode contexts; use --detach and inspect with openteam runs")
+    }
     return {detached: false, explicit: true, reason: "--attach requested"}
   }
 
-  if (workerRoles.has(input.role) && isNonInteractiveLaunchContext(input)) {
+  if (workerRoles.has(input.role) && isNonInteractiveLaunchContext({...input, env})) {
     return {
       detached: true,
       explicit: false,

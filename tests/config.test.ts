@@ -196,6 +196,8 @@ describe("config helpers", () => {
     expect(prompt).toContain("issues are kind 1621")
     expect(prompt).toContain("openteam repo policy")
     expect(prompt).toContain("openteam repo publish ...")
+    expect(prompt).toContain("Never use `--attach` from OpenCode")
+    expect(prompt).toContain("Do not execute the suggested `opencode --dir ...` command yourself")
   })
 
   test("validates required agent secret for launch", () => {

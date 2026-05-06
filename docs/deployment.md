@@ -179,7 +179,7 @@ Example:
 bun run src/cli.ts launch builder --target <repo-hint-or-30617-key> --mode web --task "Open the target app, log in with the remote signer, verify synced profile data is visible, and report exactly what you observed."
 ```
 
-On a VPS or inside another automation tool, this launch defaults to detached execution. Use `openteam runs list`, `openteam runs show <run-id>`, or `openteam runs watch --active` to inspect progress. Use `--attach` only when running from a foreground terminal you expect to keep open for the whole task.
+On a VPS or inside another automation tool, this launch defaults to detached execution. Use `openteam runs list`, `openteam runs show <run-id>`, or `openteam runs watch --active` to inspect progress. Managed OpenCode sessions refuse public worker `--attach`; use `--attach` only when running from a foreground terminal you expect to keep open for the whole task.
 
 ## Headless on VPS
 

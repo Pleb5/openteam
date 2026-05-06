@@ -36,7 +36,7 @@ import {
 import {resolveRepoTarget} from "../src/repo.js"
 import {continuationEvidenceForCarry, continuationPromptLines, createContinuationTaskItem} from "../src/run-continuation.js"
 import {observeRun, observeRuns} from "../src/run-observer.js"
-import {executeOperatorTakeover, operatorTakeoverHandoffPath, releaseOperatorTakeover} from "../src/run-takeover.js"
+import {executeOperatorTakeover, formatOperatorTakeoverResult, operatorTakeoverHandoffPath, releaseOperatorTakeover} from "../src/run-takeover.js"
 import {refreshRuntimeStatus} from "../src/runtime-status.js"
 import {scanCheckoutRuntimeBloat} from "../src/runtime-bloat.js"
 import {resolveTaskSubject, subjectPromptLines} from "../src/subject.js"
@@ -343,9 +343,11 @@ describe("runtime invariants", () => {
     expect(result.command).not.toContain("run")
     expect(result.command).not.toContain("--agent")
     expect(handoff).toContain("## Prior Discussion Summary")
+    expect(handoff).toContain("Run the suggested command only from a real human terminal")
     expect(handoff).toContain("normal blocked context")
     expect(handoff).toContain("[REDACTED")
     expect(handoff).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz123456")
+    expect(formatOperatorTakeoverResult(result)).toContain("Do not execute it from OpenCode Bash")
     expect(record.state).toBe("interrupted")
     expect(record.failureCategory).toBe("operator-takeover")
     expect(record.manualTakeover?.contextHeld).toBe(true)
