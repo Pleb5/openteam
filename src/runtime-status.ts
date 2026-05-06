@@ -6,6 +6,8 @@ import {isOperatorTakeoverLease} from "./repo.js"
 import {listWorkers} from "./supervisor.js"
 import type {AppCfg, RepoContext} from "./types.js"
 import {recentRunRecords, summarizeRuns} from "./commands/runs.js"
+import {observerAlertsPath} from "./observer-notifications.js"
+import {observerHealth, type ObserverHealth} from "./observer-state.js"
 
 export type RuntimeStatus = {
   version: 1
@@ -52,6 +54,9 @@ export type RuntimeStatus = {
     lastCleanupAt?: string
     lastCleanupDryRunAt?: string
     lastCleanupCount?: number
+  }
+  observer: ObserverHealth & {
+    alertsFile: string
   }
 }
 
@@ -105,11 +110,12 @@ export const buildRuntimeStatus = async (
   app: AppCfg,
   cleanup: Partial<RuntimeStatus["cleanup"]> = {},
 ): Promise<RuntimeStatus> => {
-  const [workers, recentRecords, registry, previous] = await Promise.all([
-    listWorkers(app),
+  const workers = await listWorkers(app)
+  const [recentRecords, registry, previous, observer] = await Promise.all([
     recentRunRecords(app, 200),
     loadRepoRegistry(app),
     readPreviousStatus(app).catch(() => undefined),
+    observerHealth(app).catch(() => ({active: false, stateFile: path.join(app.config.runtimeRoot, "orchestrator", "observer-state.json")})),
   ])
   const recentRuns = await summarizeRuns(app, recentRecords)
   const summariesByRunId = new Map(recentRuns.map(run => [run.runId, run]))
@@ -167,6 +173,10 @@ export const buildRuntimeStatus = async (
       lastCleanupAt: cleanup.lastCleanupAt ?? previous?.cleanup.lastCleanupAt,
       lastCleanupDryRunAt: cleanup.lastCleanupDryRunAt ?? previous?.cleanup.lastCleanupDryRunAt,
       lastCleanupCount: cleanup.lastCleanupCount ?? previous?.cleanup.lastCleanupCount,
+    },
+    observer: {
+      ...observer,
+      alertsFile: observerAlertsPath(app),
     },
   }
 }

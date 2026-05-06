@@ -107,10 +107,27 @@ const structuredProviderFailure = (text: string) => {
   return undefined
 }
 
+const providerContextLine = (line: string) =>
+  /\b(?:Provider request|ProviderModel|Provider not found|No provider found|APIError|StatusCodeError|OpenAI|Anthropic|OpenRouter|models\.dev)\b|provider[=:]|model-provider-/i.test(line)
+
+const classifyProviderFailureLines = (text: string) => {
+  for (const line of text.split(/\r?\n/)) {
+    if (!providerContextLine(line)) continue
+    if (/models\.dev.*(?:timed out|timeout|failed to fetch)/i.test(line)) {
+      return failure(line, "model-provider-unavailable", "OpenCode model registry lookup failed", true)
+    }
+    const classified = classifyProviderErrorText(line, line)
+    if (classified) return classified
+  }
+  return undefined
+}
+
 export const detectOpenCodeHardFailure = (text: string) => {
   const clean = stripAnsi(text)
   const structured = structuredProviderFailure(clean)
   if (structured) return structured
+  const providerLine = classifyProviderFailureLines(clean)
+  if (providerLine) return providerLine
 
   const checks: Array<[RegExp, OpenCodeHardFailureCategory, string, boolean?, boolean?]> = [
     [/Error:\s*database is locked/i, "opencode-database-locked", "OpenCode runtime database was locked", true],
@@ -121,13 +138,7 @@ export const detectOpenCodeHardFailure = (text: string) => {
     [/invalid (?:model )?variant|unknown variant/i, "model-config-invalid", "configured opencode model variant was not accepted", false, true],
     [/missing (?:opencode )?auth|auth\.json.*(?:missing|not found)|no auth state/i, "opencode-auth-unavailable", "OpenCode auth state was unavailable"],
     [/AuthenticationError|Unauthorized|invalid api key|missing api key/i, "model-provider-auth-failed", "model provider authentication failed", false, true],
-    [/models\.dev.*(?:timed out|timeout|failed to fetch)/i, "model-provider-unavailable", "OpenCode model registry lookup failed", true],
-    [/server_is_overloaded|service_unavailable_error|servers? (?:are )?(?:currently )?overloaded|\boverloaded\b/i, "model-provider-overloaded", "model provider is overloaded", true, true],
-    [/too_many_requests|rate[_ -]?limit|\brate limited\b|\b429\b/i, "model-provider-rate-limited", "model provider rate limit was reached", true, true],
-    [/request timed out|timed out|timeout|deadline exceeded|gateway timeout|\b504\b/i, "model-provider-timeout", "model provider request timed out", true, true],
-    [/ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|socket hang up|network error|fetch failed|connection reset/i, "model-provider-network-error", "model provider network request failed", true, true],
     [/model (?:provider )?(?:response )?stream stalled|model-provider-stream-stalled/i, "model-provider-stream-stalled", "OpenCode model response stream stalled", true, true],
-    [/"code"\s*:\s*"server_error"|"type"\s*:\s*"server_error"|\b(?:500|502|503)\b|internal server error|bad gateway|service unavailable/i, "model-provider-server-error", "model provider returned a transient server error", true, true],
     [/permission requested:[\s\S]{0,300}auto-rejecting/i, "tool-permission-rejected", "tool permission request was auto-rejected"],
     [/The user rejected permission to use this specific tool call\./i, "tool-permission-rejected", "tool permission request was rejected"],
     [/sandbox (?:denied|blocked|rejected) the requested (?:tool|command|operation)/i, "opencode-policy-blocked", "sandbox policy blocked the requested operation"],

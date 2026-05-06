@@ -4,6 +4,7 @@ import {spawn} from "node:child_process"
 import path from "node:path"
 import {prepareAgent} from "./config.js"
 import {assertAppConfigValid} from "./config-validate.js"
+import {diagnoseRun, recentRunRecords, stopRunRecord} from "./commands/runs.js"
 import {PROFILE_SYNC_DELAY_MS, sleep, syncGraspServers, syncOwnDmRelays, syncOwnOutboxRelays, syncProfileTokens} from "./nostr.js"
 import {encodeTaskContextEnv} from "./task-context.js"
 import type {AppCfg, TaskItem, TaskMode, TaskSource} from "./types.js"
@@ -67,6 +68,22 @@ const alive = (pid: number) => {
   }
 }
 
+const workerMatchesRun = (worker: ManagedWorker, run: {agentId: string; baseAgentId: string; task?: string}) =>
+  run.agentId === worker.runtimeId ||
+  run.agentId === worker.agentId ||
+  run.baseAgentId === worker.agentId ||
+  Boolean(worker.task && run.task === worker.task)
+
+const reconcileDeadWorker = async (app: AppCfg, worker: ManagedWorker) => {
+  const match = (await recentRunRecords(app, 100))
+    .map(item => item.record)
+    .find(record => workerMatchesRun(worker, record))
+  if (!match || match.state !== "running") return
+  const diagnosis = await diagnoseRun(app, match).catch(() => undefined)
+  if (!diagnosis?.stale) return
+  await stopRunRecord(app, match.runId, "stale").catch(() => undefined)
+}
+
 const load = async (app: AppCfg): Promise<ManagedWorker[]> => {
   const file = stateFile(app)
   if (!existsSync(file)) return []
@@ -80,6 +97,7 @@ const save = async (app: AppCfg, workers: ManagedWorker[]) => {
 
 const pruneDead = async (app: AppCfg) => {
   const workers = await load(app)
+  await Promise.all(workers.filter(worker => !alive(worker.pid)).map(worker => reconcileDeadWorker(app, worker)))
   const live = workers.filter(worker => alive(worker.pid))
   if (live.length !== workers.length) {
     await save(app, live)

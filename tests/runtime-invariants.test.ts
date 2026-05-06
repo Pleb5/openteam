@@ -36,6 +36,9 @@ import {
 import {resolveRepoTarget} from "../src/repo.js"
 import {continuationEvidenceForCarry, continuationPromptLines, createContinuationTaskItem} from "../src/run-continuation.js"
 import {observeRun, observeRuns} from "../src/run-observer.js"
+import {appendObserverAlert, observerAlertsPath} from "../src/observer-notifications.js"
+import {observerHealth, writeObserverState} from "../src/observer-state.js"
+import {waitForDetachedLaunchReceipt} from "../src/launch-receipt.js"
 import {executeOperatorTakeover, formatOperatorTakeoverResult, operatorTakeoverHandoffPath, releaseOperatorTakeover} from "../src/run-takeover.js"
 import {refreshRuntimeStatus} from "../src/runtime-status.js"
 import {scanCheckoutRuntimeBloat} from "../src/runtime-bloat.js"
@@ -855,6 +858,76 @@ describe("runtime invariants", () => {
     expect(snapshot.recommendedAction).toContain("continue")
   })
 
+  test("observer heartbeat reports active health and alert log deduplicates critical transitions", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    await writeObserverState(app, {lastHeartbeatAt: new Date().toISOString()})
+    const health = await observerHealth(app)
+    const snapshot = {
+      runId: "builder-01-task-a",
+      observedAt: "2026-04-25T00:00:00.000Z",
+      state: "failed",
+      storedState: "failed",
+      agentId: "builder-01",
+      baseAgentId: "builder-01",
+      role: "builder",
+      taskId: "task-a",
+      stale: false,
+      staleReasons: [],
+      anyPidAlive: false,
+      anyTaskPidAlive: false,
+      devHealthy: true,
+      evidenceLevel: "failed",
+      prEligible: false,
+      missingEvidenceCount: 0,
+      verificationResultCount: 1,
+      recommendedAction: "openteam runs show builder-01-task-a",
+    }
+    const event = {
+      runId: snapshot.runId,
+      observedAt: snapshot.observedAt,
+      snapshot,
+      transitions: [{field: "state", from: "running", to: "failed", severity: "critical" as const, message: "failed"}],
+    }
+
+    const first = await appendObserverAlert(app, event)
+    const second = await appendObserverAlert(app, event)
+    const alerts = await readFile(observerAlertsPath(app), "utf8")
+
+    expect(health.active).toBe(true)
+    expect(first?.severity).toBe("critical")
+    expect(second).toBeUndefined()
+    expect(alerts.trim().split("\n")).toHaveLength(1)
+  })
+
+  test("detached launch receipt confirms run startup from the matching runtime id", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const record = runRecord(app, {
+      runId: "builder-runtime-task-a",
+      agentId: "builder-runtime",
+      baseAgentId: "builder-01",
+      startedAt: new Date().toISOString(),
+      phases: [{name: "opencode-worker", state: "running", startedAt: new Date().toISOString()}],
+      process: {runnerPid: process.pid},
+    })
+    await writeRun(record)
+    const receipt = await waitForDetachedLaunchReceipt(app, {
+      name: "builder-job",
+      kind: "job",
+      agentId: "builder-01",
+      runtimeId: "builder-runtime",
+      role: "builder",
+      pid: process.pid,
+      logFile: path.join(runtimeRoot, "logs", "builder-job.log"),
+      startedAt: "2026-04-25T00:00:00.000Z",
+    }, {timeoutMs: 0})
+
+    expect(receipt.state).toBe("started")
+    expect(receipt.runId).toBe(record.runId)
+    expect(receipt.activePhase).toBe("opencode-worker")
+  })
+
   test("DM task reports keep compact run metadata", async () => {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
     const app = makeApp(runtimeRoot)
@@ -1547,6 +1620,9 @@ describe("runtime invariants", () => {
     expect(detectOpenCodeHardFailure("! permission requested: external_directory (/tmp/*); auto-rejecting")?.reason).toContain("auto-rejected")
     expect(detectOpenCodeHardFailure("sandbox denied the requested command")?.reason).toContain("sandbox policy")
     expect(detectOpenCodeHardFailure("normal repo command failed with Error: test output")).toBeUndefined()
+    expect(detectOpenCodeHardFailure("If model/provider timeout or rate limiting blocks the task again, record evidence.")).toBeUndefined()
+    expect(detectOpenCodeHardFailure("browser command terminated after exceeding timeout 120000 ms")).toBeUndefined()
+    expect(detectOpenCodeHardFailure("Provider request failed with rate limit after 429")?.category).toBe("model-provider-rate-limited")
   })
 
   test("OpenCode logs detect tool registry boundaries", () => {
@@ -1896,6 +1972,9 @@ describe("runtime invariants", () => {
     expect(source).toContain("sessionName()")
     expect(source).toContain('"ot-" + shortHash')
     expect(source).toContain("AGENT_BROWSER_SOCKET_DIR")
+    expect(source).toContain("includeProfile")
+    expect(source).toContain('return run(["close"], context, { includeProfile: false')
+    expect(source).toContain('"--args"')
     expect(source).toContain("--allowed-domains")
     expect(source).toContain("--console-file")
     expect(source).not.toContain('"--all"')

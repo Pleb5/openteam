@@ -28,17 +28,13 @@ import {dispatchOperatorRequest, type DispatchContext} from "./orchestrator.js"
 import {detectProjectProfile, writeProjectProfile, type ProjectProfile} from "./project-profile.js"
 import {writeRepoPublishContext, type RepoPublishScope} from "./repo-publish.js"
 import {
-  applyObservationReportPolicy,
-  buildDueObservationDigest,
   formatTaskRunReport,
-  readDmReportState,
-  writeDmReportState,
 } from "./reporting-policy.js"
 import {readGitSubmodules, releaseRepoContext, resolveRepoAnnouncementTarget, resolveRepoRelayPolicy, resolveRepoTarget} from "./repo.js"
 import {runImplementationProgressSignals} from "./run-progress.js"
 import {formatRuntimeBloatSummary, scanCheckoutRuntimeBloat} from "./runtime-bloat.js"
 import {continuationEvidenceForCarry} from "./run-continuation.js"
-import {formatObservationEvent, observeRuns} from "./run-observer.js"
+import {startObserverDaemon, type ObserverDaemonHandle} from "./observer-daemon.js"
 import {prepareTaskSubject, resolveTaskSubject} from "./subject.js"
 import {encodeTaskContextEnv} from "./task-context.js"
 import {taskManifestPath, writeTaskManifest, type TaskManifestRuntime} from "./task-manifest.js"
@@ -562,6 +558,7 @@ const EXECUTABLE_PATH = ${JSON.stringify(input.executablePath ?? "")}
 const CONFIG_ENV = ${JSON.stringify(input.environment)}
 const ALLOWED_DOMAINS = ${JSON.stringify(input.allowedDomains.join(","))}
 const MAX_OUTPUT_CHARS = ${JSON.stringify(input.maxOutputChars)}
+const DEFAULT_BROWSER_ARGS = "--no-sandbox,--disable-dev-shm-usage"
 
 const dirs = (directory: string) => {
   const artifacts = path.join(process.env.OPENTEAM_ARTIFACTS_DIR || path.join(directory, ".openteam", "artifacts"), "verification", "agent-browser")
@@ -603,14 +600,21 @@ const setupEnv = async (directory: string) => {
     OPENTEAM_AGENT_BROWSER_SESSION: sessionName(),
     OPENTEAM_BROWSER_CLI_SESSION: sessionName(),
     ...(EXECUTABLE_PATH ? { AGENT_BROWSER_EXECUTABLE_PATH: EXECUTABLE_PATH } : {}),
+    ...(!CONFIG_ENV.AGENT_BROWSER_ARGS && !process.env.AGENT_BROWSER_ARGS ? { AGENT_BROWSER_ARGS: DEFAULT_BROWSER_ARGS } : {}),
     ...(ALLOWED_DOMAINS && !CONFIG_ENV.AGENT_BROWSER_ALLOWED_DOMAINS ? { AGENT_BROWSER_ALLOWED_DOMAINS: ALLOWED_DOMAINS } : {}),
   }
 }
 
-const run = async (args: string[], context: { directory: string; abort: AbortSignal }, options: { rawName?: string } = {}) => {
+const run = async (args: string[], context: { directory: string; abort: AbortSignal }, options: { rawName?: string; includeProfile?: boolean } = {}) => {
   const browserDirs = dirs(context.directory)
   const env = await setupEnv(context.directory)
-  const cmd = [BINARY, "--session", sessionName(), "--profile", browserDirs.profile, "--screenshot-dir", browserDirs.artifacts, ...args]
+  const cmd = [
+    BINARY,
+    "--session", sessionName(),
+    ...(options.includeProfile === false ? [] : ["--profile", browserDirs.profile]),
+    "--screenshot-dir", browserDirs.artifacts,
+    ...args,
+  ]
   const proc = Bun.spawn(cmd, {
     cwd: context.directory,
     env,
@@ -642,7 +646,13 @@ export const open = tool({
   async execute(args, context) {
     const url = args.url || process.env.OPENTEAM_DEV_URL
     if (!url) throw new Error("missing url and OPENTEAM_DEV_URL is not set")
-    return run([...(args.headed ? ["--headed"] : []), ...(ALLOWED_DOMAINS ? ["--allowed-domains", ALLOWED_DOMAINS] : []), "open", url], context)
+    return run([
+      ...(args.headed ? ["--headed"] : []),
+      ...(EXECUTABLE_PATH ? ["--executable-path", EXECUTABLE_PATH] : []),
+      "--args", CONFIG_ENV.AGENT_BROWSER_ARGS || process.env.AGENT_BROWSER_ARGS || DEFAULT_BROWSER_ARGS,
+      ...(ALLOWED_DOMAINS ? ["--allowed-domains", ALLOWED_DOMAINS] : []),
+      "open", url,
+    ], context)
   },
 })
 
@@ -855,7 +865,7 @@ export const close = tool({
   description: "Close the current agent-browser session.",
   args: {},
   async execute(_args, context) {
-    return run(["close"], context)
+    return run(["close"], context, { includeProfile: false })
   },
 })
 
@@ -1206,13 +1216,16 @@ export const buildModelFallbackHandoffPrompt = (input: {
   failedAttempt: OpenCodeAttemptRecord
   nextModel?: ResolvedModelAttempt
   progressReasons: string[]
+  retrySameModel?: boolean
 }) => [
   input.originalPrompt,
   "",
-  "Model fallback handoff:",
+  input.retrySameModel ? "Model retry handoff:" : "Model fallback handoff:",
   `The previous model attempt failed because ${input.failure.reason} (${input.failure.category}).`,
   `Failed model: ${input.failedAttempt.model ?? "(unset)"}${input.failedAttempt.modelVariant ? ` variant ${input.failedAttempt.modelVariant}` : ""}.`,
-  input.nextModel?.model ? `You are continuing with fallback model: ${input.nextModel.model}${input.nextModel.variant ? ` variant ${input.nextModel.variant}` : ""}.` : "You are continuing with the next configured fallback model.",
+  input.retrySameModel
+    ? `You are retrying the same model after a transient provider failure: ${input.failedAttempt.model ?? "(unset)"}${input.failedAttempt.modelVariant ? ` variant ${input.failedAttempt.modelVariant}` : ""}.`
+    : input.nextModel?.model ? `You are continuing with fallback model: ${input.nextModel.model}${input.nextModel.variant ? ` variant ${input.nextModel.variant}` : ""}.` : "You are continuing with the next configured fallback model.",
   "Do not restart the task from scratch. Treat the checkout, commits, worktree, .openteam files, and recorded evidence as the current source of truth.",
   "Start by inspecting the current checkout state and existing verification evidence, then continue only the remaining work or verification gaps.",
   "Do not discard, reset, overwrite, or duplicate prior valid work. If the current state is inconsistent, report the concrete blocker and smallest safe recovery path.",
@@ -1428,7 +1441,15 @@ const runWorkerOpencodeSessionWithRetry = async (input: {
           sameModelAttempt < policy.maxSameModelAttempts &&
           globalAttempt < policy.maxTotalAttempts &&
           Boolean(hardFailure?.retryable) &&
-          !progress.hasImplementationProgress
+          (!progress.hasImplementationProgress || (
+            canHandoffAfterProgress(hardFailure) &&
+            modelIndex + 1 >= modelAttemptPlan.length
+          ))
+        const canRetrySameModelAfterProgress = Boolean(
+          canRetrySameModel &&
+          progress.hasImplementationProgress &&
+          canHandoffAfterProgress(hardFailure),
+        )
         const canFallbackAfterProgress = progress.hasImplementationProgress && canHandoffAfterProgress(hardFailure)
         const canFallbackModel =
           modelIndex + 1 < modelAttemptPlan.length &&
@@ -1450,7 +1471,7 @@ const runWorkerOpencodeSessionWithRetry = async (input: {
         attemptRecord.retryable = hardFailure?.retryable
         attemptRecord.fallbackEligible = hardFailure?.fallbackEligible
         attemptRecord.nextAction = nextAction
-        attemptRecord.handoffReason = canFallbackAfterProgress && nextAction === "fallback-model" ? "model-failure-after-progress" : undefined
+        attemptRecord.handoffReason = (canFallbackAfterProgress || canRetrySameModelAfterProgress) && (nextAction === "fallback-model" || nextAction === "retry-same-model") ? "model-failure-after-progress" : undefined
         attemptRecord.progressReasons = progress.reasons.length > 0 ? progress.reasons : undefined
         await writeOpenCodeAttemptRecord(input.runRecord, attemptRecord)
 
@@ -1465,6 +1486,16 @@ const runWorkerOpencodeSessionWithRetry = async (input: {
             progressReasons: progress.reasons,
           })
         }
+        if (nextAction === "retry-same-model" && canRetrySameModelAfterProgress && hardFailure) {
+          prompt = buildModelFallbackHandoffPrompt({
+            originalPrompt: input.prompt,
+            failure: hardFailure,
+            failedAttempt: attemptRecord,
+            nextModel: modelSelection,
+            progressReasons: progress.reasons,
+            retrySameModel: true,
+          })
+        }
 
         const backoffMs = opencodeBackoffMs(attempt, policy)
         await skipRunPhase(input.runRecord, nextAction === "retry-same-model" ? "opencode-worker-retry-backoff" : "opencode-worker-fallback-backoff", {
@@ -1477,7 +1508,7 @@ const runWorkerOpencodeSessionWithRetry = async (input: {
           failureCategory: hardFailure?.category,
           reason: hardFailure?.reason,
           evidence: hardFailure?.evidence,
-          handoffReason: canFallbackAfterProgress && nextAction === "fallback-model" ? "model-failure-after-progress" : undefined,
+          handoffReason: (canFallbackAfterProgress || canRetrySameModelAfterProgress) && (nextAction === "fallback-model" || nextAction === "retry-same-model") ? "model-failure-after-progress" : undefined,
           progressReasons: progress.reasons,
           backoffMs,
         })
@@ -2067,6 +2098,22 @@ const collectWorkerVerificationResults = async (
     failureCategory: failure.state === "blocked" ? "verification-blocked" : "verification-failed",
   })
   throw new Error(`worker verification ${failure.id} ${failure.state}: ${failure.blocker ?? failure.error ?? "see verification result"}`)
+}
+
+const collectWorkerVerificationResultsAfterHardFailure = async (
+  record: TaskRunRecord,
+  checkout: string,
+) => {
+  const results = await runPhase(
+    record,
+    "collect-worker-verification-after-hard-failure",
+    () => readVerificationResults(checkout),
+  )
+  await appendVerificationResults(record, results)
+  if (results.some(result => result.state === "succeeded")) {
+    await updateRunRecord(record, {verificationState: "succeeded"})
+  }
+  return results
 }
 
 const maybeRunAutomaticVerification = async (
@@ -2964,6 +3011,13 @@ export const runTask = async (
     taskError = error
     runError = error
     const hardFailureError = error instanceof OpenCodeHardFailureError ? error : undefined
+    if (hardFailureError && runRecord.context?.checkout) {
+      await collectWorkerVerificationResultsAfterHardFailure(runRecord, runRecord.context.checkout).catch(collectError =>
+        skipRunPhase(runRecord, "collect-worker-verification-after-hard-failure", {
+          reason: collectError instanceof Error ? collectError.message : String(collectError),
+        }).catch(() => undefined),
+      )
+    }
     await updateRunRecord(runRecord, {
       workerState: runRecord.workerState ?? "failed",
       failureCategory: runRecord.failureCategory ?? taskFailureCategory(error),
@@ -3230,6 +3284,7 @@ export const serveAgent = async (app: AppCfg, id: string, defaults: Partial<Task
   const repoWatch = controlDms ? undefined : await prepareRepoWatch(app, agent, defaults)
   const observeWorkerRuns = agent.agent.role === "orchestrator"
   let active: Promise<void> | undefined
+  let observer: ObserverDaemonHandle | undefined
   const pollInterval = agent.agent.reporting.pollIntervalMs ?? app.config.reporting.pollIntervalMs ?? 5000
   let sub = {close: () => {}}
   let closed = false
@@ -3238,6 +3293,11 @@ export const serveAgent = async (app: AppCfg, id: string, defaults: Partial<Task
   const liveSeenDmIds = new Set<string>()
 
   if (observeWorkerRuns) {
+    observer = startObserverDaemon(app, {
+      intervalMs: pollInterval,
+      onReport: body => sendRuntimeReport(agent, body),
+      onError: error => process.stderr.write(`observer daemon failed: ${String(error)}\n`),
+    })
     try {
       const cleaned = await cleanupStaleRuns(app)
       if (cleaned.length > 0) process.stderr.write(`startup stale reconciliation cleaned ${cleaned.length} run(s)\n`)
@@ -3282,6 +3342,7 @@ export const serveAgent = async (app: AppCfg, id: string, defaults: Partial<Task
     if (closed) return
     closed = true
     sub.close()
+    observer?.stop()
     runtime.bunker?.stop()
   }
 
@@ -3326,31 +3387,6 @@ export const serveAgent = async (app: AppCfg, id: string, defaults: Partial<Task
           await pollRepoWatch(app, agent, repoWatch)
         } catch (error) {
           process.stderr.write(`repo watch poll failed: ${String(error)}\n`)
-        }
-      }
-
-      if (observeWorkerRuns) {
-        try {
-          const observed = await observeRuns(app, {limit: 100, emitInitial: false})
-          const reportState = await readDmReportState(app)
-          let reportStateChanged = false
-          for (const event of observed.events) {
-            const body = formatObservationEvent(event)
-            process.stderr.write(`${body}\n`)
-            const decision = applyObservationReportPolicy(reportState, event, app.config.reporting)
-            reportStateChanged = true
-            if (decision.report) {
-              await sendRuntimeReport(agent, decision.report)
-            }
-          }
-          const digest = buildDueObservationDigest(reportState, app.config.reporting)
-          if (digest) {
-            reportStateChanged = true
-            await sendRuntimeReport(agent, digest)
-          }
-          if (reportStateChanged) await writeDmReportState(reportState)
-        } catch (error) {
-          process.stderr.write(`run observation poll failed: ${String(error)}\n`)
         }
       }
 

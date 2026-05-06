@@ -27,6 +27,8 @@ export const statusReport = async (app: AppCfg) => {
       operatorHeldContexts: runtimeStatus.leases.operatorHeld,
       staleLeases: runtimeStatus.leases.stale,
       statusFile: runtimeStatus.statusFile,
+      observerActive: runtimeStatus.observer.active,
+      observerHeartbeatAgeMs: runtimeStatus.observer.heartbeatAgeMs,
     },
   }
 }

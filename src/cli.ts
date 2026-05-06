@@ -45,6 +45,8 @@ import {recipientsFromEnv, sourceFromEnv} from "./task-context.js"
 import {runTask, enqueueTask, prepareOnly, serveAgent} from "./launcher.js"
 import {dispatchOperatorRequest} from "./orchestrator.js"
 import {refreshRuntimeStatus} from "./runtime-status.js"
+import {waitForDetachedLaunchReceipt} from "./launch-receipt.js"
+import {runObserverDaemon} from "./observer-daemon.js"
 import {listWorkers, startJob, startWorker, stopWorker} from "./supervisor.js"
 import type {AppCfg, TaskItem, TaskMode} from "./types.js"
 import {
@@ -66,7 +68,7 @@ const help = () => {
   status
   console prompt
   prepare <agentId|role>
-  launch <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--parallel] [--runtime-id <id>] [--detach|--attach]
+  launch <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--parallel] [--runtime-id <id>] [--detach|--attach] [--wait-started-ms <ms>|--no-wait-started]
     Non-interactive worker launches default to --detach. --attach is refused from managed OpenCode contexts; use it only from a real foreground terminal.
   enqueue <agentId|role> --task <text> [--target <nostr-repo|hint|alias>] [--subject-event <nevent|event-id>] [--subject-target <repo>] [--subject-path <path>] [--mode <web|code>] [--model <provider/model>|--model-profile <name>] [--variant <name>]
   serve [agentId|role]   # defaults to orchestrator-01 when omitted
@@ -80,6 +82,7 @@ const help = () => {
   runs eval <run-id> [--json] [--final-response-file <path>]
   runs observe <run-id> [--json]
   runs watch [--active|--needs-review] [--once] [--interval-ms <ms>] [--limit <n>] [--json]
+  observe-daemon [--interval-ms <ms>]
   runs continue <run-id> [--task <text>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--no-carry-evidence] [--dry-run] [--force]
   runs repair-evidence <run-id> [--task <text>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--no-carry-evidence] [--dry-run] [--force]
   runs retry <run-id> [--task <text>] [--model <provider/model>|--model-profile <name>] [--variant <name>] [--dry-run] [--force]
@@ -324,7 +327,7 @@ const main = async () => {
     return
   }
 
-  const known = new Set(["doctor", "console", "prepare", "launch", "enqueue", "serve", "worker", "runs", "browser", "verify", "repo", "service", "relay", "profile", "tokens", "git"])
+  const known = new Set(["doctor", "console", "prepare", "launch", "enqueue", "serve", "observe-daemon", "worker", "runs", "browser", "verify", "repo", "service", "relay", "profile", "tokens", "git"])
   if (!known.has(cmd)) {
     const handled = await dispatchOperatorRequest(app, args.join(" "), dispatchContext(args))
     if (handled.handled) {
@@ -372,7 +375,15 @@ const main = async () => {
         source: opts.source,
         subject: opts.subject,
       })
-      console.log(JSON.stringify(entry, null, 2))
+      const waitStarted = !flag(args, "--no-wait-started")
+      const waitStartedMs = Number.parseInt(value(args, "--wait-started-ms") || "15000", 10)
+      const receipt = waitStarted
+        ? await waitForDetachedLaunchReceipt(app, entry, {timeoutMs: Number.isFinite(waitStartedMs) ? waitStartedMs : 15_000})
+        : undefined
+      console.log(JSON.stringify({entry, receipt}, null, 2))
+      if (receipt?.state === "failed" || receipt?.state === "stale" || receipt?.state === "process-exited") {
+        process.exitCode = 1
+      }
       return
     }
     delete process.env.OPENTEAM_INTERNAL_DETACHED_LAUNCH
@@ -401,6 +412,15 @@ const main = async () => {
     const opts = taskOpts(args)
     assertAppConfigValid(app, {capability: "serve", agentId: id, mode: opts.mode ?? app.config.repos[app.config.agents[id]?.repo || ""]?.mode})
     await serveAgent(app, id, opts)
+    return
+  }
+
+  if (cmd === "observe-daemon") {
+    const intervalMs = Number.parseInt(value(args, "--interval-ms") || "5000", 10)
+    await runObserverDaemon(app, {
+      intervalMs: Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 5000,
+      onError: error => process.stderr.write(`observer daemon failed: ${String(error)}\n`),
+    })
     return
   }
 

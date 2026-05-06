@@ -268,6 +268,17 @@ const workerVerificationBlockers = async (file?: string) => {
   return detectWorkerVerificationBlockers(await readFile(file, "utf8"))
 }
 
+const hasSuccessfulBrowserEvidence = (record: TaskRunRecord) =>
+  (record.verification?.results ?? []).some(result =>
+    result.state === "succeeded" && (
+      result.evidenceType === "browser" ||
+      result.kind === "browser-cli" ||
+      result.kind === "playwright-mcp" ||
+      result.id === "browser" ||
+      result.id === "agent-browser"
+    ),
+  )
+
 const devServerRuntimeFailure = async (file?: string) => {
   if (!file || !existsSync(file)) return undefined
   return detectDevServerRuntimeFailure(await readFile(file, "utf8"))
@@ -410,7 +421,7 @@ export const diagnoseRun = async (app: AppCfg, record: TaskRunRecord) => {
     }
   }
 
-  if (verificationBlockers.length > 0 && record.state !== "running") {
+  if (verificationBlockers.length > 0 && record.state !== "running" && !hasSuccessfulBrowserEvidence(record)) {
     reasons.push(`worker log contains verification blockers: ${verificationBlockers.map(item => item.reason).join("; ")}`)
   }
 

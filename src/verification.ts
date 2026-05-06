@@ -24,12 +24,13 @@ type ProjectProfileLike = {
 const VERIFICATION_ARTIFACTS_DIR = path.join(".openteam", "artifacts", "verification")
 const AGENT_BROWSER_ARTIFACTS_DIR = path.join(VERIFICATION_ARTIFACTS_DIR, "agent-browser")
 const AGENT_BROWSER_ALLOWED_DOMAINS = "127.0.0.1,localhost"
+const AGENT_BROWSER_ARGS = "--no-sandbox,--disable-dev-shm-usage"
 const AGENT_BROWSER_COMMAND = [
   "sh",
   "-c",
   [
     "test -n \"$OPENTEAM_DEV_URL\"",
-    "agent-browser --session \"$OPENTEAM_AGENT_BROWSER_SESSION\" --profile \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" --screenshot-dir \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR\" --allowed-domains \"$AGENT_BROWSER_ALLOWED_DOMAINS\" open \"$OPENTEAM_DEV_URL\"",
+    "agent-browser --session \"$OPENTEAM_AGENT_BROWSER_SESSION\" --profile \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" --screenshot-dir \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR\" ${AGENT_BROWSER_EXECUTABLE_PATH:+--executable-path \"$AGENT_BROWSER_EXECUTABLE_PATH\"} ${AGENT_BROWSER_ARGS:+--args \"$AGENT_BROWSER_ARGS\"} --allowed-domains \"$AGENT_BROWSER_ALLOWED_DOMAINS\" open \"$OPENTEAM_DEV_URL\"",
     "agent-browser --session \"$OPENTEAM_AGENT_BROWSER_SESSION\" --profile \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" --screenshot-dir \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR\" wait --load networkidle",
     "agent-browser --session \"$OPENTEAM_AGENT_BROWSER_SESSION\" --profile \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" --screenshot-dir \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR\" snapshot -i --json --max-output 60000 > \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/snapshot.json\"",
     "agent-browser --session \"$OPENTEAM_AGENT_BROWSER_SESSION\" --profile \"$OPENTEAM_AGENT_BROWSER_PROFILE_DIR\" --screenshot-dir \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR\" screenshot \"$OPENTEAM_AGENT_BROWSER_ARTIFACTS_DIR/page.png\"",
@@ -351,8 +352,22 @@ const runnerExecutionEnv = async (checkout: string, runner: VerificationRunnerPl
     OPENTEAM_BROWSER_CLI_ARTIFACTS_DIR: artifactsDir,
     OPENTEAM_BROWSER_CLI_PROFILE_DIR: profileDir,
     OPENTEAM_BROWSER_CLI_SESSION: session,
+    AGENT_BROWSER_ARGS: env.AGENT_BROWSER_ARGS || runner.environment?.AGENT_BROWSER_ARGS || process.env.AGENT_BROWSER_ARGS || AGENT_BROWSER_ARGS,
     AGENT_BROWSER_ALLOWED_DOMAINS: env.AGENT_BROWSER_ALLOWED_DOMAINS || runner.environment?.AGENT_BROWSER_ALLOWED_DOMAINS || process.env.AGENT_BROWSER_ALLOWED_DOMAINS || AGENT_BROWSER_ALLOWED_DOMAINS,
   }
+}
+
+const browserCliEnvCommand = (runner: VerificationRunnerPlan, env: Record<string, string>) => {
+  if (runner.kind !== "browser-cli") return undefined
+  const picked = Object.entries(env)
+    .filter(([key, value]) => value && (
+      key === "OPENTEAM_DEV_URL" ||
+      key.startsWith("AGENT_BROWSER_") ||
+      key.startsWith("OPENTEAM_AGENT_BROWSER_") ||
+      key.startsWith("OPENTEAM_BROWSER_CLI_")
+    ))
+    .map(([key, value]) => `${key}=${value}`)
+  return picked.length ? ["env", ...picked] : undefined
 }
 
 const commandArtifactsForRunner = (checkout: string, runner: VerificationRunnerPlan, executionEnv: Record<string, string>) => {
@@ -409,11 +424,17 @@ const runCommand = async (
   const logFile = await logFileForRunner(checkout, runner, {...env, ...executionEnv})
   const artifacts = commandArtifactsForRunner(checkout, runner, executionEnv)
   const stream = createWriteStream(logFile, {flags: "a"})
-  const [cmd, ...args] = command
+  const mergedEnv = Object.fromEntries(
+    Object.entries({...process.env, ...env, ...(runner.environment ?? {}), ...executionEnv})
+      .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  )
+  const browserEnvCommand = browserCliEnvCommand(runner, mergedEnv)
+  const wrappedCommand = browserEnvCommand ? [...browserEnvCommand, ...command] : command
+  const [cmd, ...args] = wrappedCommand
   const wrapped = wrapDevEnvCommand(devEnv, cmd, args)
   const child = spawn(wrapped.cmd, wrapped.args, {
     cwd: checkout,
-    env: {...process.env, ...env, ...(runner.environment ?? {}), ...executionEnv},
+    env: mergedEnv,
     stdio: ["ignore", "pipe", "pipe"],
   })
   const timeoutMs = runner.timeoutMs ?? DEFAULT_TIMEOUT_MS
