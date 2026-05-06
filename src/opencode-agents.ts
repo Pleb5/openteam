@@ -10,6 +10,8 @@ export type OpencodeHelperAgent = {
   body: string
 }
 
+type PermissionRules = Record<string, string | Record<string, string>>
+
 export type OpencodePrimaryRole = "builder" | "researcher" | "qa" | "triager" | "orchestrator"
 
 type WorkerCapabilities = Required<Pick<
@@ -104,21 +106,20 @@ export const selectOpencodePrimaryAgent = (agent: PreparedAgent) => {
   return clean(agent.app.config.opencode.agent) ?? "build"
 }
 
-const readOnlyPermission = [
-  `permission:`,
-  `  "*": deny`,
-  `  read: allow`,
-  `  glob: allow`,
-  `  grep: allow`,
-  `  list: allow`,
-  `  webfetch: allow`,
-  `  websearch: allow`,
-].join("\n")
+const readOnlyPermissionRules = (): PermissionRules => ({
+  "*": "deny",
+  read: "allow",
+  glob: "allow",
+  grep: "allow",
+  list: "allow",
+  webfetch: "allow",
+  websearch: "allow",
+})
 
 const yamlKey = (key: string) =>
   /^[A-Za-z_][A-Za-z0-9_-]*$/.test(key) ? key : JSON.stringify(key)
 
-const renderPermission = (rules: Record<string, string | Record<string, string>>) => {
+const renderPermission = (rules: PermissionRules) => {
   const lines = [`permission:`]
   for (const [permission, value] of Object.entries(rules)) {
     if (typeof value === "string") {
@@ -133,20 +134,22 @@ const renderPermission = (rules: Record<string, string | Record<string, string>>
   return lines.join("\n")
 }
 
-const runtimeExternalDirectoryRules = (checkout: string) => {
+const readOnlyPermission = renderPermission(readOnlyPermissionRules())
+
+export const runtimeExternalDirectoryRules = (checkout: string) => {
   const runtimeRoot = process.env.OPENTEAM_CHECKOUT_RUNTIME_ROOT?.trim()
     || path.join(path.dirname(checkout), ".openteam-runtime")
   return {
+    "*": "deny",
     [path.join(runtimeRoot, "opencode", "**")]: "deny",
     [path.join(runtimeRoot, "tmp", "**")]: "allow",
     [path.join(runtimeRoot, "cache", "**")]: "allow",
     [path.join(runtimeRoot, "artifacts", "**")]: "allow",
-    "*": "deny",
   }
 }
 
-const primaryPermission = (role: OpencodePrimaryRole, capabilities: WorkerCapabilities, checkout: string) => {
-  const rules: Record<string, string | Record<string, string>> = {
+const primaryPermissionRules = (role: OpencodePrimaryRole, capabilities: WorkerCapabilities, checkout: string): PermissionRules => {
+  const rules: PermissionRules = {
     read: "allow",
     glob: "allow",
     grep: "allow",
@@ -179,8 +182,11 @@ const primaryPermission = (role: OpencodePrimaryRole, capabilities: WorkerCapabi
     rules.bash = bash
   }
 
-  return renderPermission(rules)
+  return rules
 }
+
+const primaryPermission = (role: OpencodePrimaryRole, capabilities: WorkerCapabilities, checkout: string) =>
+  renderPermission(primaryPermissionRules(role, capabilities, checkout))
 
 const rolePolicy = (role: OpencodePrimaryRole) => {
   switch (role) {
@@ -374,6 +380,36 @@ const renderPrimaryAgent = (
     ``,
     primaryBody(role, capabilities),
   ].join("\n")
+}
+
+export const opencodeManagedAgentConfig = (agent: PreparedAgent, checkout: string) => {
+  const helpers = Object.fromEntries(opencodeHelperAgents.map(helper => [
+    helper.name,
+    {
+      description: helper.description,
+      mode: "subagent",
+      prompt: helper.body,
+      permission: readOnlyPermissionRules(),
+    },
+  ]))
+
+  const primaries = Object.fromEntries(openteamPrimaryRoles.map(role => {
+    const capabilities = capabilitiesForRole(agent, role)
+    return [
+      opencodePrimaryAgentName(role)!,
+      {
+        description: `Primary openteam ${role} worker agent with role policy and permissions.`,
+        mode: "primary",
+        prompt: primaryBody(role, capabilities),
+        permission: primaryPermissionRules(role, capabilities, checkout),
+      },
+    ]
+  }))
+
+  return {
+    ...helpers,
+    ...primaries,
+  }
 }
 
 export const writeOpencodeHelperAgents = async (checkout: string) => {

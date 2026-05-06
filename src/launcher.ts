@@ -20,7 +20,7 @@ import {KIND_GIT_ISSUE} from "./events.js"
 import {buildFinalResponseRecord, createOutputTailCapture, type OutputTailSnapshot} from "./final-response.js"
 import {redactSensitiveText} from "./log-redaction.js"
 import {assertModelSelectionValid, resolveModelAttemptPlan, resolveModelSelection} from "./model-profiles.js"
-import {selectOpencodePrimaryAgent, writeOpencodeManagedAgents} from "./opencode-agents.js"
+import {opencodeManagedAgentConfig, selectOpencodePrimaryAgent, writeOpencodeManagedAgents} from "./opencode-agents.js"
 import {detectOpenCodeBlockedState, detectOpenCodeHardFailure, detectOpenCodeToolBoundaries, type OpenCodeHardFailure} from "./opencode-log.js"
 import {writeOpenCodeRuntimeHandoff} from "./opencode-runtime.js"
 import {inspectOpenCodeDbState, openCodeRuntimeStateHardFailure, resolveOpenCodeDbPath} from "./opencode-state.js"
@@ -490,33 +490,35 @@ const subjectEnv = (subject?: ResolvedTaskSubject): Record<string, string> => su
 
 const writeOcfg = async (agent: PreparedAgent, checkout: string, runtime?: AgentRuntime) => {
   const mcp = agent.app.config.browser.mcp
-  if (mcp.command.length === 0) return
-
   const dir = path.join(checkout, ".opencode")
   await ensureDir(dir)
-  const browserProfile = path.join(agent.paths.browser, "profile")
-  const browserOutput = path.join(agent.paths.artifacts, "playwright")
-  const runtimeDirs = checkoutRuntimeDirs(checkout)
-  await ensureDir(browserProfile)
-  await ensureDir(browserOutput)
-
-  const command = [...mcp.command]
-  if (command[0]) {
-    command[0] = resolveHostCommand(command[0])
-  }
-  if (agent.app.config.browser.executablePath) {
-    command.push("--executable-path", agent.app.config.browser.executablePath)
-  }
-  command.push("--user-data-dir", browserProfile)
-  command.push("--output-dir", browserOutput)
-  command.push("--save-session")
-  command.push("--sandbox")
-  if (agent.app.config.browser.headless) {
-    command.push("--headless")
+  const cfg: Record<string, unknown> = {
+    agent: opencodeManagedAgentConfig(agent, checkout),
   }
 
-  const cfg = {
-    mcp: {
+  if (mcp.command.length > 0) {
+    const browserProfile = path.join(agent.paths.browser, "profile")
+    const browserOutput = path.join(agent.paths.artifacts, "playwright")
+    const runtimeDirs = checkoutRuntimeDirs(checkout)
+    await ensureDir(browserProfile)
+    await ensureDir(browserOutput)
+
+    const command = [...mcp.command]
+    if (command[0]) {
+      command[0] = resolveHostCommand(command[0])
+    }
+    if (agent.app.config.browser.executablePath) {
+      command.push("--executable-path", agent.app.config.browser.executablePath)
+    }
+    command.push("--user-data-dir", browserProfile)
+    command.push("--output-dir", browserOutput)
+    command.push("--save-session")
+    command.push("--sandbox")
+    if (agent.app.config.browser.headless) {
+      command.push("--headless")
+    }
+
+    cfg.mcp = {
       [mcp.name]: {
         type: "local",
         enabled: true,
@@ -536,7 +538,7 @@ const writeOcfg = async (agent: PreparedAgent, checkout: string, runtime?: Agent
           OPENTEAM_AGENT_NPUB: getSelfNpub(agent),
         },
       },
-    },
+    }
   }
 
   await writeFile(path.join(dir, "opencode.json"), `${JSON.stringify(cfg, null, 2)}\n`)

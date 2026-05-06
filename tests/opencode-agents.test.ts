@@ -6,8 +6,10 @@ import {
   opencodeHelperAgentPath,
   opencodeHelperAgentPromptLines,
   opencodeHelperAgents,
+  opencodeManagedAgentConfig,
   opencodePrimaryAgentName,
   opencodePrimaryAgentPath,
+  runtimeExternalDirectoryRules,
   selectOpencodePrimaryAgent,
   writeOpencodeManagedAgents,
   writeOpencodeHelperAgents,
@@ -197,6 +199,51 @@ describe("opencode helper agents", () => {
     expect(orchestrator).toContain("question: allow")
     expect(orchestrator).toContain("task: deny")
     expect(orchestrator).toContain("You may ask concise operator questions")
+  })
+
+  test("orders runtime external-directory rules with the wildcard first", async () => {
+    const checkout = await tempCheckout()
+    const rules = runtimeExternalDirectoryRules(checkout)
+
+    expect(Object.keys(rules)).toEqual([
+      "*",
+      `${path.dirname(checkout)}/.openteam-runtime/opencode/**`,
+      `${path.dirname(checkout)}/.openteam-runtime/tmp/**`,
+      `${path.dirname(checkout)}/.openteam-runtime/cache/**`,
+      `${path.dirname(checkout)}/.openteam-runtime/artifacts/**`,
+    ])
+    expect(rules["*"]).toBe("deny")
+    expect(rules[`${path.dirname(checkout)}/.openteam-runtime/tmp/**`]).toBe("allow")
+    expect(rules[`${path.dirname(checkout)}/.openteam-runtime/artifacts/**`]).toBe("allow")
+    expect(rules[`${path.dirname(checkout)}/.openteam-runtime/opencode/**`]).toBe("deny")
+  })
+
+  test("builds JSON agent config with effective runtime directory permissions", async () => {
+    const checkout = await tempCheckout()
+    const config = opencodeManagedAgentConfig(prepared("builder"), checkout)
+    const builder = config["openteam-builder"] as {
+      mode: string
+      prompt: string
+      permission: {external_directory: Record<string, string>; question: string; edit: string; task: string}
+    }
+
+    expect(builder.mode).toBe("primary")
+    expect(builder.prompt).toContain("You are openteam-builder")
+    expect(builder.permission.question).toBe("deny")
+    expect(builder.permission.edit).toBe("allow")
+    expect(builder.permission.task).toBe("allow")
+    expect(Object.keys(builder.permission.external_directory)).toEqual([
+      "*",
+      `${path.dirname(checkout)}/.openteam-runtime/opencode/**`,
+      `${path.dirname(checkout)}/.openteam-runtime/tmp/**`,
+      `${path.dirname(checkout)}/.openteam-runtime/cache/**`,
+      `${path.dirname(checkout)}/.openteam-runtime/artifacts/**`,
+    ])
+    expect(builder.permission.external_directory["*"]).toBe("deny")
+    expect(builder.permission.external_directory[`${path.dirname(checkout)}/.openteam-runtime/tmp/**`]).toBe("allow")
+    expect(builder.permission.external_directory[`${path.dirname(checkout)}/.openteam-runtime/cache/**`]).toBe("allow")
+    expect(builder.permission.external_directory[`${path.dirname(checkout)}/.openteam-runtime/artifacts/**`]).toBe("allow")
+    expect(builder.permission.external_directory[`${path.dirname(checkout)}/.openteam-runtime/opencode/**`]).toBe("deny")
   })
 
   test("primary agent permissions reflect worker profile capability overrides", async () => {
