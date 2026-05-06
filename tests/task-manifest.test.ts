@@ -162,6 +162,10 @@ const input = (checkout: string): BuildTaskManifestInput => {
       version: 1,
       kind: "repair-evidence",
       fromRunId: "run-parent",
+      originRunId: "run-root",
+      originTask: "fix the original thing",
+      priorTask: "repair failed evidence",
+      ancestry: [{runId: "run-root", task: "fix the original thing", state: "failed"}],
       fromRunFile: "/repo/runtime/runs/run-parent.json",
       contextId: "ctx-a",
       priorState: "needs-review",
@@ -259,6 +263,10 @@ describe("task manifest", () => {
     expect(text).not.toContain("/work/.openteam-runtime")
     expect(text).not.toContain("/repo/runtime/runs")
     expect(manifest.task.continuation?.missingEvidence).toEqual(["repo-native validation"])
+    expect(manifest.task.continuation?.originRunId).toBe("run-root")
+    expect(manifest.task.continuation?.originTask).toBe("fix the original thing")
+    expect(manifest.task.continuation?.priorTask).toBe("repair failed evidence")
+    expect(manifest.task.continuation?.ancestry?.[0]?.runId).toBe("run-root")
     expect(text).not.toContain("provider-token-secret")
     expect(text).not.toContain("agent-secret")
     expect(text).not.toContain("nak-secret")

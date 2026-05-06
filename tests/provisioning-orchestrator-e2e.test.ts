@@ -53,6 +53,7 @@ import {
   continuationEvidenceForCarry,
   continuationPromptLines,
   createContinuationTaskItem,
+  createContinuationTaskItemWithLineage,
 } from "../src/run-continuation.js"
 import {
   evaluateContinuationGate,
@@ -1713,6 +1714,113 @@ describe("Round 7 - continuation and repair flows", () => {
 
     expect(item.task).toContain("Finish implementation")
     expect(item.task).not.toContain("repair the missing or weak verification evidence")
+  })
+
+  test("multi-hop continuations preserve the root task in task text and prompt", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const app = makeApp(runtimeRoot)
+    const root = runRecord(app, {
+      runId: "builder-root",
+      task: "Implement the original Budabit repository UI behavior",
+      state: "stale",
+      context: {id: "ctx1", checkout: "/tmp/checkout", branch: "openteam/test"},
+    })
+    const first = runRecord(app, {
+      runId: "builder-first-continue",
+      task: "Focused recovery for the stale Budabit context",
+      state: "failed",
+      context: root.context,
+      continuation: createContinuationTaskItem(root, {
+        kind: "continue",
+        task: "Focused recovery for the stale Budabit context",
+      }).continuation,
+    })
+    await writeRun(root)
+
+    const item = await createContinuationTaskItemWithLineage(first, {kind: "continue"})
+    const prompt = continuationPromptLines(item.continuation).join("\n")
+
+    expect(item.task).toContain("Original task: Implement the original Budabit repository UI behavior")
+    expect(item.task).not.toContain("Original task: Focused recovery for the stale Budabit context")
+    expect(item.continuation?.originRunId).toBe(root.runId)
+    expect(item.continuation?.originTask).toBe("Implement the original Budabit repository UI behavior")
+    expect(item.continuation?.priorTask).toBe("Focused recovery for the stale Budabit context")
+    expect(prompt).toContain("Original run: builder-root")
+    expect(prompt).toContain("Original task: Implement the original Budabit repository UI behavior")
+    expect(prompt).toContain("Immediate prior task: Focused recovery for the stale Budabit context")
+    expect(prompt).toContain("Continuation ancestry: builder-root")
+    expect(prompt).toContain("Continuation ancestry: builder-first-continue")
+  })
+
+  test("continuation handoff separates original and immediate prior tasks", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(checkout, {recursive: true})
+    const app = makeApp(runtimeRoot)
+    const root = runRecord(app, {
+      runId: "builder-root",
+      task: "Build the original repo UI",
+      context: {id: "ctx1", checkout, branch: "openteam/test"},
+    })
+    const first = runRecord(app, {
+      runId: "builder-first-continue",
+      task: "Recover verification after failure",
+      state: "failed",
+      context: root.context,
+      continuation: createContinuationTaskItem(root, {
+        kind: "continue",
+        task: "Recover verification after failure",
+      }).continuation,
+    })
+    await writeRun(root)
+    const item = await createContinuationTaskItemWithLineage(first, {
+      kind: "continue",
+      task: "Finish from recovered checkout",
+    })
+
+    const file = await writeContinuationHandoff(app, first, item)
+    const text = await readFile(file!, "utf8")
+
+    expect(text).toContain("## Original Task\n\nBuild the original repo UI")
+    expect(text).toContain("## Immediate Prior Task\n\nRecover verification after failure")
+    expect(text).toContain("- original run: builder-root")
+    expect(text).toContain("- builder-root: running")
+    expect(text).toContain("- builder-first-continue: failed")
+  })
+
+  test("continuation recovers original task from checkout handoff when prior job lacks continuation metadata", async () => {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), "openteam-runtime-"))
+    const checkout = path.join(runtimeRoot, "checkout")
+    await mkdir(path.join(checkout, ".openteam", "context"), {recursive: true})
+    await writeFile(path.join(checkout, ".openteam", "context", "continuation-summary.md"), [
+      "# Continuation Handoff",
+      "",
+      "- prior run: builder-root",
+      "- prior state: stale",
+      "",
+      "## Prior Task",
+      "",
+      "Implement the actual original repository task",
+      "",
+      "## Continuation Task",
+      "",
+      "Recover the stale worker context",
+    ].join("\n"))
+    const app = makeApp(runtimeRoot)
+    const plainRecoveryJob = runRecord(app, {
+      runId: "builder-plain-recovery-job",
+      task: "Continue the failed work from managed context",
+      state: "failed",
+      context: {id: "ctx1", checkout, branch: "openteam/test"},
+    })
+
+    const item = await createContinuationTaskItemWithLineage(plainRecoveryJob, {kind: "continue"})
+
+    expect(item.task).toContain("Original task: Implement the actual original repository task")
+    expect(item.continuation?.originRunId).toBe("builder-root")
+    expect(item.continuation?.originTask).toBe("Implement the actual original repository task")
+    expect(item.continuation?.priorTask).toBe("Continue the failed work from managed context")
+    expect(item.continuation?.ancestry?.map(item => item.runId)).toEqual(["builder-root", "builder-plain-recovery-job"])
   })
 
   test("run-family gate blocks default generic continue tasks", async () => {

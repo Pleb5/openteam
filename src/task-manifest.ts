@@ -85,6 +85,15 @@ type ManifestContinuation = {
       : never
     : never
   fromRunId: string
+  originRunId?: string
+  originTask?: string
+  priorTask?: string
+  ancestry?: Array<{
+    runId: string
+    task: string
+    state: string
+    failureCategory?: string
+  }>
   contextId: string
   checkout?: string
   sanitizedHandoff: string
@@ -279,6 +288,10 @@ const continuationSummary = (continuation?: TaskItem["continuation"]): ManifestC
     version: continuation.version,
     kind: continuation.kind,
     fromRunId: continuation.fromRunId,
+    originRunId: continuation.originRunId,
+    originTask: continuation.originTask,
+    priorTask: continuation.priorTask,
+    ancestry: continuation.ancestry,
     contextId: continuation.contextId,
     checkout: "withheld; use sanitizedHandoff in the current checkout",
     sanitizedHandoff: ".openteam/context/continuation-summary.md",

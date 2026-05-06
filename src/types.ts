@@ -296,6 +296,15 @@ export type TaskContinuation = {
   kind: TaskContinuationKind
   fromRunId: string
   originRunId?: string
+  originRunFile?: string
+  originTask?: string
+  priorTask?: string
+  ancestry?: Array<{
+    runId: string
+    task: string
+    state: TaskState
+    failureCategory?: string
+  }>
   fromRunFile?: string
   contextId: string
   checkout?: string

@@ -5,6 +5,7 @@ import {diagnoseRun} from "./commands/runs.js"
 import {evaluateEvidencePolicy, type EvidencePolicyView} from "./evidence-policy.js"
 import {redactSensitiveText} from "./log-redaction.js"
 import {loadRepoRegistry} from "./repo.js"
+import {resolveContinuationLineage} from "./run-continuation.js"
 import {resolveRunFamilyKey} from "./reporting-policy.js"
 import type {AppCfg, TaskItem, TaskRunRecord} from "./types.js"
 
@@ -388,6 +389,17 @@ export const writeContinuationHandoff = async (
   if (!checkout) return undefined
   const diagnosis = await diagnoseRun(app, record).catch(() => undefined)
   const policy = evaluateEvidencePolicy(record.doneContract, record.verification?.results ?? [])
+  const lineage = await resolveContinuationLineage(record).catch(() => [record])
+  const root = lineage[0] ?? record
+  const originalTask = item.continuation?.originTask ?? record.continuation?.originTask ?? root.task
+  const originalRunId = item.continuation?.originRunId ?? record.continuation?.originRunId ?? root.runId
+  const priorTask = item.continuation?.priorTask ?? record.task
+  const ancestry = item.continuation?.ancestry ?? lineage.map(item => ({
+    runId: item.runId,
+    task: item.task,
+    state: item.state,
+    failureCategory: item.failureCategory,
+  }))
   const logTail = record.logs?.opencode && existsSync(record.logs.opencode)
     ? tailLines(redactSensitiveText(await readFile(record.logs.opencode, "utf8").catch(() => "")), 80)
     : ""
@@ -404,10 +416,19 @@ export const writeContinuationHandoff = async (
     `- PR eligible: ${policy.prEligible ? "yes" : "no"}`,
     `- recommended action: ${policy.recommendedAction}`,
     diagnosis?.reasons.length ? `- diagnosis: ${diagnosis.reasons.join("; ")}` : "",
+    `- original run: ${originalRunId}`,
     "",
-    "## Prior Task",
+    "## Original Task",
     "",
-    redactSensitiveText(record.task),
+    redactSensitiveText(originalTask),
+    "",
+    "## Immediate Prior Task",
+    "",
+    redactSensitiveText(priorTask),
+    "",
+    "## Continuation Ancestry",
+    "",
+    ...ancestry.slice(0, 20).map(item => `- ${item.runId}: ${item.state}${item.failureCategory ? ` (${item.failureCategory})` : ""} - ${redactSensitiveText(item.task)}`),
     "",
     "## Continuation Task",
     "",

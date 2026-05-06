@@ -17,6 +17,7 @@ import {
   releaseOperatorRepoContextHold,
   releaseRepoContext,
 } from "./repo.js"
+import {resolveContinuationLineage} from "./run-continuation.js"
 import type {AppCfg, TaskRunRecord, TaskState} from "./types.js"
 
 export type OperatorTakeoverOptions = {
@@ -126,6 +127,8 @@ export const buildOperatorTakeoverHandoff = async (
   const files = changedFiles(status)
   const logTail = await readSanitizedLogTail(record.logs?.opencode)
   const ancestry = await continuationAncestryLines(record)
+  const lineage = await resolveContinuationLineage(record).catch(() => [record])
+  const root = lineage[0] ?? record
   const command = options.command ?? opencodeCommand(app, checkout)
 
   return `${[
@@ -135,7 +138,9 @@ export const buildOperatorTakeoverHandoff = async (
     "",
     "## Prior Discussion Summary",
     `- prior run: ${record.runId}`,
-    `- original task: ${redactSensitiveText(record.task)}`,
+    `- original run: ${record.continuation?.originRunId ?? root.runId}`,
+    `- original task: ${redactSensitiveText(record.continuation?.originTask ?? root.task)}`,
+    record.continuation?.priorTask ? `- immediate prior task: ${redactSensitiveText(record.continuation.priorTask)}` : "",
     `- worker role/mode: ${record.role}${record.mode ? `/${record.mode}` : ""}`,
     `- target: ${record.target ?? "(unset)"}`,
     `- prior state: ${record.state}`,

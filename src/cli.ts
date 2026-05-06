@@ -28,7 +28,7 @@ import {
   readRunRecord,
   stopRunRecord,
 } from "./commands/runs.js"
-import {createContinuationTaskItem} from "./run-continuation.js"
+import {createContinuationTaskItemWithLineage} from "./run-continuation.js"
 import {
   evaluateContinuationGate,
   formatContinuationGateError,
@@ -503,7 +503,7 @@ const main = async () => {
   if (cmd === "runs" && (sub === "continue" || sub === "repair-evidence" || sub === "retry")) {
     const record = await readRunRecord(app, must(args[2] ?? "", "run-id"))
     const explicitTask = Boolean(value(args, "--task").trim())
-    const item = createContinuationTaskItem(record, {
+    const item = await createContinuationTaskItemWithLineage(record, {
       kind: sub,
       task: value(args, "--task") || undefined,
       model: value(args, "--model") || undefined,
